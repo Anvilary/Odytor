@@ -1,0 +1,249 @@
+"""GitHub REST and GraphQL API client for Git Plus."""
+
+from __future__ import annotations
+
+import re
+import time
+from typing import Any
+
+import requests
+
+from git_plus.diagnostics import safe_payload, safe_text
+from git_plus.errors import APIError, SecurityError, ValidationError
+
+_REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_HEX_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
+def validate_repo(repo: str) -> tuple[str, str]:
+    """Validate repository format 'owner/repo' and return (owner, repo)."""
+    cleaned = repo.strip()
+    if not _REPO_PATTERN.fullmatch(cleaned):
+        raise ValidationError(
+            f"Invalid repository format '{repo}'. Expected 'owner/repo'."
+        )
+    owner, name = cleaned.split("/", 1)
+    if owner in {".", ".."} or name in {".", ".."}:
+        raise SecurityError(f"Prohibited repository path '{repo}'.")
+    return owner, name
+
+
+def validate_sha(sha: str, name: str = "commit SHA") -> str:
+    """Validate 40-character hex commit SHA."""
+    cleaned = sha.strip()
+    if not _HEX_SHA_PATTERN.fullmatch(cleaned):
+        raise ValidationError(
+            f"Invalid {name} '{sha}'. Expected exact 40-character hexadecimal SHA."
+        )
+    return cleaned.lower()
+
+
+class GitHubClient:
+    """Stateless GitHub API client with automatic retry, pagination, and redaction."""
+
+    def __init__(
+        self,
+        token: str | None = None,
+        base_url: str = "https://api.github.com",
+        timeout: float = 30.0,
+        max_retries: int = 3,
+        session: requests.Session | None = None,
+    ) -> None:
+        self.token = token
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.session = session or requests.Session()
+
+    def _headers(self, accept: str = "application/vnd.github+json") -> dict[str, str]:
+        headers = {
+            "Accept": accept,
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "Git-Plus-MCP/0.1.0",
+        }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        return headers
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_data: Any = None,
+        data: Any = None,
+        accept: str = "application/vnd.github+json",
+        raw: bool = False,
+    ) -> requests.Response:
+        """Execute a GitHub API request with bounded retry and rate limit checks."""
+        url = path if path.startswith("http") else f"{self.base_url}/{path.lstrip('/')}"
+        headers = self._headers(accept=accept)
+
+        last_error: Exception | None = None
+        for attempt in range(self.max_retries):
+            try:
+                resp = self.session.request(
+                    method=method,
+                    url=url,
+                    params=params,
+                    json=json_data,
+                    data=data,
+                    headers=headers,
+                    timeout=self.timeout,
+                )
+
+                if resp.status_code in {502, 503, 504} and attempt < self.max_retries - 1:
+                    time.sleep(0.5 * (2**attempt))
+                    continue
+
+                if resp.status_code == 403 and "rate limit exceeded" in resp.text.lower():
+                    reset_time = resp.headers.get("x-ratelimit-reset", "unknown")
+                    raise APIError(
+                        f"GitHub API rate limit exceeded. Reset at epoch timestamp: {reset_time}",
+                        status_code=403,
+                        diagnostic={"classification": "rate_limit_exceeded", "reset": reset_time},
+                    )
+
+                if not resp.ok:
+                    diagnostic = {
+                        "status_code": resp.status_code,
+                        "url": path,
+                        "method": method,
+                        "message": safe_text(resp.text, 2048),
+                    }
+                    raise APIError(
+                        f"GitHub API request failed with status {resp.status_code}: {resp.text[:200]}",
+                        status_code=resp.status_code,
+                        diagnostic=diagnostic,
+                    )
+
+                return resp
+
+            except requests.RequestException as exc:
+                last_error = exc
+                if attempt < self.max_retries - 1:
+                    time.sleep(0.5 * (2**attempt))
+                    continue
+                break
+
+        msg = safe_text(str(last_error), 512) if last_error else "Network error"
+        raise APIError(
+            f"GitHub request connection failed: {msg}",
+            diagnostic={"classification": "network_error", "message": msg},
+        )
+
+    def get_pr(self, repo: str, number: int) -> dict[str, Any]:
+        """Fetch pull request metadata."""
+        validate_repo(repo)
+        resp = self.request("GET", f"repos/{repo}/pulls/{number}")
+        return resp.json()
+
+    def get_pr_diff(self, repo: str, number: int) -> str:
+        """Fetch unified diff text for a pull request."""
+        validate_repo(repo)
+        resp = self.request(
+            "GET",
+            f"repos/{repo}/pulls/{number}",
+            accept="application/vnd.github.v3.diff",
+        )
+        return resp.text
+
+    def get_pr_files(
+        self,
+        repo: str,
+        number: int,
+        per_page: int = 100,
+        page: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Fetch changed files page for a pull request."""
+        validate_repo(repo)
+        resp = self.request(
+            "GET",
+            f"repos/{repo}/pulls/{number}/files",
+            params={"per_page": per_page, "page": page},
+        )
+        return resp.json()
+
+    def get_pr_reviews(
+        self,
+        repo: str,
+        number: int,
+        per_page: int = 100,
+        page: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Fetch reviews page for a pull request."""
+        validate_repo(repo)
+        resp = self.request(
+            "GET",
+            f"repos/{repo}/pulls/{number}/reviews",
+            params={"per_page": per_page, "page": page},
+        )
+        return resp.json()
+
+    def get_pr_comments(
+        self,
+        repo: str,
+        number: int,
+        per_page: int = 100,
+        page: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Fetch PR issue comments page."""
+        validate_repo(repo)
+        resp = self.request(
+            "GET",
+            f"repos/{repo}/issues/{number}/comments",
+            params={"per_page": per_page, "page": page},
+        )
+        return resp.json()
+
+    def get_check_runs(self, repo: str, ref: str) -> dict[str, Any]:
+        """Fetch check runs for a commit ref."""
+        validate_repo(repo)
+        resp = self.request(
+            "GET",
+            f"repos/{repo}/commits/{ref}/check-runs",
+            params={"per_page": 100},
+        )
+        return resp.json()
+
+    def get_commit_status(self, repo: str, ref: str) -> dict[str, Any]:
+        """Fetch combined commit status for a commit ref."""
+        validate_repo(repo)
+        resp = self.request("GET", f"repos/{repo}/commits/{ref}/status")
+        return resp.json()
+
+    def get_file_content(self, repo: str, path: str, ref: str | None = None) -> str | None:
+        """Fetch decoded raw file content from repository if available."""
+        validate_repo(repo)
+        params: dict[str, Any] = {}
+        if ref:
+            params["ref"] = ref
+        try:
+            resp = self.request(
+                "GET",
+                f"repos/{repo}/contents/{path.lstrip('/')}",
+                params=params,
+                accept="application/vnd.github.raw",
+            )
+            return resp.text
+        except APIError as err:
+            if err.status_code == 404:
+                return None
+            raise
+
+    def graphql(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Execute a GitHub GraphQL query."""
+        payload: dict[str, Any] = {"query": query}
+        if variables:
+            payload["variables"] = variables
+        resp = self.request("POST", "graphql", json_data=payload)
+        data = resp.json()
+        if "errors" in data and not data.get("data"):
+            errors = data.get("errors", [])
+            msg = errors[0].get("message", "GraphQL query failed") if errors else "GraphQL error"
+            raise APIError(
+                f"GraphQL query error: {msg}",
+                diagnostic={"classification": "graphql_error", "errors": errors},
+            )
+        return data.get("data", {})
