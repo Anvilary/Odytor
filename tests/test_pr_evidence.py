@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock
 import pytest
-from git_plus.errors import RevisionMismatchError, ValidationError
+from git_plus.errors import APIError, RevisionMismatchError, ValidationError
 from git_plus.github import GitHubClient
 from git_plus.pr_evidence import get_pr_evidence
 
@@ -126,3 +126,47 @@ def test_pr_evidence_invalid_repo(mock_client: MagicMock) -> None:
 def test_pr_evidence_invalid_number(mock_client: MagicMock) -> None:
     with pytest.raises(ValidationError):
         get_pr_evidence(mock_client, "owner/repo", -1)
+
+
+def test_empty_file_page_is_incomplete_when_pr_has_changed_files(mock_client: MagicMock) -> None:
+    mock_client.get_pr_files.return_value = []
+    res = get_pr_evidence(mock_client, "owner/repo", 42)
+    assert res["files_complete"] is False
+    assert res["evidence_complete"] is False
+
+
+def test_omitted_sections_are_not_reported_complete(mock_client: MagicMock) -> None:
+    res = get_pr_evidence(
+        mock_client, "owner/repo", 42,
+        include_files=False, include_diff=False, include_reviews=False,
+        include_checks=False, include_instructions=False,
+    )
+    assert res["evidence_complete"] is False
+
+
+def test_base_drift_marks_snapshot_inconsistent(mock_client: MagicMock) -> None:
+    initial = mock_client.get_pr.return_value
+    final = {**initial, "base": {"sha": "2222222222222222222222222222222222222222", "ref": "main"}}
+    mock_client.get_pr.side_effect = [initial, final]
+    res = get_pr_evidence(mock_client, "owner/repo", 42)
+    assert res["inconsistent_snapshot"] is True
+    assert res["evidence_complete"] is False
+
+
+def test_thread_comment_page_limit_marks_reviews_incomplete(mock_client: MagicMock) -> None:
+    mock_client.graphql.return_value["repository"]["pullRequest"]["reviewThreads"] = {
+        "pageInfo": {"hasNextPage": False},
+        "nodes": [{
+            "comments": {"pageInfo": {"hasNextPage": True}, "nodes": []},
+        }],
+    }
+    res = get_pr_evidence(mock_client, "owner/repo", 42)
+    assert res["reviews_complete"] is False
+    assert res["evidence_complete"] is False
+
+
+def test_graphql_failure_marks_reviews_incomplete(mock_client: MagicMock) -> None:
+    mock_client.graphql.side_effect = APIError("GraphQL unavailable")
+    res = get_pr_evidence(mock_client, "owner/repo", 42)
+    assert res["reviews_complete"] is False
+    assert res["evidence_complete"] is False

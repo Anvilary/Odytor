@@ -69,3 +69,23 @@ def test_no_truncation_preserves_completeness() -> None:
     assert sanitized["complete"] is True
     assert sanitized["diff_complete"] is True
     assert sanitized["evidence_complete"] is True
+
+
+def test_entire_response_has_a_byte_bound_and_honest_flags():
+    import json
+    payload = {'head_sha': 'a'*40, 'conflicts': [
+        {'path': f'file{i}.py', 'regions': [{'text': 'x'*8000}], 'regions_complete': True}
+        for i in range(100)], 'paths_complete': True, 'regions_complete': True}
+    result = safe_payload(payload)
+    assert len(json.dumps(result).encode()) <= 65536
+    assert result['truncated']
+    assert not result['paths_complete'] and not result['regions_complete']
+    assert result['head_sha'] == 'a'*40
+
+
+def test_nested_region_truncation_clears_completeness():
+    payload = {'paths_complete': True, 'regions_complete': True,
+               'conflicts': [{'regions_complete': True, 'regions': [{'text': 'x'*100}]}]}
+    result = safe_payload(payload, limit=50)
+    assert not result['regions_complete']
+    assert not result['conflicts'][0]['regions_complete']

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from git_plus.diagnostics import safe_payload, safe_text
+from git_plus.diagnostics import safe_payload, safe_text, safe_text_tracked
 from git_plus.errors import APIError, RevisionMismatchError, ValidationError
 from git_plus.github import GitHubClient, validate_repo, validate_sha
 
@@ -33,6 +33,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
           line
           originalLine
           comments(first: 10) {
+            pageInfo { hasNextPage }
             nodes {
               id
               author {
@@ -58,6 +59,7 @@ def get_pr_evidence(
     expected_head: str | None = None,
     include_diff: bool = True,
     max_diff_lines: int = 500,
+    max_diff_bytes: int = 1048576,
     include_files: bool = True,
     include_reviews: bool = True,
     include_checks: bool = True,
@@ -69,6 +71,12 @@ def get_pr_evidence(
     owner, name = validate_repo(repo)
     if number < 1:
         raise ValidationError(f"Pull request number must be positive (got {number}).")
+    if not 1 <= files_page or not 1 <= files_per_page <= 100:
+        raise ValidationError("files_page must be positive and files_per_page must be between 1 and 100.")
+    if not 1 <= max_diff_bytes <= 8 * 1024 * 1024:
+        raise ValidationError("max_diff_bytes must be positive and at most 8 MiB.")
+    if not 1 <= max_diff_lines <= 5000:
+        raise ValidationError("max_diff_lines must be positive.")
 
     if expected_head:
         expected_head = validate_sha(expected_head, "expected_head")
@@ -127,7 +135,7 @@ def get_pr_evidence(
             )
         result["files"] = file_entries
         total_files = initial_pr.get("changed_files", len(file_entries))
-        files_complete = len(file_entries) >= total_files or len(file_entries) == 0
+        files_complete = files_page == 1 and len(file_entries) >= total_files
         result["files_complete"] = files_complete
         result["files_page"] = files_page
     else:
@@ -136,7 +144,9 @@ def get_pr_evidence(
     diff_complete = True
     if include_diff:
         raw_diff = client.get_pr_diff(repo, number)
-        diff_lines = raw_diff.splitlines()
+        bounded_diff, byte_cut = safe_text_tracked(raw_diff, limit=None, max_bytes=max_diff_bytes)
+        redacted = bounded_diff != raw_diff and not byte_cut
+        diff_lines = bounded_diff.splitlines()
         total_diff_lines = len(diff_lines)
         if total_diff_lines > max_diff_lines:
             selected_lines = diff_lines[:max_diff_lines]
@@ -144,9 +154,15 @@ def get_pr_evidence(
             result["diff"] = "\n".join(selected_lines)
             result["diff_truncated"] = True
         else:
-            result["diff"] = raw_diff
+            result["diff"] = bounded_diff
             result["diff_truncated"] = False
-        result["diff_total_lines"] = total_diff_lines
+        result["diff_redacted"] = redacted
+        result["diff_truncated"] = result["diff_truncated"] or byte_cut
+        diff_complete = diff_complete and not byte_cut and not redacted
+        diff_file_count = sum(line.startswith("diff --git ") for line in raw_diff.splitlines())
+        if diff_file_count != initial_pr.get("changed_files", diff_file_count):
+            diff_complete = False
+        result["diff_total_lines"] = len(raw_diff.splitlines())
         result["diff_returned_lines"] = min(total_diff_lines, max_diff_lines)
         result["diff_complete"] = diff_complete
     else:
@@ -156,6 +172,8 @@ def get_pr_evidence(
     if include_reviews:
         try:
             reviews_list = client.get_pr_reviews(repo, number)
+            if len(reviews_list) >= 100:
+                reviews_complete = False
             result["reviews"] = [
                 {
                     "id": r.get("id"),
@@ -181,6 +199,8 @@ def get_pr_evidence(
             has_next = threads_data.get("pageInfo", {}).get("hasNextPage", False)
             if has_next:
                 reviews_complete = False
+            if any(n.get("comments", {}).get("pageInfo", {}).get("hasNextPage") for n in nodes):
+                reviews_complete = False
             result["review_threads"] = [
                 {
                     "id": node.get("id"),
@@ -202,6 +222,7 @@ def get_pr_evidence(
             ]
         except APIError:
             result["review_threads"] = []
+            reviews_complete = False
         result["reviews_complete"] = reviews_complete
     else:
         result["reviews_complete"] = False
@@ -211,6 +232,8 @@ def get_pr_evidence(
         try:
             check_runs_data = client.get_check_runs(repo, initial_head)
             runs = check_runs_data.get("check_runs", [])
+            if len(runs) >= 100 or check_runs_data.get("total_count", len(runs)) > len(runs):
+                checks_complete = False
             result["check_runs"] = [
                 {
                     "id": run.get("id"),
@@ -244,6 +267,10 @@ def get_pr_evidence(
             }
         except APIError:
             result["combined_status"] = None
+            checks_complete = False
+        else:
+            if status_data.get("total_count", len(status_data.get("statuses", []))) > len(status_data.get("statuses", [])):
+                checks_complete = False
         result["checks_complete"] = checks_complete
     else:
         result["checks_complete"] = False
@@ -259,11 +286,12 @@ def get_pr_evidence(
 
     final_pr = client.get_pr(repo, number)
     final_head = final_pr.get("head", {}).get("sha", "")
-    if final_head != initial_head:
+    final_base = final_pr.get("base", {}).get("sha", "")
+    if final_head != initial_head or final_base != base_sha:
         result["inconsistent_snapshot"] = True
         result["evidence_complete"] = False
         result["snapshot_drift_warning"] = (
-            f"PR head moved during retrieval from {initial_head} to {final_head}."
+            f"PR head moved or base changed during retrieval (head {initial_head} to {final_head}, base {base_sha} to {final_base})."
         )
     else:
         result["inconsistent_snapshot"] = False
@@ -272,6 +300,11 @@ def get_pr_evidence(
             and diff_complete
             and reviews_complete
             and checks_complete
+            and include_files
+            and include_diff
+            and include_reviews
+            and include_checks
+            and include_instructions
         )
         result["evidence_complete"] = all_complete
 

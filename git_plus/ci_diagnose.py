@@ -171,6 +171,12 @@ def diagnose_ci(
 
     if expected_head:
         expected_head = validate_sha(expected_head, "expected_head")
+    if not 1 <= max_excerpts_per_job <= 100:
+        raise ValidationError("max_excerpts_per_job must be between 1 and 100.")
+    if run_id is not None and run_id < 1:
+        raise ValidationError("run_id must be positive.")
+    if job_id is not None and job_id < 1:
+        raise ValidationError("job_id must be positive.")
 
     pr = client.get_pr(repo, number)
     head_sha = pr.get("head", {}).get("sha", "")
@@ -179,14 +185,22 @@ def diagnose_ci(
 
     runs_data = client.get_workflow_runs(repo, head_sha=head_sha)
     runs = runs_data.get("workflow_runs", [])
+    evidence_complete = len(runs) < 30 and runs_data.get("total_count", len(runs)) <= len(runs)
+    matching_runs = [r for r in runs if str(r.get("head_sha", "")).casefold() == head_sha.casefold()]
+    if len(matching_runs) != len(runs):
+        evidence_complete = False
+    runs = matching_runs
 
     if run_id is not None:
-        runs = [r for r in runs if r.get("id") == run_id]
+        selected_runs = [r for r in runs if r.get("id") == run_id]
+        if not selected_runs:
+            evidence_complete = False
+        runs = selected_runs
 
     diagnosed_jobs: list[dict[str, Any]] = []
     overall_categories: set[str] = set()
-    evidence_complete = True
     logs_available = True
+    selected_job_found = False
 
     for run in runs:
         r_id = run.get("id")
@@ -195,9 +209,16 @@ def diagnose_ci(
 
         jobs_data = client.get_run_jobs(repo, r_id)
         jobs = jobs_data.get("jobs", [])
+        if len(jobs) >= 100 or jobs_data.get("total_count", len(jobs)) > len(jobs):
+            evidence_complete = False
 
         if job_id is not None:
-            jobs = [j for j in jobs if j.get("id") == job_id]
+            selected_jobs = [j for j in jobs if j.get("id") == job_id]
+            if not selected_jobs:
+                evidence_complete = False
+            else:
+                selected_job_found = True
+            jobs = selected_jobs
 
         for job in jobs:
             j_id = job.get("id")
@@ -206,7 +227,7 @@ def diagnose_ci(
             j_status = job.get("status")
 
             is_failed = j_conclusion in {"failure", "timed_out", "startup_failure", "cancelled"}
-            if not is_failed and job_id is None:
+            if not is_failed:
                 continue
 
             failed_steps: list[dict[str, Any]] = []
@@ -240,6 +261,8 @@ def diagnose_ci(
                     try:
                         cr_id = int(match.group(1))
                         raw_ann = client.get_check_run_annotations(repo, cr_id)
+                        if len(raw_ann) >= 100:
+                            evidence_complete = False
                         for a in raw_ann:
                             annotations.append(
                                 {
@@ -270,26 +293,50 @@ def diagnose_ci(
                 }
             )
 
+    if job_id is not None and not selected_job_found:
+        evidence_complete = False
+
     code_scanning_alerts: list[dict[str, Any]] = []
     if include_code_scanning:
-        head_ref = pr.get("head", {}).get("ref")
-        raw_alerts = client.get_code_scanning_alerts(repo, ref=f"refs/heads/{head_ref}")
+        try:
+            response = client.request(
+                "GET",
+                f"repos/{repo}/code-scanning/alerts",
+                params={"per_page": 100, "ref": f"refs/pull/{number}/head"},
+            )
+            raw_alerts = response.json()
+        except APIError:
+            raw_alerts = []
+            evidence_complete = False
+        if len(raw_alerts) >= 100:
+            evidence_complete = False
         for alert in raw_alerts:
+            instance = alert.get("most_recent_instance", {})
+            if str(instance.get("commit_sha", "")).casefold() != head_sha.casefold():
+                evidence_complete = False
+                continue
             code_scanning_alerts.append(
                 {
                     "number": alert.get("number"),
                     "rule_id": alert.get("rule", {}).get("id"),
                     "rule_description": alert.get("rule", {}).get("description"),
                     "severity": alert.get("rule", {}).get("severity"),
-                    "path": alert.get("most_recent_instance", {})
+                    "path": instance
                     .get("location", {})
                     .get("path"),
-                    "start_line": alert.get("most_recent_instance", {})
+                    "start_line": instance
                     .get("location", {})
                     .get("start_line"),
                 }
             )
 
+    final_pr = client.get_pr(repo, number)
+    final_head = final_pr.get("head", {}).get("sha", "")
+    final_base = final_pr.get("base", {}).get("sha", "")
+    snapshot_consistent = (
+        final_head.casefold() == head_sha.casefold()
+        and final_base.casefold() == pr.get("base", {}).get("sha", "").casefold()
+    )
     result = {
         "repo": repo,
         "number": number,
@@ -298,7 +345,14 @@ def diagnose_ci(
         "failure_categories": sorted(overall_categories),
         "failed_jobs": diagnosed_jobs,
         "code_scanning_alerts": code_scanning_alerts,
-        "evidence_complete": evidence_complete and logs_available,
+        "evidence_complete": (
+            evidence_complete
+            and logs_available
+            and snapshot_consistent
+            and include_annotations
+            and include_code_scanning
+        ),
+        "inconsistent_snapshot": not snapshot_consistent,
         "logs_available": logs_available,
     }
 

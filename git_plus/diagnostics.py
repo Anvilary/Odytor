@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from typing import Any
@@ -104,12 +105,15 @@ def safe_payload(
     limit: int | None = DEFAULT_TEXT_LIMIT,
     *,
     max_bytes: int | None = None,
+    total_bytes: int = DEFAULT_PAYLOAD_LIMIT,
 ) -> Any:
     """Enforce credential redaction and truncation tracking across arbitrary nested structures.
 
     Invariant: Whenever content is truncated, set diff_complete=False, complete=False,
     and evidence_complete=False. Populate truncated_fields with exact field paths.
     """
+    if total_bytes < 512:
+        raise ValueError("total_bytes must be at least 512.")
     result, _, _ = _safe_payload_track(
         payload,
         "",
@@ -118,7 +122,50 @@ def safe_payload(
         seen=set(),
         depth=0,
     )
+    if isinstance(result, dict):
+        # Per-string limits alone do not bound a response containing many records.
+        cuts = list(result.get("truncated_fields", []))
+        while len(json.dumps(result, ensure_ascii=True).encode()) > total_bytes:
+            candidates = [(len(json.dumps(v, ensure_ascii=True)), k) for k, v in result.items()
+                          if isinstance(v, (str, list, dict)) and (len(v) > 1 if isinstance(v, str) else bool(v)) and k != "truncated_fields"]
+            if not candidates:
+                return {"error": "Response metadata exceeds the byte limit.", "evidence_complete": False,
+                        "truncated": True, "truncated_fields": ["<root>"]}
+            _, key = max(candidates)
+            value = result[key]
+            if isinstance(value, str):
+                # Remove an old marker before cutting again.
+                value = value.removesuffix(TRUNCATION_MARKER)
+                result[key] = value[:len(value)//2] + TRUNCATION_MARKER if len(value) > 1 else ""
+            elif isinstance(value, list):
+                result[key] = value[:len(value)//2]
+            else:
+                result[key] = dict(list(value.items())[:len(value)//2])
+            cuts.append(key)
+            result["truncated"] = True
+            result["truncated_fields"] = sorted(set(cuts))
+            _mark_incomplete(result)
+        if result.get("truncated") and isinstance(result.get("diff"), str):
+            content = result["diff"].removesuffix(TRUNCATION_MARKER)
+            if result["diff"].endswith(TRUNCATION_MARKER):
+                content = content.rsplit("\n", 1)[0] if "\n" in content else ""
+                result["diff"] = content + TRUNCATION_MARKER
+            for count_key in ("returned_lines", "diff_returned_lines"):
+                if isinstance(result.get(count_key), int):
+                    result[count_key] = min(result[count_key], len(content.splitlines()))
     return result
+
+
+def _mark_incomplete(value: Any) -> None:
+    if isinstance(value, dict):
+        for key in value:
+            if key == "complete" or key.endswith("_complete"):
+                value[key] = False
+            else:
+                _mark_incomplete(value[key])
+    elif isinstance(value, list):
+        for item in value:
+            _mark_incomplete(item)
 
 
 def _safe_payload_track(
@@ -212,12 +259,7 @@ def _safe_payload_track(
 
             if all_truncated:
                 result_dict["truncated"] = True
-                if "diff_complete" in result_dict:
-                    result_dict["diff_complete"] = False
-                if "complete" in result_dict:
-                    result_dict["complete"] = False
-                if "evidence_complete" in result_dict:
-                    result_dict["evidence_complete"] = False
+                _mark_incomplete(result_dict)
 
                 if diff_was_cut and "returned_lines" in result_dict and isinstance(result_dict["returned_lines"], int):
                     diff_val = result_dict.get("diff")

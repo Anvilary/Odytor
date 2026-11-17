@@ -10,7 +10,7 @@ from git_plus.ci_diagnose import (
     diagnose_ci,
     extract_failure_excerpts,
 )
-from git_plus.errors import RevisionMismatchError, ValidationError
+from git_plus.errors import APIError, RevisionMismatchError, ValidationError
 from git_plus.github import GitHubClient
 
 
@@ -72,7 +72,7 @@ def test_diagnose_ci_integration() -> None:
     }
     mock_client.get_workflow_runs.return_value = {
         "workflow_runs": [
-            {"id": 1001, "name": "CI", "conclusion": "failure"}
+            {"id": 1001, "name": "CI", "conclusion": "failure", "head_sha": "aaaa1111bbbb2222cccc3333dddd4444eeee5555"}
         ]
     }
     mock_client.get_run_jobs.return_value = {
@@ -105,6 +105,7 @@ def test_diagnose_ci_integration() -> None:
         }
     ]
     mock_client.get_code_scanning_alerts.return_value = []
+    mock_client.request.return_value.json.return_value = []
 
     res = diagnose_ci(mock_client, "owner/repo", 10)
     assert res["number"] == 10
@@ -113,6 +114,114 @@ def test_diagnose_ci_integration() -> None:
     assert res["evidence_complete"] is True
     assert len(res["failed_jobs"][0]["annotations"]) == 1
     assert res["failed_jobs"][0]["annotations"][0]["path"] == "tests/test_foo.py"
+    mock_client.request.assert_called_once_with(
+        "GET", "repos/owner/repo/code-scanning/alerts",
+        params={"per_page": 100, "ref": "refs/pull/10/head"},
+    )
+
+
+def _minimal_ci_client() -> MagicMock:
+    client = MagicMock(spec=GitHubClient)
+    client.get_pr.side_effect = [
+        {"head": {"sha": "a" * 40}, "base": {"sha": "b" * 40}},
+        {"head": {"sha": "a" * 40}, "base": {"sha": "b" * 40}},
+    ]
+    client.get_workflow_runs.return_value = {"workflow_runs": []}
+    client.request.return_value.json.return_value = []
+    return client
+
+
+def test_diagnose_ci_excludes_run_with_different_head_sha() -> None:
+    client = _minimal_ci_client()
+    client.get_workflow_runs.return_value = {
+        "workflow_runs": [{"id": 1, "head_sha": "c" * 40, "conclusion": "failure"}]
+    }
+    res = diagnose_ci(client, "owner/repo", 10)
+    assert res["failed_jobs"] == []
+    assert res["evidence_complete"] is False
+    client.get_run_jobs.assert_not_called()
+
+
+def test_diagnose_ci_selected_successful_job_is_not_a_failure() -> None:
+    client = _minimal_ci_client()
+    client.get_workflow_runs.return_value = {
+        "workflow_runs": [{"id": 1, "head_sha": "a" * 40}]
+    }
+    client.get_run_jobs.return_value = {"jobs": [{"id": 2, "conclusion": "success"}]}
+    res = diagnose_ci(client, "owner/repo", 10, job_id=2)
+    assert res["failed_jobs"] == []
+    assert res["total_failed_jobs"] == 0
+
+
+def test_diagnose_ci_final_revision_drift_marks_incomplete() -> None:
+    client = _minimal_ci_client()
+    client.get_pr.side_effect = [
+        {"head": {"sha": "a" * 40}, "base": {"sha": "b" * 40}},
+        {"head": {"sha": "c" * 40}, "base": {"sha": "d" * 40}},
+    ]
+    res = diagnose_ci(client, "owner/repo", 10)
+    assert res["inconsistent_snapshot"] is True
+    assert res["evidence_complete"] is False
+
+
+@pytest.mark.parametrize("kind", ["runs", "jobs", "annotations"])
+def test_diagnose_ci_page_limits_mark_evidence_incomplete(kind: str) -> None:
+    client = _minimal_ci_client()
+    if kind == "runs":
+        client.get_workflow_runs.return_value = {
+            "workflow_runs": [{"id": idx + 1, "head_sha": "a" * 40} for idx in range(30)],
+            "total_count": 30,
+        }
+        client.get_run_jobs.return_value = {"jobs": []}
+    else:
+        client.get_workflow_runs.return_value = {
+            "workflow_runs": [{"id": 1, "head_sha": "a" * 40}]
+        }
+        jobs = [{"id": idx, "conclusion": "success"} for idx in range(100)]
+        if kind == "annotations":
+            jobs = [{
+                "id": 1, "conclusion": "failure",
+                "check_run_url": "/check-runs/3",
+            }]
+            client.get_check_run_annotations.return_value = [{} for _ in range(100)]
+            client.get_job_logs.return_value = "FAILED test_example"
+        client.get_run_jobs.return_value = {"jobs": jobs, "total_count": len(jobs)}
+    res = diagnose_ci(client, "owner/repo", 10)
+    assert res["evidence_complete"] is False
+
+
+def test_diagnose_ci_code_scanning_api_error_marks_incomplete() -> None:
+    client = _minimal_ci_client()
+    client.request.side_effect = APIError("Forbidden", status_code=403)
+    res = diagnose_ci(client, "owner/repo", 10)
+    assert res["evidence_complete"] is False
+
+
+def test_diagnose_ci_code_scanning_alerts_require_captured_commit() -> None:
+    client = _minimal_ci_client()
+    client.request.return_value.json.return_value = [
+        {"number": 1, "most_recent_instance": {"commit_sha": "a" * 40}},
+        {"number": 2, "most_recent_instance": {"commit_sha": "c" * 40}},
+    ]
+    res = diagnose_ci(client, "owner/repo", 10)
+    assert [a["number"] for a in res["code_scanning_alerts"]] == [1]
+    assert res["evidence_complete"] is False
+
+
+@pytest.mark.parametrize("field", ["run_id", "job_id"])
+def test_diagnose_ci_missing_selected_id_marks_incomplete(field: str) -> None:
+    client = _minimal_ci_client()
+    kwargs = {field: 99}
+    res = diagnose_ci(client, "owner/repo", 10, **kwargs)
+    assert res["evidence_complete"] is False
+
+
+@pytest.mark.parametrize("field", ["run_id", "job_id"])
+def test_diagnose_ci_rejects_nonpositive_selected_id(field: str) -> None:
+    client = _minimal_ci_client()
+    kwargs = {field: 0}
+    with pytest.raises(ValidationError):
+        diagnose_ci(client, "owner/repo", 10, **kwargs)
 
 
 def test_diagnose_ci_revision_mismatch() -> None:

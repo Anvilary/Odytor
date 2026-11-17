@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urljoin
 from typing import Any
 
 import requests
@@ -49,18 +49,21 @@ class GitHubClient:
         timeout: float = 30.0,
         max_retries: int = 3,
         session: requests.Session | None = None,
+        max_response_bytes: int = 8 * 1024 * 1024,
     ) -> None:
         parsed = urlsplit(base_url)
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise SecurityError("GitHub API URL must be HTTPS without credentials, query or fragment.")
-        if timeout <= 0 or max_retries < 1:
+        if timeout <= 0 or max_retries < 1 or max_response_bytes <= 0:
             raise ValidationError("Timeout and attempt count must be positive.")
         self.token = token
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.max_response_bytes = max_response_bytes
         self.max_retries = max_retries
         self.session = session or requests.Session()
         self.session.trust_env = False
+        self.session.auth = None
 
     def _headers(self, accept: str = "application/vnd.github+json") -> dict[str, str]:
         headers = {
@@ -93,26 +96,19 @@ class GitHubClient:
         last_error: Exception | None = None
         for attempt in range(attempts):
             try:
-                resp = self.session.request(
-                    method=method,
-                    url=url,
-                    params=params,
-                    json=json_data,
-                    data=data,
-                    headers=headers,
-                    timeout=self.timeout,
-                )
+                resp = self._bounded_request(method, url, params=params, json=json_data,
+                                             data=data, headers=headers)
 
                 if resp.status_code in {502, 503, 504} and attempt < attempts - 1:
                     time.sleep(0.5 * (2**attempt))
                     continue
 
-                if resp.status_code == 403 and "rate limit exceeded" in resp.text.lower():
+                if resp.status_code == 429 or (resp.status_code == 403 and (resp.headers.get("x-ratelimit-remaining") == "0" or "rate limit" in resp.text.lower())):
                     reset_time = resp.headers.get("x-ratelimit-reset", "unknown")
                     raise APIError(
                         f"GitHub API rate limit exceeded. Reset at epoch timestamp: {reset_time}",
-                        status_code=403,
-                        diagnostic={"classification": "rate_limit_exceeded", "reset": reset_time},
+                        status_code=resp.status_code,
+                        diagnostic={"classification": "rate_limit_exceeded", "reset": reset_time, "retry_after": resp.headers.get("retry-after")},
                     )
 
                 if not resp.ok:
@@ -120,10 +116,10 @@ class GitHubClient:
                         "status_code": resp.status_code,
                         "url": path,
                         "method": method,
-                        "message": safe_text(resp.text, 2048),
+                        "message": safe_text(resp.text.replace(self.token, "[REDACTED]") if self.token else resp.text, 2048),
                     }
                     raise APIError(
-                        f"GitHub API request failed with status {resp.status_code}: {safe_text(resp.text, 200)}",
+                        f"GitHub API request failed with status {resp.status_code}.",
                         status_code=resp.status_code,
                         diagnostic=diagnostic,
                     )
@@ -142,6 +138,47 @@ class GitHubClient:
             f"GitHub request connection failed: {msg}",
             diagnostic={"classification": "network_error", "message": msg},
         )
+
+    def _bounded_request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        """Follow only same-origin API redirects or credential-free Actions log downloads."""
+        initial = urlsplit(url)
+        for hop in range(4):
+            response = self.session.request(method=method, url=url, timeout=self.timeout,
+                                            allow_redirects=False, stream=True, **kwargs)
+            if response.status_code in {301, 302, 303, 307, 308}:
+                location = response.headers.get("Location", "")
+                response.close()
+                target = urlsplit(urljoin(url, location))
+                same_origin = target.scheme == initial.scheme and target.netloc == initial.netloc
+                log_download = (method.upper() == "GET" and initial.path.endswith("/logs")
+                                and target.scheme == "https" and target.hostname is not None
+                                and (target.hostname.endswith(".blob.core.windows.net")
+                                     or target.hostname.endswith(".actions.githubusercontent.com")))
+                if target.username or target.password or not (same_origin or log_download):
+                    raise SecurityError("GitHub redirect left the approved API or Actions log origins.")
+                if method.upper() not in {"GET", "HEAD"}:
+                    raise APIError("Mutation redirect refused; resolve the canonical repository first.")
+                # Never forward API credentials or parameters to signed log URLs.
+                if not same_origin:
+                    kwargs = {"headers": {"User-Agent": "Git-Plus-MCP/0.1.0"}}
+                url = target.geturl()
+                continue
+            try:
+                chunks = []
+                size = 0
+                for chunk in response.iter_content(chunk_size=65536):
+                    size += len(chunk)
+                    if size > self.max_response_bytes:
+                        raise APIError("GitHub response exceeds the configured byte limit.", diagnostic={
+                            "classification": "response_too_large", "max_bytes": self.max_response_bytes,
+                        })
+                    chunks.append(chunk)
+                response._content = b"".join(chunks)
+                response._content_consumed = True
+                return response
+            finally:
+                response.close()
+        raise APIError("Too many GitHub redirects.")
 
     def get_pr(self, repo: str, number: int) -> dict[str, Any]:
         """Fetch pull request metadata."""
