@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import time
+from urllib.parse import urlsplit
 from typing import Any
 
 import requests
@@ -49,11 +50,17 @@ class GitHubClient:
         max_retries: int = 3,
         session: requests.Session | None = None,
     ) -> None:
+        parsed = urlsplit(base_url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise SecurityError("GitHub API URL must be HTTPS without credentials, query or fragment.")
+        if timeout <= 0 or max_retries < 1:
+            raise ValidationError("Timeout and attempt count must be positive.")
         self.token = token
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.max_retries = max_retries
         self.session = session or requests.Session()
+        self.session.trust_env = False
 
     def _headers(self, accept: str = "application/vnd.github+json") -> dict[str, str]:
         headers = {
@@ -78,10 +85,13 @@ class GitHubClient:
     ) -> requests.Response:
         """Execute a GitHub API request with bounded retry and rate limit checks."""
         url = path if path.startswith("http") else f"{self.base_url}/{path.lstrip('/')}"
+        if urlsplit(url).netloc != urlsplit(self.base_url).netloc or urlsplit(url).scheme != "https":
+            raise SecurityError("API requests must stay on the configured GitHub origin.")
         headers = self._headers(accept=accept)
+        attempts = self.max_retries if method.upper() in {"GET", "HEAD"} else 1
 
         last_error: Exception | None = None
-        for attempt in range(self.max_retries):
+        for attempt in range(attempts):
             try:
                 resp = self.session.request(
                     method=method,
@@ -93,7 +103,7 @@ class GitHubClient:
                     timeout=self.timeout,
                 )
 
-                if resp.status_code in {502, 503, 504} and attempt < self.max_retries - 1:
+                if resp.status_code in {502, 503, 504} and attempt < attempts - 1:
                     time.sleep(0.5 * (2**attempt))
                     continue
 
@@ -113,7 +123,7 @@ class GitHubClient:
                         "message": safe_text(resp.text, 2048),
                     }
                     raise APIError(
-                        f"GitHub API request failed with status {resp.status_code}: {resp.text[:200]}",
+                        f"GitHub API request failed with status {resp.status_code}: {safe_text(resp.text, 200)}",
                         status_code=resp.status_code,
                         diagnostic=diagnostic,
                     )
@@ -122,7 +132,7 @@ class GitHubClient:
 
             except requests.RequestException as exc:
                 last_error = exc
-                if attempt < self.max_retries - 1:
+                if attempt < attempts - 1:
                     time.sleep(0.5 * (2**attempt))
                     continue
                 break
@@ -343,11 +353,11 @@ class GitHubClient:
             payload["variables"] = variables
         resp = self.request("POST", "graphql", json_data=payload)
         data = resp.json()
-        if "errors" in data and not data.get("data"):
+        if data.get("errors"):
             errors = data.get("errors", [])
             msg = errors[0].get("message", "GraphQL query failed") if errors else "GraphQL error"
             raise APIError(
-                f"GraphQL query error: {msg}",
-                diagnostic={"classification": "graphql_error", "errors": errors},
+                f"GraphQL query error: {safe_text(msg, 512)}",
+                diagnostic={"classification": "graphql_error", "errors": safe_payload(errors)},
             )
         return data.get("data", {})

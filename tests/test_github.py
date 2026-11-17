@@ -63,3 +63,34 @@ def test_client_request_retry_on_502() -> None:
     data = client.get_pr("owner/repo", 1)
     assert data["number"] == 1
     assert mock_session.request.call_count == 2
+
+
+@pytest.mark.parametrize('status', [502, 503, 504])
+def test_mutations_are_not_retried(status):
+    session = MagicMock(spec=requests.Session)
+    response = requests.Response()
+    response.status_code = status
+    response._content = b'failed'
+    session.request.return_value = response
+    client = GitHubClient(session=session)
+    with pytest.raises(APIError):
+        client.request('POST', 'repos/owner/repo/actions/workflows/1/dispatches')
+    session.request.assert_called_once()
+
+
+def test_cross_origin_and_invalid_configuration():
+    client = GitHubClient(token='secret')
+    with pytest.raises(SecurityError):
+        client.request('GET', 'https://attacker.example/path')
+    with pytest.raises(ValidationError):
+        GitHubClient(timeout=0)
+    with pytest.raises(ValidationError):
+        GitHubClient(max_retries=0)
+
+
+def test_graphql_partial_errors_fail_closed():
+    client = GitHubClient()
+    client.request = MagicMock()
+    client.request.return_value.json.return_value = {'data': {'repository': {}}, 'errors': [{'message': 'denied'}]}
+    with pytest.raises(APIError):
+        client.graphql('query { viewer { login } }')

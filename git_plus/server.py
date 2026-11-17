@@ -12,6 +12,7 @@ from git_plus.config import Settings
 from git_plus.errors import GitPlusError, SecurityError
 from git_plus.github import GitHubClient
 from git_plus.pr_evidence import get_pr_evidence
+from git_plus.quick_fix import apply_quick_fix
 
 
 def create_server(settings: Settings | None = None) -> FastMCP:
@@ -98,6 +99,79 @@ def create_server(settings: Settings | None = None) -> FastMCP:
                 files_page=files_page,
                 files_per_page=files_per_page,
             )
+        except GitPlusError as err:
+            return err.to_dict()
+
+    @mcp.tool(
+        name="ci_diagnose",
+        description=(
+            "Diagnose CI failures for a pull request. Collects failed workflow jobs, "
+            "extracts log excerpts with file/line references, fetches check annotations, "
+            "and optionally correlates code scanning alerts. Differentiates infra failures "
+            "from test, lint, type-check, and compiler errors. Requires exact head SHA for "
+            "revision consistency. Use pr_evidence first to obtain head_sha."
+        ),
+    )
+    def ci_diagnose(
+        repo: Annotated[
+            str,
+            Field(description="Target repository in 'owner/repo' format"),
+        ],
+        number: Annotated[
+            int,
+            Field(description="Pull request number (positive integer)", ge=1),
+        ],
+        expected_head: Annotated[
+            str | None,
+            Field(description="Optional 40-character commit SHA to verify PR head has not moved"),
+        ] = None,
+        run_id: Annotated[
+            int | None,
+            Field(description="Specific Actions run ID to diagnose; null inspects all runs for the PR head"),
+        ] = None,
+        job_id: Annotated[
+            int | None,
+            Field(description="Specific Actions job ID to diagnose within the selected run"),
+        ] = None,
+        max_excerpts_per_job: Annotated[
+            int,
+            Field(description="Maximum log failure excerpts returned per job (1-100)", ge=1, le=100),
+        ] = 30,
+        include_annotations: Annotated[
+            bool,
+            Field(description="Whether to fetch check run annotations per job"),
+        ] = True,
+        include_code_scanning: Annotated[
+            bool,
+            Field(description="Whether to fetch code scanning alerts for the PR head"),
+        ] = True,
+    ) -> dict[str, Any]:
+        """Collect actionable CI failure evidence for a pull request."""
+        if not cfg.is_repo_allowed(repo):
+            raise SecurityError(f"Repository '{repo}' is not permitted by Git Plus configuration.")
+
+        try:
+            return diagnose_ci(
+                client,
+                repo,
+                number,
+                expected_head=expected_head,
+                run_id=run_id,
+                job_id=job_id,
+                max_excerpts_per_job=max_excerpts_per_job,
+                include_annotations=include_annotations,
+                include_code_scanning=include_code_scanning,
+            )
+        except GitPlusError as err:
+            return err.to_dict()
+
+    @mcp.tool(name="quick_fix", description="Apply an exact bounded unified diff as one additive commit to an open PR. Requires current head SHA. Validates patch and file modes; does not run tests. No force push.")
+    def quick_fix(repo: str, number: Annotated[int, Field(ge=1)], expected_head: str,
+                  patch: str, commit_message: str) -> dict[str, Any]:
+        if not cfg.is_repo_allowed(repo):
+            raise SecurityError(f"Repository '{repo}' is not permitted by Git Plus configuration.")
+        try:
+            return apply_quick_fix(client, repo, number, expected_head, patch, commit_message)
         except GitPlusError as err:
             return err.to_dict()
 

@@ -40,3 +40,13 @@ def test_repo_allowlist_restriction() -> None:
         tool.fn(repo="forbidden/repo", number=1)
 
     assert "not permitted" in str(exc_info.value)
+
+
+def test_all_recovered_schemas():
+    from fastmcp import Client
+    async def verify():
+        async with Client(create_server()) as client:
+            tools = {t.name: t for t in await client.list_tools()}
+            assert {'pr_evidence', 'ci_diagnose', 'quick_fix'} <= tools.keys()
+            assert tools['quick_fix'].inputSchema['required'] == ['repo', 'number', 'expected_head', 'patch', 'commit_message']
+    asyncio.run(verify())
