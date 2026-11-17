@@ -207,6 +207,110 @@ class GitHubClient:
         )
         return resp.json()
 
+    def get_workflow_runs(
+        self,
+        repo: str,
+        *,
+        head_sha: str | None = None,
+        branch: str | None = None,
+        event: str | None = None,
+        per_page: int = 30,
+        page: int = 1,
+    ) -> dict[str, Any]:
+        """Fetch workflow runs matching filters."""
+        validate_repo(repo)
+        params: dict[str, Any] = {"per_page": per_page, "page": page}
+        if head_sha:
+            params["head_sha"] = head_sha
+        if branch:
+            params["branch"] = branch
+        if event:
+            params["event"] = event
+        resp = self.request("GET", f"repos/{repo}/actions/runs", params=params)
+        return resp.json()
+
+    def get_run_jobs(
+        self,
+        repo: str,
+        run_id: int,
+        *,
+        attempt: int | None = None,
+        per_page: int = 100,
+        page: int = 1,
+    ) -> dict[str, Any]:
+        """Fetch jobs for a workflow run attempt."""
+        validate_repo(repo)
+        path = (
+            f"repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs"
+            if attempt is not None
+            else f"repos/{repo}/actions/runs/{run_id}/jobs"
+        )
+        resp = self.request("GET", path, params={"per_page": per_page, "page": page})
+        return resp.json()
+
+    def get_job_logs(self, repo: str, job_id: int) -> str | None:
+        """Fetch plain text logs for a specific Actions job."""
+        validate_repo(repo)
+        try:
+            resp = self.request("GET", f"repos/{repo}/actions/jobs/{job_id}/logs")
+            return resp.text
+        except APIError as err:
+            if err.status_code in {404, 410}:
+                return None
+            raise
+
+    def get_run_logs_archive(self, repo: str, run_id: int, attempt: int | None = None) -> bytes | None:
+        """Fetch ZIP log archive for a workflow run."""
+        validate_repo(repo)
+        path = (
+            f"repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/logs"
+            if attempt is not None
+            else f"repos/{repo}/actions/runs/{run_id}/logs"
+        )
+        try:
+            resp = self.request("GET", path, raw=True)
+            return resp.content
+        except APIError as err:
+            if err.status_code in {404, 410}:
+                return None
+            raise
+
+    def get_check_run_annotations(
+        self,
+        repo: str,
+        check_run_id: int,
+        page: int = 1,
+        per_page: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Fetch check annotations for a check run."""
+        validate_repo(repo)
+        resp = self.request(
+            "GET",
+            f"repos/{repo}/check-runs/{check_run_id}/annotations",
+            params={"per_page": per_page, "page": page},
+        )
+        return resp.json()
+
+    def get_code_scanning_alerts(
+        self,
+        repo: str,
+        *,
+        ref: str | None = None,
+        per_page: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Fetch code scanning alerts for a git reference."""
+        validate_repo(repo)
+        params: dict[str, Any] = {"per_page": per_page}
+        if ref:
+            params["ref"] = ref
+        try:
+            resp = self.request("GET", f"repos/{repo}/code-scanning/alerts", params=params)
+            return resp.json()
+        except APIError as err:
+            if err.status_code in {403, 404}:
+                return []
+            raise
+
     def get_commit_status(self, repo: str, ref: str) -> dict[str, Any]:
         """Fetch combined commit status for a commit ref."""
         validate_repo(repo)

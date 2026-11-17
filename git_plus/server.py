@@ -7,6 +7,7 @@ from typing import Annotated, Any
 from fastmcp import FastMCP
 from pydantic import Field
 
+from git_plus.ci_diagnose import diagnose_ci
 from git_plus.config import Settings
 from git_plus.errors import GitPlusError, SecurityError
 from git_plus.github import GitHubClient
