@@ -14,6 +14,7 @@ from git_plus.github import GitHubClient
 from git_plus.pr_evidence import get_pr_evidence
 from git_plus.quick_fix import apply_quick_fix
 from git_plus.pr_conflicts import get_pr_conflicts
+from git_plus.pr_rebase import rebase_pr
 
 
 def create_server(settings: Settings | None = None) -> FastMCP:
@@ -183,6 +184,17 @@ def create_server(settings: Settings | None = None) -> FastMCP:
             raise SecurityError(f"Repository '{repo}' is not permitted by Git Plus configuration.")
         try:
             return get_pr_conflicts(client, repo, number, expected_head, expected_base, max_paths)
+        except GitPlusError as err:
+            return err.to_dict()
+
+    @mcp.tool(name="pr_rebase", description="Preview a genuine rebase of a linear PR onto an exact base revision. Applying rewrites history and requires apply=true plus allow_history_rewrite=true. Pushes with an exact branch lease. Does not run repository tests.")
+    def pr_rebase(repo: str, number: Annotated[int, Field(ge=1)], expected_head: str, expected_base: str,
+                  apply: bool = False, allow_history_rewrite: bool = False) -> dict[str, Any]:
+        if not cfg.is_repo_allowed(repo):
+            raise SecurityError(f"Repository '{repo}' is not permitted by Git Plus configuration.")
+        try:
+            return rebase_pr(client, repo, number, expected_head, expected_base,
+                             apply=apply, allow_history_rewrite=allow_history_rewrite)
         except GitPlusError as err:
             return err.to_dict()
 
