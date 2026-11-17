@@ -23,6 +23,9 @@ class Settings:
     oauth_signing_key: str | None = field(default=None, repr=False)
     odysseus_pat: str | None = field(default=None, repr=False)
     odysseus_pat_login: str | None = None
+    quick_fix_max_files: int = 10
+    quick_fix_max_changed_lines: int = 1000
+    quick_fix_max_patch_bytes: int = 262144
 
     @classmethod
     def load(cls) -> Settings:
@@ -45,6 +48,22 @@ class Settings:
             from git_plus.errors import ValidationError
             raise ValidationError("Diff limits must be positive, at most 5000 lines and 8 MiB.")
 
+        quick_fix_limits = []
+        for name, default, ceiling in (
+            ("GIT_PLUS_QUICK_FIX_MAX_FILES", 10, 50),
+            ("GIT_PLUS_QUICK_FIX_MAX_CHANGED_LINES", 1000, 5000),
+            ("GIT_PLUS_QUICK_FIX_MAX_PATCH_BYTES", 262144, 1048576),
+        ):
+            raw = os.environ.get(name, "").strip()
+            try:
+                value = int(raw) if raw else default
+            except ValueError:
+                value = 0
+            if not 1 <= value <= ceiling:
+                from git_plus.errors import ValidationError
+                raise ValidationError(f"{name} must be an integer from 1 to {ceiling}.")
+            quick_fix_limits.append(value)
+
         raw_allowed = os.environ.get("GIT_PLUS_ALLOWED_REPOSITORIES", "").strip()
         allowed = tuple(r.strip().casefold() for r in raw_allowed.split(",") if r.strip())
         raw_users = os.environ.get("GIT_PLUS_ALLOWED_GITHUB_USERS", "").strip()
@@ -64,6 +83,9 @@ class Settings:
             oauth_signing_key=os.environ.get("GIT_PLUS_OAUTH_SIGNING_KEY"),
             odysseus_pat=os.environ.get("GIT_PLUS_ODYSSEUS_PAT"),
             odysseus_pat_login=os.environ.get("GIT_PLUS_ODYSSEUS_PAT_LOGIN"),
+            quick_fix_max_files=quick_fix_limits[0],
+            quick_fix_max_changed_lines=quick_fix_limits[1],
+            quick_fix_max_patch_bytes=quick_fix_limits[2],
         )
 
     def is_repo_allowed(self, repo: str) -> bool:

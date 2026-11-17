@@ -72,6 +72,7 @@ def github_client(settings: Settings, remote: bool = False, *, repo: str | None 
     """Create an isolated GitHub client for one call and close its session."""
     token = settings.github_token
     restricted_repo = None
+    principal = None
     if remote:
         from fastmcp.server.dependencies import get_access_token
 
@@ -83,6 +84,7 @@ def github_client(settings: Settings, remote: bool = False, *, repo: str | None 
         if settings.oauth_client_id and settings.oauth_client_secret:
             if not isinstance(login, str) or login.casefold() not in {u.casefold() for u in settings.allowed_github_users}:
                 raise SecurityError("Authenticated GitHub user is not permitted.")
+            principal = login
             token = getattr(access_token, "token", None)
             if not token or settings.github_api_url != "https://api.github.com":
                 raise SecurityError("Authenticated GitHub credentials are unavailable.")
@@ -101,7 +103,11 @@ def github_client(settings: Settings, remote: bool = False, *, repo: str | None 
         else:
             raise SecurityError("Remote authentication is not configured.")
 
-    kwargs = {"restricted_repo": restricted_repo} if restricted_repo else {}
+    kwargs: dict[str, str] = {}
+    if restricted_repo:
+        kwargs["restricted_repo"] = restricted_repo
+    if principal:
+        kwargs["principal"] = principal
     client = GitHubClient(token=token, base_url=settings.github_api_url, **kwargs)
     try:
         yield client

@@ -71,8 +71,9 @@ def test_pat_used_only_for_exact_authenticated_identity_and_target():
         with github_client(settings(), remote=True, repo="Anvilary/git-plus"):
             pass
     assert created == [
-        {"token": PAT, "base_url": "https://api.github.com", "restricted_repo": TARGET},
-        {"token": "normal-upstream", "base_url": "https://api.github.com"},
+        {"token": PAT, "base_url": "https://api.github.com", "restricted_repo": TARGET,
+         "principal": "alteixeira20"},
+        {"token": "normal-upstream", "base_url": "https://api.github.com", "principal": "alteixeira20"},
     ]
 
 
@@ -136,18 +137,18 @@ def test_pat_fetches_fork_anonymously_and_base_with_credentials():
                      network=True, credential_repo=TARGET)
 
 
-def test_pat_rejects_write_to_fork_before_permission_lookup():
-    client = MagicMock()
-    client.restricted_repo = TARGET
-    client.token = PAT
-    client.get_pr.return_value = {
-        "state": "open", "merged": False,
-        "head": {"sha": "a" * 40, "ref": "feature", "repo": {"full_name": "contributor/odysseus"}},
-        "base": {"sha": "b" * 40, "ref": "dev", "repo": {"full_name": TARGET}},
-    }
-    with pytest.raises(SecurityError, match="contributor forks"):
-        pr_context(client, TARGET, 42, "a" * 40, write=True)
-    client.request.assert_not_called()
+def test_pat_fork_write_only_for_quick_fix_and_never_for_rebase():
+    client = GitHubClient(token=PAT, restricted_repo=TARGET, principal="alteixeira20", session=MagicMock())
+    pr = {"state": "open", "merged": False, "maintainer_can_modify": True,
+          "head": {"sha": "a" * 40, "ref": "feature", "repo": {"full_name": "contributor/odysseus", "fork": True}},
+          "base": {"sha": "b" * 40, "ref": "dev", "repo": {"full_name": TARGET}}}
+    with patch.object(client, "get_pr", return_value=pr):
+        with pytest.raises(SecurityError, match="additive quick fixes"):
+            pr_context(client, TARGET, 42, "a" * 40, write=True)
+        with pytest.raises(SecurityError, match="additive quick fixes"):
+            pr_context(client, TARGET, 42, "a" * 40, write=True, operation="rebase")
+    assert client.fork_grant is None
+    client.session.request.assert_not_called()
 
 
 def test_code_scanning_permission_errors_are_not_empty_findings():
@@ -192,7 +193,7 @@ def test_non_pat_oauth_identity_can_still_use_its_own_token():
     ) as factory:
         with github_client(settings(allowed_github_users=("alteixeira20", "bob")), remote=True, repo=TARGET):
             pass
-        factory.assert_called_once_with(token="bob-oauth", base_url="https://api.github.com")
+        factory.assert_called_once_with(token="bob-oauth", base_url="https://api.github.com", principal="bob")
 
 
 def test_odysseus_pat_environment_loading(monkeypatch):

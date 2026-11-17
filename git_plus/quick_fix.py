@@ -13,9 +13,13 @@ from git_plus.github import GitHubClient, validate_repo, validate_sha
 from git_plus.git_workspace import GitWorkspace, pr_context, verify_context
 
 # ---- Size limits ----
-DEFAULT_MAX_FILES = 3
-DEFAULT_MAX_CHANGED_LINES = 200
-DEFAULT_MAX_BYTES = 65536
+DEFAULT_MAX_FILES = 10
+DEFAULT_MAX_CHANGED_LINES = 1000
+DEFAULT_MAX_BYTES = 262144
+# Hard ceilings for operator configuration (see Settings.load).
+MAX_FILES_CEILING = 50
+MAX_CHANGED_LINES_CEILING = 5000
+MAX_BYTES_CEILING = 1048576
 
 # ---- Path security patterns ----
 _PROHIBITED_DIRS = frozenset({
@@ -229,6 +233,45 @@ mutation($input: CreateCommitOnBranchInput!) {
 """
 
 
+def _commit_identity(client: GitHubClient) -> tuple[str, str]:
+    """Attribute a Git-pushed commit to the authenticated GitHub login."""
+    login = getattr(client, 'principal', None)
+    if not login:
+        login = client.request('GET', 'user').json().get('login')
+    if not isinstance(login, str) or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", login):
+        raise SecurityError("Authenticated GitHub login is unavailable for commit attribution.")
+    return login, f"{login}@users.noreply.github.com"
+
+
+def _push_fork_commit(work: GitWorkspace, repo: str, number: int, context: dict[str, Any],
+                      summary: PatchSummary, tree: str, commit_message: str) -> dict[str, Any]:
+    """Fast-forward a verified contributor branch with one commit, then verify the remote."""
+    head_repo, head_ref, head_sha = context["head_repo"], context["head_ref"], context["head_sha"]
+    new_sha = validate_sha(work.git("commit-tree", tree, "-p", head_sha, "-m", commit_message.strip()).decode().strip())
+    work.push_fast_forward(head_repo, head_ref, head_sha, new_sha, "quick_fix")
+    remote_ref = f"refs/heads/{head_ref}"
+    try:
+        remote = work.git("ls-remote", "--refs", "--", work.url(head_repo), remote_ref,
+                          network=True, credential_repo=head_repo).decode().split()
+    except GitOperationError as exc:
+        raise GitOperationError("Push accepted, remote verification unavailable. Reconcile before retrying.", {
+            "outcome": "unknown", "new_sha": new_sha, "head_repo": head_repo,
+        }) from exc
+    if not remote or remote[0] != new_sha:
+        raise GitOperationError("Push returned success but remote revision differs; reconcile before retrying.", {
+            "outcome": "unknown", "new_sha": new_sha, "observed_sha": remote[0] if remote else None,
+        })
+    return {
+        "applied": True, "repo": repo, "number": number, "head_repo": head_repo, "head_ref": head_ref,
+        "expected_head": head_sha, "new_sha": new_sha,
+        "commit_url": f"{work.origin()}/{head_repo}/commit/{new_sha}", "tree_sha": tree,
+        "changed_files": list(summary.files), "added_lines": summary.added_lines,
+        "removed_lines": summary.removed_lines, "patch_sha256": summary.sha256, "is_fork": True,
+        "mechanism": "git_push_fast_forward", "remote_verified": True, "signed": False,
+        "validation": {"patch_applies": True, "paths_and_modes": True, "tests_run": False},
+    }
+
+
 def apply_quick_fix(
     client: GitHubClient, repo: str, number: int, expected_head: str,
     patch: str, commit_message: str, *, max_files: int = DEFAULT_MAX_FILES,
@@ -242,8 +285,9 @@ def apply_quick_fix(
     summary = validate_patch(patch, max_files=max_files, max_changed_lines=max_changed_lines, max_bytes=max_bytes)
     if not commit_message.strip() or len(commit_message.encode()) > 1440 or "\0" in commit_message:
         raise ValidationError("Commit message must contain 1-1440 bytes without NUL.")
-    context = pr_context(client, repo, number, expected_head, write=True)
-    with GitWorkspace(client) as work:
+    context = pr_context(client, repo, number, expected_head, write=True, operation="quick_fix")
+    identity = _commit_identity(client) if context["is_fork"] else None
+    with GitWorkspace(client, identity=identity) as work:
         work.fetch(context["head_repo"], context["head_ref"], context["head_sha"], "head", depth=1)
         work.git("read-tree", context["head_sha"])
         for path in summary.files:
@@ -268,7 +312,9 @@ def apply_quick_fix(
                 raise ValidationError("Patched files must contain UTF-8 text.") from exc
             additions.append({"path": path, "contents": base64.b64encode(blob).decode()})
         tree = work.git("write-tree").decode().strip()
-        verify_context(client, repo, number, context, write=True)
+        verify_context(client, repo, number, context, write=True, operation="quick_fix")
+        if context["is_fork"]:
+            return _push_fork_commit(work, repo, number, context, summary, tree, commit_message)
         headline, _, body = commit_message.strip().partition("\n")
         try:
             data = client.graphql(_CREATE_COMMIT, {"input": {

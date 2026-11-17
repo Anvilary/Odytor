@@ -50,7 +50,8 @@ def client_for(sha, *, fork=False, push=True):
         'repo': {'full_name': 'contributor/repo' if fork else 'owner/repo'}},
         'base': {'sha': sha, 'ref': 'main', 'repo': {'full_name': 'owner/repo'}},
         'maintainer_can_modify': False}
-    client.request.return_value.json.return_value = {'permissions': {'push': push}}
+    client.request.return_value.json.return_value = {'permissions': {'push': push}, 'fork': True,
+        'parent': {'full_name': 'owner/repo'}, 'source': {'full_name': 'owner/repo'}}
     return client
 
 

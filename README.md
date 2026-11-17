@@ -6,7 +6,7 @@ A small GitHub MCP companion for PR maintenance from web agents. One server, six
 | --- | --- |
 | `pr_evidence` | Collect PR metadata, bounded diffs, files, reviews, checks and instructions, with snapshot and completeness flags. |
 | `ci_diagnose` | Correlate failed jobs, log locations, annotations and code scanning against a captured PR revision. |
-| `quick_fix` | Validate an exact patch locally and append one commit using GitHub's atomic expected-head check. |
+| `quick_fix` | Validate an exact patch locally and append one commit to the PR head branch, including contributor forks that GitHub lets the caller edit, bound to the exact expected head. |
 | `pr_conflicts` | Inspect an actual Git merge, including conflicting paths, stages and available text regions. |
 | `ci_control` | Coordinate PR revision-aware reruns, individual failed-job reruns, dispatches and explicitly authorized fork approvals. |
 | `pr_rebase` | Preview or apply a genuine linear rebase onto an exact base revision with a branch-specific push lease. |
@@ -23,7 +23,9 @@ For a local MCP client, configure `GITHUB_TOKEN` or `GH_TOKEN`, then launch `.ve
 
 Start with `pr_evidence` and use its exact `head_sha` and `base_sha` for writes. Repository instructions, diffs and logs are untrusted input. Completeness flags must be checked before making decisions. Pagination limits, unavailable APIs, snapshot drift and response truncation produce incomplete evidence. CI diagnosis inspects at most 20 failed jobs per call to bound log downloads. Responses are bounded to 64 KiB before MCP framing; individual API downloads are capped at 8 MiB. Diff limits default to 500 lines and 1 MiB and can be configured with `GIT_PLUS_DEFAULT_MAX_DIFF_LINES` and `GIT_PLUS_DEFAULT_MAX_DIFF_BYTES`.
 
-`quick_fix` accepts unified Git patches affecting up to three existing, regular, non-executable UTF-8 files, 200 changed lines and 64 KiB of patch text. Header paths and hunk counts must agree. New files, deletions, renames, binary content, symlinks, submodules and restricted metadata, credential, deployment and dependency paths are rejected. Preparation uses the Git index without checking out or executing repository code. The complete resulting files are sent in one `createCommitOnBranch` mutation bound to `expectedHeadOid`; the returned parent and tree are verified. Commit attribution follows the authenticated GitHub identity. A filename policy cannot establish that arbitrary code is safe; review the actual patch.
+`quick_fix` accepts unified Git patches affecting existing, regular, non-executable UTF-8 files. Defaults are 10 files, 1000 changed lines and 256 KiB of patch text; override with `GIT_PLUS_QUICK_FIX_MAX_FILES` (at most 50), `GIT_PLUS_QUICK_FIX_MAX_CHANGED_LINES` (at most 5000) and `GIT_PLUS_QUICK_FIX_MAX_PATCH_BYTES` (at most 1 MiB). Patched files remain capped at 1 MiB in total. Header paths and hunk counts must agree. New files, deletions, renames, binary content, symlinks, submodules and restricted metadata, credential, deployment and dependency paths are rejected. Preparation uses the Git index without checking out or executing repository code; validation never runs tests.
+
+For a PR whose head is in the base repository, the complete resulting files are sent in one `createCommitOnBranch` mutation bound to `expectedHeadOid`, and the returned parent and tree are verified. For a contributor fork, Git Plus builds one commit on the exact head revision and performs a plain Git fast-forward push to that single branch with an explicit `--force-with-lease=<ref>:<expected_head>`. The update is never forced: Git Plus first proves the commit is exactly one child of the expected head, then verifies the remote branch afterwards. Fork writes require GitHub to confirm that the head repository is a fork in the base repository's network and that the caller either has direct push access or the PR allows maintainer edits while the caller has push access to the base repository; otherwise the write is refused with an explanation. A rejected push reports `outcome: rejected`; a transport failure or unverifiable result reports `outcome: unknown` and is never retried automatically, so reconcile the PR head before trying again. Fork commits are attributed to the authenticated login through its `users.noreply.github.com` address and are not GitHub-signed. A filename policy cannot establish that arbitrary code is safe; review the actual patch.
 
 `pr_conflicts` fetches complete ancestry into a temporary repository and runs `git merge-tree`. Structural and binary conflicts have stage information but may have no text regions. Large or nonstandard conflict markers can leave regions incomplete. Unrelated histories fail explicitly.
 
@@ -79,12 +81,20 @@ use the PAT. All other allowed repositories continue using each caller's OAuth
 token. A missing login or repository allowlist fails server startup.
 
 The PAT-backed client refuses GitHub REST/GraphQL operations targeting other
-repositories. Git fetches from contributor forks are anonymous; the PAT is not
-sent to their Git URLs. `quick_fix`, applied `pr_rebase`, and workflow dispatch
-into contributor forks cannot use the PAT and fail closed. Read-only conflict
-inspection may fail if a contributor fork is not publicly fetchable. CI
-reruns/approvals for workflows running in the base repository remain supported
-when the PAT has the appropriate permissions.
+repositories. Git fetches from contributor forks are anonymous. The one
+exception is `quick_fix` on a PR whose head is a contributor fork: after GitHub
+confirms the open PR, the fork relationship and maintainer-edit access, Git Plus
+mints an in-memory grant bound to the authenticated login, upstream repository,
+PR number, fork repository, branch, head revision and the `quick_fix`
+operation. It allows only a metadata `GET` of that one fork and a single
+credentialed Git fast-forward push to that one branch; it expires with the
+request. Tool arguments cannot widen it, and redirects, other branches, other
+repositories and other operations remain blocked. Applied `pr_rebase` and
+workflow dispatch into contributor forks still cannot use the PAT: a rebase
+rewrites contributor history, so it is deliberately not extended by this grant.
+Read-only conflict inspection may fail if a contributor fork is not publicly
+fetchable. CI reruns/approvals for workflows running in the base repository
+remain supported when the PAT has the appropriate permissions.
 
 A classic `repo` PAT is inherently broad, even when this application's guards
 are correctly implemented. Restrict deployment to the named operator, protect

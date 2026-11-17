@@ -61,9 +61,11 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                       include_annotations=include_annotations, include_code_scanning=include_code_scanning)
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
-              description="Apply an exact bounded unified diff as one additive commit to an open PR. Requires current head SHA. Existing regular files only. Validates patch and file modes; does not run tests. No force push.")
+              description="Apply an exact bounded unified diff as one additive commit to an open PR, including contributor-fork PRs when GitHub grants the caller maintainer push access. Requires current head SHA. Existing regular files only. Validates patch and file modes; does not run tests. No force push.")
     def quick_fix(repo: str, number: Number, expected_head: SHA, patch: str, commit_message: str) -> dict[str, Any]:
-        return invoke(repo, apply_quick_fix, number, expected_head, patch, commit_message)
+        return invoke(repo, apply_quick_fix, number, expected_head, patch, commit_message,
+                      max_files=cfg.quick_fix_max_files, max_changed_lines=cfg.quick_fix_max_changed_lines,
+                      max_bytes=cfg.quick_fix_max_patch_bytes)
 
     @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True},
               description="Inspect an exact head/base merge using isolated Git. Returns conflicting paths, stages and text regions with completeness metadata. Executes no repository code.")

@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 from git_plus.diagnostics import safe_text
 from git_plus.errors import GitOperationError, RevisionMismatchError, SecurityError, ValidationError
-from git_plus.github import GitHubClient, validate_repo, validate_sha
+from git_plus.github import FORK_WRITE_OPERATIONS, ForkWriteGrant, GitHubClient, validate_repo, validate_sha
 
 
 def validate_ref(ref: str) -> str:
@@ -25,7 +25,15 @@ def validate_ref(ref: str) -> str:
     return ref
 
 
-def pr_context(client: GitHubClient, repo: str, number: int, expected_head: str, *, write: bool = False) -> dict[str, Any]:
+def _verify_fork_network(base_repo: str, target: dict[str, Any]) -> None:
+    """Require the head repository to be a fork within the base repository's network."""
+    related = {(target.get(k) or {}).get('full_name', '').casefold() for k in ('parent', 'source')}
+    if target.get('fork') is not True or base_repo.casefold() not in related:
+        raise SecurityError("PR head repository is not a fork in the base repository network.")
+
+
+def pr_context(client: GitHubClient, repo: str, number: int, expected_head: str, *,
+               write: bool = False, operation: str | None = None) -> dict[str, Any]:
     validate_repo(repo)
     expected_head = validate_sha(expected_head, "expected_head")
     if type(number) is not int or number <= 0:
@@ -46,27 +54,50 @@ def pr_context(client: GitHubClient, repo: str, number: int, expected_head: str,
     base_ref = validate_ref(base.get('ref', ''))
     is_fork = head_repo.casefold() != repo.casefold()
     if write:
-        if getattr(client, 'restricted_repo', None) and is_fork:
-            raise SecurityError("Server-side PAT cannot mutate contributor forks; use separately authorized credentials.")
         if pr.get('state') != 'open' or pr.get('merged'):
             raise ValidationError("PR must be open and unmerged.")
         if not is_fork and head_ref == base_ref:
             raise SecurityError("Refusing to modify the PR base branch.")
         if not client.token:
             raise SecurityError("GitHub authentication is required for writes.")
-        target = client.request('GET', f'repos/{head_repo}').json()
-        push = (target.get('permissions') or {}).get('push') is True
-        if not push:
-            base_permissions = client.request('GET', f'repos/{repo}').json().get('permissions') or {}
-            if not (is_fork and pr.get('maintainer_can_modify') is True and base_permissions.get('push') is True):
-                raise SecurityError("No direct push permission or permitted maintainer fork access.")
+        if is_fork:
+            _authorize_fork_write(client, repo, number, pr, head_repo, head_ref, actual, operation)
     return {'head_repo': head_repo, 'head_ref': head_ref, 'head_sha': actual,
             'base_repo': base_repo, 'base_ref': base_ref, 'base_sha': validate_sha(base.get('sha', '')),
             'is_fork': is_fork}
 
 
-def verify_context(client: GitHubClient, repo: str, number: int, context: dict[str, Any], *, write: bool = False, base: bool = False) -> None:
-    fresh = pr_context(client, repo, number, context['head_sha'], write=write)
+def _authorize_fork_write(client: GitHubClient, repo: str, number: int, pr: dict[str, Any],
+                          head_repo: str, head_ref: str, head_sha: str, operation: str | None) -> None:
+    """Require GitHub-confirmed write access to the PR's fork branch; scope a PAT to it."""
+    scoped = bool(getattr(client, 'restricted_repo', None))
+    if scoped:
+        if operation not in FORK_WRITE_OPERATIONS:
+            raise SecurityError("Server-side PAT contributor fork writes are limited to additive quick fixes.")
+        if (pr.get('head') or {}).get('repo', {}).get('fork') is not True:
+            raise SecurityError("PR head repository is not marked as a fork by GitHub.")
+        client.authorize_fork_write(ForkWriteGrant(
+            principal=getattr(client, 'principal', None) or '', base_repo=repo, number=number,
+            head_repo=head_repo, head_ref=head_ref, head_sha=head_sha, operation=operation))
+    try:
+        target = client.request('GET', f'repos/{head_repo}').json()
+        _verify_fork_network(repo, target)
+        if (target.get('permissions') or {}).get('push') is not True:
+            base_permissions = client.request('GET', f'repos/{repo}').json().get('permissions') or {}
+            if not (pr.get('maintainer_can_modify') is True and base_permissions.get('push') is True):
+                raise SecurityError(
+                    "No direct push permission or permitted maintainer fork access: the PR author "
+                    "must allow edits from maintainers and the authenticated user needs push access "
+                    "to the base repository.")
+    except BaseException:
+        if scoped:
+            client.revoke_fork_write()
+        raise
+
+
+def verify_context(client: GitHubClient, repo: str, number: int, context: dict[str, Any], *,
+                   write: bool = False, base: bool = False, operation: str | None = None) -> None:
+    fresh = pr_context(client, repo, number, context['head_sha'], write=write, operation=operation)
     keys = ['head_repo', 'head_ref', 'base_repo', 'base_ref']
     if base:
         keys.append('base_sha')
@@ -79,8 +110,9 @@ def verify_context(client: GitHubClient, repo: str, number: int, context: dict[s
 class GitWorkspace:
     """Never inherit Git config, hooks, helpers, filters or trace settings."""
 
-    def __init__(self, client: GitHubClient):
+    def __init__(self, client: GitHubClient, identity: tuple[str, str] | None = None):
         self.client = client
+        self.identity = identity
         self.root: Path | None = None
         self.path: Path | None = None
 
@@ -98,20 +130,28 @@ class GitWorkspace:
     def __exit__(self, *exc: Any) -> None:
         shutil.rmtree(self.root)
 
-    def environment(self, *, network: bool = False, credential_repo: str | None = None) -> dict[str, str]:
+    def environment(self, *, network: bool = False, credential_repo: str | None = None,
+                    write: bool = False) -> dict[str, str]:
         env = {k: os.environ[k] for k in ('PATH', 'SYSTEMROOT', 'LANG') if k in os.environ}
         env.update(HOME=str(self.root), XDG_CONFIG_HOME=str(self.root),
                    GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
                    GIT_TERMINAL_PROMPT='0', GIT_ASKPASS='/bin/false', GIT_ATTR_NOSYSTEM='1',
                    GIT_AUTHOR_NAME='Git Plus', GIT_AUTHOR_EMAIL='git-plus@users.noreply.github.com',
                    GIT_COMMITTER_NAME='Git Plus', GIT_COMMITTER_EMAIL='git-plus@users.noreply.github.com')
+        if self.identity:
+            name, email = self.identity
+            env.update(GIT_AUTHOR_NAME=name, GIT_AUTHOR_EMAIL=email,
+                       GIT_COMMITTER_NAME=name, GIT_COMMITTER_EMAIL=email)
         if network and getattr(self.client, 'restricted_repo', None):
             if not credential_repo:
                 raise SecurityError("Scoped Git network operations require an explicit repository.")
             validate_repo(credential_repo)
         use_token = bool(network and self.client.token)
         if use_token and getattr(self.client, 'restricted_repo', None):
-            use_token = credential_repo.casefold() == self.client.restricted_repo
+            # Contributor forks are anonymous unless this is the one granted push.
+            grant = getattr(self.client, 'fork_grant', None)
+            use_token = (credential_repo.casefold() == self.client.restricted_repo
+                         or bool(write and grant and credential_repo.casefold() == grant.head_repo.casefold()))
         if use_token:
             host = self.origin()
             encoded = base64.b64encode(('x-access-token:' + self.client.token).encode()).decode()
@@ -132,7 +172,10 @@ class GitWorkspace:
         return f'{self.origin()}/{repo}.git'
 
     def git(self, *args: str, input: bytes | None = None, network: bool = False,
-            credential_repo: str | None = None, allowed: tuple[int, ...] = (0,)) -> bytes:
+            credential_repo: str | None = None, allowed: tuple[int, ...] = (0,),
+            write: bool = False) -> bytes:
+        if write and (not network or args[:1] != ('push',)):
+            raise SecurityError("Credentialed contributor writes are limited to Git push.")
         if network and getattr(self.client, 'restricted_repo', None):
             if (not credential_repo or
                     [a for a in args if a.startswith(self.origin() + '/')] != [self.url(credential_repo)]):
@@ -143,7 +186,7 @@ class GitWorkspace:
                    '-c', 'core.autocrlf=false', '-c', 'core.fsmonitor=false', *args]
         try:
             result = subprocess.run(command, cwd=self.path,
-                                    env=self.environment(network=network, credential_repo=credential_repo),
+                                    env=self.environment(network=network, credential_repo=credential_repo, write=write),
                                     input=input, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise GitOperationError("Git operation failed or timed out.") from exc
@@ -180,3 +223,39 @@ class GitWorkspace:
             if common == expected:
                 return actual
         raise RevisionMismatchError(expected, actual, revision=label)
+
+    def push_fast_forward(self, repo: str, ref: str, expected: str, new_sha: str, operation: str) -> str:
+        """Append a descendant commit to one verified branch; never rewrite remote history.
+
+        The explicit lease rejects the push if the remote branch is not exactly the
+        expected revision, and the descendant check proves the update is a fast-forward.
+        Returns 'applied'; raises GitOperationError with outcome 'rejected' when the
+        remote definitively refused it, otherwise outcome 'unknown'.
+        """
+        validate_ref(ref)
+        expected, new_sha = validate_sha(expected), validate_sha(new_sha)
+        if getattr(self.client, 'restricted_repo', None) and not self.client.covers_fork_write(repo, ref, expected, operation):
+            raise SecurityError("Push target is outside the verified contributor branch grant.")
+        try:
+            lineage = self.git('rev-list', '--parents', '-n', '1', new_sha).decode().split()
+            single_child = lineage == [new_sha, expected]
+        except GitOperationError:
+            single_child = False
+        if not single_child:
+            raise SecurityError("Refusing a push that is not exactly one child of the expected head.")
+        remote_ref = f'refs/heads/{ref}'
+        diagnostic = {'expected_head': expected, 'new_sha': new_sha, 'head_repo': repo, 'head_ref': ref}
+        try:
+            out = self.git('push', '--porcelain', f'--force-with-lease={remote_ref}:{expected}', '--',
+                           self.url(repo), f'{new_sha}:{remote_ref}', network=True, credential_repo=repo,
+                           write=True, allowed=(0, 1))
+        except GitOperationError as exc:
+            raise GitOperationError("Push outcome is uncertain; reconcile the PR head before retrying.",
+                                    {**diagnostic, 'outcome': 'unknown'}) from exc
+        lines = out.decode('utf-8', errors='replace').splitlines()
+        rejected = [line for line in lines if line.startswith('!')]
+        if rejected or not any(line.startswith(' \t') for line in lines):
+            raise GitOperationError("GitHub rejected the push; no commit was added.",
+                                    {**diagnostic, 'outcome': 'rejected' if rejected else 'unknown',
+                                     'detail': safe_text(' '.join(rejected), 512)})
+        return 'applied'

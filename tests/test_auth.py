@@ -179,3 +179,23 @@ def test_http_calls_keep_oauth_identities_separate_and_enforce_user_allowlist(tm
 def test_conflicting_authentication_configuration_rejected():
     with pytest.raises(SecurityError):
         create_auth(oauth_settings(auth_token='legacy'), remote=True)
+
+
+def test_quick_fix_limits_default_to_practical_bounded_values(monkeypatch):
+    for name in ("MAX_FILES", "MAX_CHANGED_LINES", "MAX_PATCH_BYTES"):
+        monkeypatch.delenv(f"GIT_PLUS_QUICK_FIX_{name}", raising=False)
+    loaded = Settings.load()
+    assert (loaded.quick_fix_max_files, loaded.quick_fix_max_changed_lines,
+            loaded.quick_fix_max_patch_bytes) == (10, 1000, 262144)
+
+
+def test_quick_fix_limits_are_configurable_within_ceilings(monkeypatch):
+    from git_plus.errors import ValidationError
+    monkeypatch.setenv("GIT_PLUS_QUICK_FIX_MAX_FILES", "20")
+    assert Settings.load().quick_fix_max_files == 20
+    for name, bad in (("MAX_FILES", "51"), ("MAX_FILES", "0"), ("MAX_CHANGED_LINES", "5001"),
+                      ("MAX_PATCH_BYTES", "1048577"), ("MAX_PATCH_BYTES", "abc")):
+        monkeypatch.setenv(f"GIT_PLUS_QUICK_FIX_{name}", bad)
+        with pytest.raises(ValidationError):
+            Settings.load()
+        monkeypatch.delenv(f"GIT_PLUS_QUICK_FIX_{name}")

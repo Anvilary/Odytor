@@ -217,12 +217,12 @@ def test_counts_header_like_content():
 
 def test_quick_fix_atomic_commit(local_fetch):
     repo, sha = local_fetch
-    client = client_for(sha, fork=True)
+    client = client_for(sha)
     def mutation(query, variables):
         import base64
         value = variables['input']
         assert value['expectedHeadOid'] == sha
-        assert value['branch']['repositoryNameWithOwner'] == 'contributor/repo'
+        assert value['branch']['repositoryNameWithOwner'] == 'owner/repo'
         assert base64.b64decode(value['fileChanges']['additions'][0]['contents']) == b'line 1\nnew line 2\nline 3\n'
         # Build the same tree separately, without changing the fixture branch.
         blob = run(repo, 'hash-object', '-w', '--stdin', input=b'line 1\nnew line 2\nline 3\n').decode().strip()
