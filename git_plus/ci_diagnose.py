@@ -306,6 +306,7 @@ def diagnose_ci(
         evidence_complete = False
 
     code_scanning_alerts: list[dict[str, Any]] = []
+    code_scanning_error: dict[str, Any] | None = None
     if include_code_scanning:
         try:
             response = client.request(
@@ -315,9 +316,13 @@ def diagnose_ci(
             )
             raw_alerts = response.json()
             code_scanning_available = True
-        except APIError:
+        except APIError as error:
             raw_alerts = []
             evidence_complete = False
+            code_scanning_error = {
+                "status_code": error.status_code,
+                "classification": "unavailable_or_unauthorized",
+            }
         if len(raw_alerts) >= 100:
             evidence_complete = False
         for alert in raw_alerts:
@@ -355,6 +360,7 @@ def diagnose_ci(
         "failure_categories": sorted(overall_categories),
         "failed_jobs": diagnosed_jobs,
         "code_scanning_alerts": code_scanning_alerts,
+        "code_scanning_error": code_scanning_error,
         "evidence_complete": (
             evidence_complete
             and logs_available

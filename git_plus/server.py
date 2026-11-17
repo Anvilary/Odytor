@@ -29,7 +29,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         if not cfg.is_repo_allowed(repo):
             raise SecurityError(f"Repository '{repo}' is not permitted by Git Plus configuration.")
         try:
-            with github_client(cfg, remote) as client:
+            with github_client(cfg, remote, repo=repo) as client:
                 return safe_payload(operation(client, repo, *args, **kwargs))
         except GitPlusError as err:
             return safe_payload(err.to_dict())

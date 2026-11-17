@@ -57,3 +57,38 @@ In ChatGPT, use the custom MCP server connection flow available to your account 
 Local validation covers Git fixtures, mocked GitHub writes and in-process HTTP authentication and discovery. Real OAuth browser consent, production reverse-proxy behavior and live GitHub mutations have not been exercised. Nothing is deployed by installation or tests.
 
 Git Plus complements the [official GitHub MCP server](https://github.com/github/github-mcp-server). That server already exposes general Actions controls and Discussion read/comment/answer operations. This release adds revision-aware coordination instead of duplicating that inventory. Milestone intelligence and additional Discussion writes are deferred until a concrete maintenance workflow justifies them. Conflict inspection plus precise patches and rebase provide the current conflict workflow; automatic conflict resolution is not exposed.
+
+### Optional personal Odysseus credential (single-user deployment)
+
+For a deployment where the OAuth App can authenticate the operator but does not
+have organization-approved access to `odysseus-dev/odysseus`, a server-held
+classic PAT may be used **only** for that repository. This is deliberately
+opt-in and requires an exact GitHub login and a nonempty repository allowlist:
+
+```dotenv
+GIT_PLUS_ALLOWED_GITHUB_USERS=alteixeira20
+GIT_PLUS_ALLOWED_REPOSITORIES=odysseus-dev/odysseus,Anvilary/git-plus
+GIT_PLUS_ODYSSEUS_PAT_LOGIN=alteixeira20
+GIT_PLUS_ODYSSEUS_PAT=YOUR_PRIVATE_PAT
+```
+
+Preserve the existing OAuth client ID, secret, signing key and public URL. Git
+Plus first verifies the request's OAuth identity; only requests authenticated
+as `GIT_PLUS_ODYSSEUS_PAT_LOGIN` and targeting the exact Odysseus repository
+use the PAT. All other allowed repositories continue using each caller's OAuth
+token. A missing login or repository allowlist fails server startup.
+
+The PAT-backed client refuses GitHub REST/GraphQL operations targeting other
+repositories. Git fetches from contributor forks are anonymous; the PAT is not
+sent to their Git URLs. `quick_fix`, applied `pr_rebase`, and workflow dispatch
+into contributor forks cannot use the PAT and fail closed. Read-only conflict
+inspection may fail if a contributor fork is not publicly fetchable. CI
+reruns/approvals for workflows running in the base repository remain supported
+when the PAT has the appropriate permissions.
+
+A classic `repo` PAT is inherently broad, even when this application's guards
+are correctly implemented. Restrict deployment to the named operator, protect
+OAuth storage and the environment file, rotate the token periodically, and
+revoke it if compromised. Do not put tokens into Git, images, tool responses,
+or client configuration. For additional users or finer authorization, prefer
+GitHub App installation credentials over expanding this server-held PAT mode.

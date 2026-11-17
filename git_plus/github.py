@@ -50,6 +50,7 @@ class GitHubClient:
         max_retries: int = 3,
         session: requests.Session | None = None,
         max_response_bytes: int = 8 * 1024 * 1024,
+        restricted_repo: str | None = None,
     ) -> None:
         parsed = urlsplit(base_url)
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
@@ -64,6 +65,40 @@ class GitHubClient:
         self.session = session or requests.Session()
         self.session.trust_env = False
         self.session.auth = None
+        if restricted_repo is not None:
+            validate_repo(restricted_repo)
+        self.restricted_repo = restricted_repo.casefold() if restricted_repo else None
+
+    def require_repository(self, repo: str) -> None:
+        """Prevent a privileged PAT from reaching unrelated GitHub repositories."""
+        validate_repo(repo)
+        if self.restricted_repo and repo.casefold() != self.restricted_repo:
+            raise SecurityError("Server-side PAT cannot access another GitHub repository.")
+
+    def _check_scoped_request(self, path: str, json_data: Any) -> None:
+        if not self.restricted_repo:
+            return
+        parts = urlsplit(path).path.lstrip("/").split("/")
+        if len(parts) >= 3 and parts[0] == "repos":
+            self.require_repository(f"{parts[1]}/{parts[2]}")
+            return
+        if parts == ["graphql"] and isinstance(json_data, dict):
+            query = json_data.get("query", "")
+            vars = json_data.get("variables") or {}
+            if not isinstance(query, str) or not isinstance(vars, dict):
+                raise SecurityError("Unrecognized scoped GraphQL request.")
+            if query.lstrip().startswith("query(") and "reviewThreads(" in query:
+                owner, name = vars.get("owner"), vars.get("repo")
+                if isinstance(owner, str) and isinstance(name, str):
+                    self.require_repository(f"{owner}/{name}")
+                    return
+            if query.lstrip().startswith("mutation(") and "createCommitOnBranch(" in query:
+                branch = (vars.get("input") or {}).get("branch") or {}
+                target = branch.get("repositoryNameWithOwner") if isinstance(branch, dict) else None
+                if isinstance(target, str):
+                    self.require_repository(target)
+                    return
+        raise SecurityError("Server-side PAT request is outside its supported repository scope.")
 
     def _headers(self, accept: str = "application/vnd.github+json") -> dict[str, str]:
         headers = {
@@ -90,6 +125,7 @@ class GitHubClient:
         url = path if path.startswith("http") else f"{self.base_url}/{path.lstrip('/')}"
         if urlsplit(url).netloc != urlsplit(self.base_url).netloc or urlsplit(url).scheme != "https":
             raise SecurityError("API requests must stay on the configured GitHub origin.")
+        self._check_scoped_request(url, json_data)
         headers = self._headers(accept=accept)
         attempts = self.max_retries if method.upper() in {"GET", "HEAD"} else 1
 
@@ -156,6 +192,9 @@ class GitHubClient:
                                      or target.hostname.endswith(".actions.githubusercontent.com")))
                 if target.username or target.password or not (same_origin or log_download):
                     raise SecurityError("GitHub redirect left the approved API or Actions log origins.")
+                if same_origin:
+                    # Redirects must not move a scoped PAT into another repository.
+                    self._check_scoped_request(target.geturl(), kwargs.get("json"))
                 if method.upper() not in {"GET", "HEAD"}:
                     raise APIError("Mutation redirect refused; resolve the canonical repository first.")
                 # Never forward API credentials or parameters to signed log URLs.
@@ -350,13 +389,9 @@ class GitHubClient:
         params: dict[str, Any] = {"per_page": per_page}
         if ref:
             params["ref"] = ref
-        try:
-            resp = self.request("GET", f"repos/{repo}/code-scanning/alerts", params=params)
-            return resp.json()
-        except APIError as err:
-            if err.status_code in {403, 404}:
-                return []
-            raise
+        # Permission/availability errors must not be disguised as zero findings.
+        resp = self.request("GET", f"repos/{repo}/code-scanning/alerts", params=params)
+        return resp.json()
 
     def get_commit_status(self, repo: str, ref: str) -> dict[str, Any]:
         """Fetch combined commit status for a commit ref."""

@@ -46,6 +46,8 @@ def pr_context(client: GitHubClient, repo: str, number: int, expected_head: str,
     base_ref = validate_ref(base.get('ref', ''))
     is_fork = head_repo.casefold() != repo.casefold()
     if write:
+        if getattr(client, 'restricted_repo', None) and is_fork:
+            raise SecurityError("Server-side PAT cannot mutate contributor forks; use separately authorized credentials.")
         if pr.get('state') != 'open' or pr.get('merged'):
             raise ValidationError("PR must be open and unmerged.")
         if not is_fork and head_ref == base_ref:
@@ -94,14 +96,21 @@ class GitWorkspace:
     def __exit__(self, *exc: Any) -> None:
         shutil.rmtree(self.root)
 
-    def environment(self, *, network: bool = False) -> dict[str, str]:
+    def environment(self, *, network: bool = False, credential_repo: str | None = None) -> dict[str, str]:
         env = {k: os.environ[k] for k in ('PATH', 'SYSTEMROOT', 'LANG') if k in os.environ}
         env.update(HOME=str(self.root), XDG_CONFIG_HOME=str(self.root),
                    GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
                    GIT_TERMINAL_PROMPT='0', GIT_ASKPASS='/bin/false', GIT_ATTR_NOSYSTEM='1',
                    GIT_AUTHOR_NAME='Git Plus', GIT_AUTHOR_EMAIL='git-plus@users.noreply.github.com',
                    GIT_COMMITTER_NAME='Git Plus', GIT_COMMITTER_EMAIL='git-plus@users.noreply.github.com')
-        if network and self.client.token:
+        if network and getattr(self.client, 'restricted_repo', None):
+            if not credential_repo:
+                raise SecurityError("Scoped Git network operations require an explicit repository.")
+            validate_repo(credential_repo)
+        use_token = bool(network and self.client.token)
+        if use_token and getattr(self.client, 'restricted_repo', None):
+            use_token = credential_repo.casefold() == self.client.restricted_repo
+        if use_token:
             host = self.origin()
             encoded = base64.b64encode(('x-access-token:' + self.client.token).encode()).decode()
             env.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0=f'http.{host}/.extraHeader',
@@ -120,13 +129,19 @@ class GitWorkspace:
         validate_repo(repo)
         return f'{self.origin()}/{repo}.git'
 
-    def git(self, *args: str, input: bytes | None = None, network: bool = False, allowed: tuple[int, ...] = (0,)) -> bytes:
+    def git(self, *args: str, input: bytes | None = None, network: bool = False,
+            credential_repo: str | None = None, allowed: tuple[int, ...] = (0,)) -> bytes:
+        if network and getattr(self.client, 'restricted_repo', None):
+            if (not credential_repo or
+                    [a for a in args if a.startswith(self.origin() + '/')] != [self.url(credential_repo)]):
+                raise SecurityError("Scoped Git operation must identify exactly its authorized repository URL.")
         command = ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.attributesFile=/dev/null',
                    '-c', 'credential.helper=', '-c', 'protocol.allow=never', '-c', 'protocol.https.allow=always',
                    '-c', 'http.followRedirects=false', '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false',
                    '-c', 'core.autocrlf=false', '-c', 'core.fsmonitor=false', *args]
         try:
-            result = subprocess.run(command, cwd=self.path, env=self.environment(network=network),
+            result = subprocess.run(command, cwd=self.path,
+                                    env=self.environment(network=network, credential_repo=credential_repo),
                                     input=input, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise GitOperationError("Git operation failed or timed out.") from exc
@@ -144,7 +159,7 @@ class GitWorkspace:
             raise ValidationError("Invalid internal fetch label.")
         options = ['--depth', str(depth)] if depth else []
         self.git('fetch', '--quiet', '--no-tags', *options, '--', self.url(repo),
-                 f'refs/heads/{ref}:refs/git-plus/{label}', network=True)
+                 f'refs/heads/{ref}:refs/git-plus/{label}', network=True, credential_repo=repo)
         actual = self.git('rev-parse', f'refs/git-plus/{label}').decode().strip()
         if actual != expected:
             raise RevisionMismatchError(expected, actual)

@@ -21,6 +21,8 @@ class Settings:
     public_base_url: str | None = None
     allowed_github_users: tuple[str, ...] = ()
     oauth_signing_key: str | None = field(default=None, repr=False)
+    odysseus_pat: str | None = field(default=None, repr=False)
+    odysseus_pat_login: str | None = None
 
     @classmethod
     def load(cls) -> Settings:
@@ -60,6 +62,8 @@ class Settings:
             public_base_url=os.environ.get("GIT_PLUS_PUBLIC_URL"),
             allowed_github_users=users,
             oauth_signing_key=os.environ.get("GIT_PLUS_OAUTH_SIGNING_KEY"),
+            odysseus_pat=os.environ.get("GIT_PLUS_ODYSSEUS_PAT"),
+            odysseus_pat_login=os.environ.get("GIT_PLUS_ODYSSEUS_PAT_LOGIN"),
         )
 
     def is_repo_allowed(self, repo: str) -> bool:

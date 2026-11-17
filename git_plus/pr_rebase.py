@@ -72,14 +72,14 @@ def rebase_pr(client: GitHubClient, repo: str, number: int, expected_head: str, 
             ref = f'refs/heads/{context["head_ref"]}'
             lease = f'--force-with-lease={ref}:{context["head_sha"]}'
             try:
-                work.git('push', '--porcelain', lease, '--', work.url(context['head_repo']), f'{new_sha}:{ref}', network=True)
+                work.git('push', '--porcelain', lease, '--', work.url(context['head_repo']), f'{new_sha}:{ref}', network=True, credential_repo=context['head_repo'])
             except GitOperationError as exc:
                 raise GitOperationError('Rebase push failed or response was lost. Reconcile the branch before retrying.', {
                     'outcome': 'unknown', 'old_sha': context['head_sha'], 'new_sha': new_sha,
                     'head_repo': context['head_repo'], 'head_ref': context['head_ref'],
                 }) from exc
             try:
-                remote = work.git('ls-remote', '--refs', '--', work.url(context['head_repo']), ref, network=True).decode().split()
+                remote = work.git('ls-remote', '--refs', '--', work.url(context['head_repo']), ref, network=True, credential_repo=context['head_repo']).decode().split()
             except GitOperationError as exc:
                 raise GitOperationError('Push accepted, remote verification unavailable. Reconcile before retrying.', {
                     'outcome': 'unknown', 'new_sha': new_sha,

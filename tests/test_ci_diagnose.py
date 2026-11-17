@@ -195,6 +195,10 @@ def test_diagnose_ci_code_scanning_api_error_marks_incomplete() -> None:
     client.request.side_effect = APIError("Forbidden", status_code=403)
     res = diagnose_ci(client, "owner/repo", 10)
     assert res["evidence_complete"] is False
+    assert res["code_scanning_available"] is False
+    assert res["code_scanning_error"] == {
+        "status_code": 403, "classification": "unavailable_or_unauthorized"
+    }
 
 
 def test_diagnose_ci_code_scanning_alerts_require_captured_commit() -> None:
