@@ -237,3 +237,28 @@ def test_diagnose_ci_revision_mismatch() -> None:
             10,
             expected_head="ffff0000ffff0000ffff0000ffff0000ffff0000",
         )
+
+
+def test_single_excerpt_always_includes_failure_anchor():
+    excerpts, categories = extract_failure_excerpts('context one\ncontext two\nError: broken\ncontext after\n', max_excerpts=1)
+    assert len(excerpts) == 1
+    assert 'Error: broken' in excerpts[0]['text']
+    assert categories
+
+
+@pytest.mark.parametrize('kwargs', [{'max_excerpts': 0}, {'context_lines': -1}])
+def test_invalid_excerpt_bounds(kwargs):
+    with pytest.raises(ValidationError):
+        extract_failure_excerpts('Error: failure', **kwargs)
+
+
+def test_failed_job_collection_has_a_network_budget():
+    client = _minimal_ci_client()
+    client.get_workflow_runs.return_value = {'workflow_runs': [{'id': 1, 'head_sha': 'a'*40}]}
+    client.get_run_jobs.return_value = {'jobs': [
+        {'id': i + 1, 'conclusion': 'failure'} for i in range(25)]}
+    client.get_job_logs.return_value = 'Error: failure\n'
+    result = diagnose_ci(client, 'owner/repo', 1)
+    assert len(result['failed_jobs']) == 20
+    assert result['jobs_limited'] and not result['evidence_complete']
+    assert client.get_job_logs.call_count == 20

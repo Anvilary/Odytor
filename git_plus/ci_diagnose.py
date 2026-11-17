@@ -14,7 +14,7 @@ from git_plus.errors import APIError, RevisionMismatchError, ValidationError
 from git_plus.github import GitHubClient, validate_repo, validate_sha
 
 _FAILURE_LINE_RE = re.compile(
-    r"FAILED\s|AssertionError|Traceback|fatal error|exception|"
+    r"FAILED\s|AssertionError|Traceback|fatal error|exception|\berror:|##\[error\]|"
     r"runner.*(?:lost|offline)|operation was canceled|"
     r"could not compile|build error|syntax error|compilation error|"
     r"eslint.*error|ruff.*failed|flake8|mypy: error|TS\d{4}:",
@@ -109,6 +109,8 @@ def extract_failure_excerpts(
     context_lines: int = 2,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Extract bounded failure lines with surrounding context and file/line coordinates."""
+    if max_excerpts <= 0 or context_lines < 0:
+        raise ValidationError("Excerpt limit must be positive and context lines nonnegative.")
     cleaned = redact_text(content)
     lines = cleaned.splitlines()
 
@@ -116,13 +118,14 @@ def extract_failure_excerpts(
     if not matched_indices:
         return [], []
 
-    selected_indices: set[int] = set()
+    # Preserve failure anchors before spending the remaining budget on context.
+    selected_indices: set[int] = set(matched_indices[:max_excerpts])
     for idx in matched_indices[:max_excerpts]:
-        start = max(0, idx - context_lines)
-        end = min(len(lines), idx + context_lines + 1)
-        selected_indices.update(range(start, end))
-
-    sorted_indices = sorted(selected_indices)[:max_excerpts]
+        for context in range(max(0, idx - context_lines), min(len(lines), idx + context_lines + 1)):
+            if len(selected_indices) >= max_excerpts:
+                break
+            selected_indices.add(context)
+    sorted_indices = sorted(selected_indices)
 
     excerpts: list[dict[str, Any]] = []
     categories: set[str] = set()
@@ -201,6 +204,8 @@ def diagnose_ci(
     overall_categories: set[str] = set()
     logs_available = True
     selected_job_found = False
+    jobs_limited = False
+    code_scanning_available = False
 
     for run in runs:
         r_id = run.get("id")
@@ -241,6 +246,10 @@ def diagnose_ci(
                         }
                     )
 
+            if len(diagnosed_jobs) >= 20:
+                evidence_complete = False
+                jobs_limited = True
+                break
             log_text = client.get_job_logs(repo, j_id)
             excerpts: list[dict[str, Any]] = []
             job_categories: list[str] = []
@@ -305,6 +314,7 @@ def diagnose_ci(
                 params={"per_page": 100, "ref": f"refs/pull/{number}/head"},
             )
             raw_alerts = response.json()
+            code_scanning_available = True
         except APIError:
             raw_alerts = []
             evidence_complete = False
@@ -354,6 +364,9 @@ def diagnose_ci(
         ),
         "inconsistent_snapshot": not snapshot_consistent,
         "logs_available": logs_available,
+        "jobs_limited": jobs_limited,
+        "max_diagnosed_jobs": 20,
+        "code_scanning_available": code_scanning_available,
     }
 
     return safe_payload(result)
