@@ -48,5 +48,5 @@ def test_all_recovered_schemas():
         async with Client(create_server()) as client:
             tools = {t.name: t for t in await client.list_tools()}
             assert {'pr_evidence', 'ci_diagnose', 'quick_fix'} <= tools.keys()
-            assert tools['quick_fix'].inputSchema['required'] == ['repo', 'number', 'expected_head', 'patch', 'commit_message']
+            assert tools['quick_fix'].input_schema['required'] == ['repo', 'number', 'expected_head', 'patch', 'commit_message']
     asyncio.run(verify())

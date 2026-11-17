@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Anvilary" }]
 dependencies = [
-    "fastmcp>=3.0.0",
+    "fastmcp>=4.2,<5",
     "requests>=2.31.0",
 ]
 

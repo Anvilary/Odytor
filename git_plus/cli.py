@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import sys
+from urllib.parse import urlsplit
 
 from git_plus import __version__
 from git_plus.config import Settings
@@ -41,15 +41,20 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
     settings = Settings.load()
-    server = create_server(settings)
-
     if args.transport == "stdio":
+        server = create_server(settings)
         server.run(transport="stdio")
     else:
+        server = create_server(settings, remote=True)
+        public = urlsplit(settings.public_base_url or f"http://{args.host}:{args.port}")
         server.run(
-            transport="sse",
+            host_origin_protection=True,
+            allowed_hosts=[public.netloc],
+            allowed_origins=[f"{public.scheme}://{public.netloc}"],
+            transport="sse" if args.transport == "sse" else "streamable-http",
             host=args.host,
             port=args.port,
+            **({"stateless_http": True} if args.transport in {"http", "streamable-http"} else {}),
         )
 
 
