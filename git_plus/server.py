@@ -13,6 +13,7 @@ from git_plus.errors import GitPlusError, SecurityError
 from git_plus.github import GitHubClient
 from git_plus.pr_evidence import get_pr_evidence
 from git_plus.quick_fix import apply_quick_fix
+from git_plus.pr_conflicts import get_pr_conflicts
 
 
 def create_server(settings: Settings | None = None) -> FastMCP:
@@ -172,6 +173,16 @@ def create_server(settings: Settings | None = None) -> FastMCP:
             raise SecurityError(f"Repository '{repo}' is not permitted by Git Plus configuration.")
         try:
             return apply_quick_fix(client, repo, number, expected_head, patch, commit_message)
+        except GitPlusError as err:
+            return err.to_dict()
+
+    @mcp.tool(name="pr_conflicts", description="Inspect an exact head/base merge using isolated Git. Returns conflicting paths, index stages and actual text regions with completeness metadata. Executes no repository code.")
+    def pr_conflicts(repo: str, number: Annotated[int, Field(ge=1)], expected_head: str,
+                     expected_base: str | None = None, max_paths: Annotated[int, Field(ge=1, le=100)] = 100) -> dict[str, Any]:
+        if not cfg.is_repo_allowed(repo):
+            raise SecurityError(f"Repository '{repo}' is not permitted by Git Plus configuration.")
+        try:
+            return get_pr_conflicts(client, repo, number, expected_head, expected_base, max_paths)
         except GitPlusError as err:
             return err.to_dict()
 
