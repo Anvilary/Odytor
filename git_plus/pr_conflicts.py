@@ -66,11 +66,19 @@ def get_pr_conflicts(client: GitHubClient, repo: str, number: int, expected_head
         raise ValidationError('max_paths must be between 1 and 100.')
     context = pr_context(client, repo, number, expected_head)
     if expected_base is not None and validate_sha(expected_base) != context['base_sha']:
-        raise RevisionMismatchError(expected_base, context['base_sha'])
+        raise RevisionMismatchError(expected_base, context['base_sha'], revision='base')
     with GitWorkspace(client) as work:
         work.fetch(context['head_repo'], context['head_ref'], context['head_sha'], 'head')
-        work.fetch(context['base_repo'], context['base_ref'], context['base_sha'], 'base')
+        # The PR API's base SHA can lag the live branch tip. Preserve the caller's
+        # immutable snapshot when that SHA is still an ancestor of the fetched tip.
+        # The result must explicitly disclose that it is not a current-tip check.
+        observed_base = work.fetch(context['base_repo'], context['base_ref'], context['base_sha'],
+                                   'base', allow_base_ancestor=True)
         result = inspect_merge(work, context['base_sha'], context['head_sha'], max_paths=max_paths)
         verify_context(client, repo, number, context, base=True)
+    base_is_current = observed_base == context['base_sha']
     return safe_payload({'repo': repo, 'number': number, 'head_sha': context['head_sha'],
-                         'base_sha': context['base_sha'], **result})
+                         'base_sha': context['base_sha'], 'base_branch_tip_sha': observed_base,
+                         'base_snapshot_is_current': base_is_current,
+                         'current_base_conflicts_checked': base_is_current,
+                         'merge_scope': 'captured_pr_base_sha', **result})

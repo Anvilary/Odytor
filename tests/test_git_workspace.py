@@ -36,8 +36,8 @@ def local_fetch(monkeypatch, repository):
         # Only the fixture transport allows file access. Production stays HTTPS-only.
         run(self.path, '-c', 'protocol.file.allow=always', 'fetch', '-q', str(repo), f'{ref}:refs/git-plus/{label}')
         actual = self.git('rev-parse', f'refs/git-plus/{label}').decode().strip()
-        if actual != expected:
-            raise RevisionMismatchError(expected, actual)
+        return self.verify_fetched_revision(label, expected, actual,
+                                            allow_base_ancestor=kwargs.get('allow_base_ancestor', False))
     monkeypatch.setattr(GitWorkspace, 'fetch', fetch)
     return repo, sha
 

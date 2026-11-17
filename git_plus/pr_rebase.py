@@ -21,7 +21,7 @@ def rebase_pr(client: GitHubClient, repo: str, number: int, expected_head: str, 
     expected_base = validate_sha(expected_base, 'expected_base')
     context = pr_context(client, repo, number, expected_head, write=apply)
     if context['base_sha'] != expected_base:
-        raise RevisionMismatchError(expected_base, context['base_sha'])
+        raise RevisionMismatchError(expected_base, context['base_sha'], revision='base')
     result: dict[str, Any] = {'repo': repo, 'number': number, 'head_repo': context['head_repo'],
         'head_ref': context['head_ref'], 'old_sha': context['head_sha'], 'base_sha': expected_base,
         'applied': False, 'validation': {'tests_run': False},

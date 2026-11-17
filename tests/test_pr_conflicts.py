@@ -41,13 +41,57 @@ def test_clean_merge(local_fetch):
     result = get_pr_conflicts(client, 'owner/repo', 1, head)
     assert result['conflicting'] is False
     assert result['conflicts'] == []
+    assert result['base_snapshot_is_current'] is True
+    assert result['current_base_conflicts_checked'] is True
 
 
 def test_conflict_rejects_changed_base(local_fetch):
     _, head = local_fetch
     client = client_for(head)
-    with pytest.raises(RevisionMismatchError):
+    with pytest.raises(RevisionMismatchError) as exc:
         get_pr_conflicts(client, 'owner/repo', 1, head, 'a'*40)
+    assert exc.value.diagnostic['revision'] == 'base'
+    assert exc.value.diagnostic['expected_base'] == 'a'*40
+
+
+def test_base_branch_advanced_but_snapshot_is_ancestor(local_fetch):
+    repo, _ = local_fetch
+    base, head = diverge(repo, conflict=False)
+    run(repo, 'checkout', '-q', 'main')
+    (repo / 'later.py').write_text('advance target after PR snapshot\n')
+    run(repo, 'add', 'later.py')
+    run(repo, 'commit', '-qm', 'advance base')
+    new_base_tip = run(repo, 'rev-parse', 'HEAD').decode().strip()
+    run(repo, 'checkout', '-q', 'feature')
+    client = client_for(head)
+    client.get_pr.return_value['base']['sha'] = base
+    result = get_pr_conflicts(client, 'owner/repo', 1, head, base)
+    assert result['base_sha'] == base
+    assert result['base_branch_tip_sha'] == new_base_tip
+    assert result['base_snapshot_is_current'] is False
+    assert result['current_base_conflicts_checked'] is False
+    assert result['merge_scope'] == 'captured_pr_base_sha'
+    assert result['conflicting'] is False
+
+
+def test_unreachable_base_snapshot_fails_with_base_diagnostic(local_fetch):
+    repo, _ = local_fetch
+    base, head = diverge(repo, conflict=False)
+    run(repo, 'checkout', '-q', 'main')
+    # Simulate a rewritten target branch that no longer contains the snapshot.
+    run(repo, 'checkout', '-q', '--orphan', 'new-root')
+    run(repo, 'rm', '-rfq', '.')
+    (repo / 'new-root.txt').write_text('rewritten\n')
+    run(repo, 'add', 'new-root.txt')
+    run(repo, 'commit', '-qm', 'rewrite target')
+    run(repo, 'branch', '-f', 'main', 'HEAD')
+    run(repo, 'checkout', '-q', 'feature')
+    client = client_for(head)
+    client.get_pr.return_value['base']['sha'] = base
+    with pytest.raises(RevisionMismatchError) as exc:
+        get_pr_conflicts(client, 'owner/repo', 1, head, base)
+    assert exc.value.diagnostic['revision'] == 'base'
+    assert exc.value.diagnostic['expected_base'] == base
 
 
 def test_structural_conflict_has_explicit_region_limit(local_fetch):

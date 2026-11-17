@@ -70,8 +70,10 @@ def verify_context(client: GitHubClient, repo: str, number: int, context: dict[s
     keys = ['head_repo', 'head_ref', 'base_repo', 'base_ref']
     if base:
         keys.append('base_sha')
+    if base and fresh['base_sha'] != context['base_sha']:
+        raise RevisionMismatchError(context['base_sha'], fresh['base_sha'], revision='base')
     if any(fresh[k] != context[k] for k in keys):
-        raise RevisionMismatchError(context['head_sha'], fresh['head_sha'], "PR target or base changed during operation.")
+        raise RevisionMismatchError(context['head_sha'], fresh['head_sha'], "PR source or target changed during operation.")
 
 
 class GitWorkspace:
@@ -152,7 +154,8 @@ class GitWorkspace:
             raise GitOperationError(f"Git {args[0]} failed: {safe_text(text, 1024)}")
         return result.stdout
 
-    def fetch(self, repo: str, ref: str, expected: str, label: str, *, depth: int | None = None) -> None:
+    def fetch(self, repo: str, ref: str, expected: str, label: str, *, depth: int | None = None,
+              allow_base_ancestor: bool = False) -> str:
         validate_ref(ref)
         expected = validate_sha(expected)
         if label not in {'head', 'base'}:
@@ -161,5 +164,19 @@ class GitWorkspace:
         self.git('fetch', '--quiet', '--no-tags', *options, '--', self.url(repo),
                  f'refs/heads/{ref}:refs/git-plus/{label}', network=True, credential_repo=repo)
         actual = self.git('rev-parse', f'refs/git-plus/{label}').decode().strip()
-        if actual != expected:
-            raise RevisionMismatchError(expected, actual)
+        return self.verify_fetched_revision(label, expected, actual,
+                                            allow_base_ancestor=allow_base_ancestor)
+
+    def verify_fetched_revision(self, label: str, expected: str, actual: str,
+                                *, allow_base_ancestor: bool = False) -> str:
+        """Allow snapshot-only reads when the PR base is an ancestor of the remote branch tip."""
+        if actual == expected:
+            return actual
+        if label == 'base' and allow_base_ancestor:
+            try:
+                common = self.git('merge-base', expected, actual).decode().strip()
+            except GitOperationError:
+                common = None
+            if common == expected:
+                return actual
+        raise RevisionMismatchError(expected, actual, revision=label)

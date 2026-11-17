@@ -47,9 +47,18 @@ class RevisionMismatchError(GitPlusError):
         expected: str,
         actual: str,
         message: str | None = None,
+        *,
+        revision: str = "head",
     ) -> None:
-        msg = message or f"PR head revision mismatch: expected {expected}, found {actual}."
-        super().__init__(msg, {"expected_head": expected, "actual_head": actual})
+        if revision not in {"head", "base"}:
+            raise ValueError("Unsupported revision type.")
+        msg = message or f"PR {revision} revision mismatch: expected {expected}, found {actual}."
+        diagnostic = {
+            "revision": revision,
+            f"expected_{revision}": expected,
+            f"actual_{revision}": actual,
+        }
+        super().__init__(msg, diagnostic)
         self.expected = expected
         self.actual = actual
 
