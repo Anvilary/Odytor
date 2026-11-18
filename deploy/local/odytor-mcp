@@ -40,6 +40,8 @@ for suffix in AUTH_TOKEN SERVER_PAT SERVER_PAT_LOGIN SERVER_PAT_REPOSITORY ODYSS
 done
 export GITHUB_TOKEN="$TOKEN"
 unset TOKEN
-export ODYTOR_ALLOWED_REPOSITORIES="$ALLOWED_REPOSITORIES"
+# Both spellings, with the same value: the launcher may end up running an installation that was made before the rename and
+# only reads the old one, and an empty allowlist means unrestricted access. Equal values are accepted by Odytor.
+export ODYTOR_ALLOWED_REPOSITORIES="$ALLOWED_REPOSITORIES" GIT_PLUS_ALLOWED_REPOSITORIES="$ALLOWED_REPOSITORIES"
 
 exec "$EXE" --transport stdio "$@"
