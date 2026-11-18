@@ -82,3 +82,19 @@ def test_fork_permissions_and_stale_head():
         pr_context(client, 'owner/repo', 1, 'a'*40, write=True)
     with pytest.raises(RevisionMismatchError):
         pr_context(client, 'owner/repo', 1, 'b'*40, write=True)
+
+
+def test_workspace_cleanup_failure_never_replaces_the_operation_result(monkeypatch):
+    """A rebase pushes and verifies inside the workspace; a later cleanup error must not turn that into a failure."""
+    import shutil
+    real = shutil.rmtree
+
+    def strict_rmtree(path, ignore_errors=False, **kwargs):
+        real(path, ignore_errors=True)
+        if not ignore_errors:
+            raise OSError(16, 'Device or resource busy')  # what an unguarded cleanup would hit
+    monkeypatch.setattr('git_plus.git_workspace.shutil.rmtree', strict_rmtree)
+    with GitWorkspace(Mock(token=None)) as work:
+        assert work.path.is_dir()
+        result = {'applied': True, 'remote_verified': True}
+    assert result['applied'] is True and not work.root.exists()

@@ -131,12 +131,14 @@ class GitWorkspace:
         try:
             self.git('init', '--quiet', '--template=')
         except BaseException:
-            shutil.rmtree(self.root)
+            shutil.rmtree(self.root, ignore_errors=True)
             raise
         return self
 
     def __exit__(self, *exc: Any) -> None:
-        shutil.rmtree(self.root)
+        # Cleanup is best effort: it must never replace the outcome of an operation that already pushed or
+        # failed, and the workspace holds no credentials (they are passed per command through the environment).
+        shutil.rmtree(self.root, ignore_errors=True)
 
     def environment(self, *, network: bool = False, credential_repo: str | None = None,
                     write: bool = False) -> dict[str, str]:
