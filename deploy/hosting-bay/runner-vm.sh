@@ -58,7 +58,8 @@ start)
     -display none -serial file:/tmp/console.log -monitor none \
     -drive file=/vm/vm.qcow2,if=virtio,cache=none,aio=native,discard=unmap \
     -drive file=/vm/seed.iso,if=virtio,media=cdrom,readonly=on,format=raw \
-    -netdev user,id=n0,hostfwd=tcp::2222-:22 -device virtio-net-pci,netdev=n0 -device virtio-rng-pci >/dev/null
+    -netdev user,id=n0,hostfwd=tcp::2222-:22 -device virtio-net-pci,netdev=n0 -device virtio-rng-pci \
+    -device virtio-balloon-pci,free-page-reporting=on,deflate-on-oom=on >/dev/null
   echo "started $CT at $GUEST_IP:2222" ;;
 stop)
   ssh_admin 'sudo systemctl poweroff' >/dev/null 2>&1 || true
