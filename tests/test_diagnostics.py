@@ -1,6 +1,7 @@
 """Tests for diagnostics, credential redaction, and truncation integrity."""
 
 import os
+import pytest
 from git_plus.diagnostics import (
     TRUNCATION_MARKER,
     redact_text,
@@ -76,7 +77,7 @@ def test_entire_response_has_a_byte_bound_and_honest_flags():
     payload = {'head_sha': 'a'*40, 'conflicts': [
         {'path': f'file{i}.py', 'regions': [{'text': 'x'*8000}], 'regions_complete': True}
         for i in range(100)], 'paths_complete': True, 'regions_complete': True}
-    result = safe_payload(payload)
+    result = safe_payload(payload, total_bytes=65536)
     assert len(json.dumps(result).encode()) <= 65536
     assert result['truncated']
     assert not result['paths_complete'] and not result['regions_complete']
@@ -89,3 +90,31 @@ def test_nested_region_truncation_clears_completeness():
     result = safe_payload(payload, limit=50)
     assert not result['regions_complete']
     assert not result['conflicts'][0]['regions_complete']
+
+
+def test_default_response_budget_is_larger_and_configurable():
+    import json
+    from git_plus import diagnostics
+    assert diagnostics.DEFAULT_PAYLOAD_LIMIT == 262144
+    payload = {'diff': '+ a diff line with ordinary content\n' * 9000, 'diff_complete': True, 'evidence_complete': True}
+    try:
+        diagnostics.set_payload_limit(diagnostics.DEFAULT_PAYLOAD_LIMIT)
+        wide = safe_payload(payload)
+        diagnostics.set_payload_limit(32768)
+        narrow = safe_payload(payload)
+    finally:
+        diagnostics.set_payload_limit(diagnostics.DEFAULT_PAYLOAD_LIMIT)
+    assert 100000 < len(json.dumps(wide)) <= 262144 and 16000 < len(json.dumps(narrow)) <= 32768
+    assert wide['diff_complete'] is False and wide['truncated_fields'] == ['diff']  # still honest when it must cut
+    for bad in (100, 10 ** 9, '65536', True):
+        with pytest.raises(ValueError):
+            diagnostics.set_payload_limit(bad)
+
+
+def test_a_diff_is_not_held_to_the_small_per_string_cap_but_other_text_is():
+    text = 'x' * 50000
+    result = safe_payload({'diff': text, 'note': text, 'diff_complete': True})
+    assert len(result['diff']) == 50000 and len(result['note']) < 9000
+    assert result['truncated_fields'] == ['note'] and result['diff_complete'] is False
+    explicit = safe_payload({'diff': text, 'diff_complete': True}, limit=1000)
+    assert len(explicit['diff']) < 1100  # an explicit limit still binds the diff

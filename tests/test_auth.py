@@ -49,7 +49,7 @@ def test_github_client_closes_its_per_call_session():
     with patch("git_plus.auth.GitHubClient", return_value=client) as factory:
         with github_client(settings()) as result:
             assert result is client
-        factory.assert_called_once_with(token="local-token", base_url="https://api.github.com")
+        factory.assert_called_once_with(token="local-token", base_url="https://api.github.com", timeout=120.0)
         client.session.close.assert_called_once_with()
 
 

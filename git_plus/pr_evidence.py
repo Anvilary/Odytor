@@ -51,6 +51,47 @@ query($owner: String!, $repo: String!, $number: Int!) {
 """
 
 
+GITHUB_FILE_LIST_CAP = 3000        # the files endpoint lists at most this many files
+ASSEMBLED_DIFF_MAX_BYTES = 8 * 1024 * 1024
+AUTO_PATCH_FILE_LIMIT = 30         # per-file patches are included by default only for PRs up to this many files
+NO_PATCH_NOTE = "# git-plus: patch not provided by GitHub for this file (binary, or too large)"
+
+
+def _diff_from_files(client: GitHubClient, repo: str, number: int) -> tuple[str, dict[str, Any]]:
+    """Rebuild a unified diff from the paginated files API when GitHub refuses the whole diff.
+
+    GitHub omits `patch` for binary and oversized files; those are listed, never silently skipped.
+    """
+    parts: list[str] = []
+    missing: list[str] = []
+    listed = size = 0
+    capped = False
+    for page in range(1, GITHUB_FILE_LIST_CAP // 100 + 1):
+        batch = client.get_pr_files(repo, number, per_page=100, page=page)
+        for entry in batch:
+            name = str(entry.get("filename") or "")
+            old = str(entry.get("previous_filename") or name)
+            status = entry.get("status")
+            patch = entry.get("patch")
+            head = [f"diff --git a/{old} b/{name}",
+                    "--- /dev/null" if status == "added" else f"--- a/{old}",
+                    "+++ /dev/null" if status == "removed" else f"+++ b/{name}"]
+            if isinstance(patch, str) and patch:
+                chunk = "\n".join([*head, patch])
+            else:
+                missing.append(name)
+                chunk = "\n".join([*head, NO_PATCH_NOTE])
+            listed += 1
+            size += len(chunk.encode("utf-8", errors="replace")) + 1
+            if size > ASSEMBLED_DIFF_MAX_BYTES:
+                capped = True
+                break
+            parts.append(chunk)
+        if capped or len(batch) < 100:
+            break
+    return "\n".join(parts), {"files_listed": listed, "files_without_patch": missing, "byte_capped": capped}
+
+
 def get_pr_evidence(
     client: GitHubClient,
     repo: str,
@@ -66,8 +107,15 @@ def get_pr_evidence(
     include_instructions: bool = True,
     files_page: int = 1,
     files_per_page: int = 100,
+    diff_offset: int = 0,
+    include_file_patches: bool | None = None,
 ) -> dict[str, Any]:
-    """Retrieve comprehensive, snapshot-consistent PR evidence."""
+    """Retrieve comprehensive, snapshot-consistent PR evidence.
+
+    Very large PRs are read in windows: `files_page` pages the file list and `diff_offset` pages the diff (the next
+    window starts at diff_offset + diff_returned_lines). Per-file patches are included by default only for PRs of at
+    most AUTO_PATCH_FILE_LIMIT files, because the diff already carries them.
+    """
     owner, name = validate_repo(repo)
     if number < 1:
         raise ValidationError(f"Pull request number must be positive (got {number}).")
@@ -77,6 +125,8 @@ def get_pr_evidence(
         raise ValidationError("max_diff_bytes must be positive and at most 8 MiB.")
     if not 1 <= max_diff_lines <= 5000:
         raise ValidationError("max_diff_lines must be positive.")
+    if type(diff_offset) is not int or diff_offset < 0:
+        raise ValidationError("diff_offset must be zero or a positive line offset.")
 
     if expected_head:
         expected_head = validate_sha(expected_head, "expected_head")
@@ -114,6 +164,8 @@ def get_pr_evidence(
     }
 
     files_complete = True
+    total_files = initial_pr.get("changed_files", 0)
+    patches_wanted = include_file_patches if include_file_patches is not None else total_files <= AUTO_PATCH_FILE_LIMIT
     if include_files:
         files_data = client.get_pr_files(
             repo,
@@ -123,47 +175,64 @@ def get_pr_evidence(
         )
         file_entries = []
         for f in files_data:
-            file_entries.append(
-                {
-                    "filename": f.get("filename"),
-                    "status": f.get("status"),
-                    "additions": f.get("additions"),
-                    "deletions": f.get("deletions"),
-                    "changes": f.get("changes"),
-                    "patch_excerpt": f.get("patch"),
-                }
-            )
+            entry = {
+                "filename": f.get("filename"),
+                "status": f.get("status"),
+                "additions": f.get("additions"),
+                "deletions": f.get("deletions"),
+                "changes": f.get("changes"),
+            }
+            if f.get("previous_filename"):
+                entry["previous_filename"] = f.get("previous_filename")
+            if patches_wanted:
+                entry["patch_excerpt"] = f.get("patch")
+            file_entries.append(entry)
         result["files"] = file_entries
         total_files = initial_pr.get("changed_files", len(file_entries))
         files_complete = files_page == 1 and len(file_entries) >= total_files
         result["files_complete"] = files_complete
         result["files_page"] = files_page
+        result["files_total"] = total_files
+        result["files_next_page"] = files_page + 1 if files_page * files_per_page < total_files else None
+        result["file_patches_included"] = bool(patches_wanted)
     else:
         result["files_complete"] = False
 
     diff_complete = True
     if include_diff:
-        raw_diff = client.get_pr_diff(repo, number)
-        bounded_diff, byte_cut = safe_text_tracked(raw_diff, limit=None, max_bytes=max_diff_bytes)
-        redacted = bounded_diff != raw_diff and not byte_cut
-        diff_lines = bounded_diff.splitlines()
-        total_diff_lines = len(diff_lines)
-        if total_diff_lines > max_diff_lines:
-            selected_lines = diff_lines[:max_diff_lines]
-            diff_complete = False
-            result["diff"] = "\n".join(selected_lines)
-            result["diff_truncated"] = True
-        else:
-            result["diff"] = bounded_diff
-            result["diff_truncated"] = False
+        diff_source, fallback = "pull_diff", None
+        try:
+            raw_diff = client.get_pr_diff(repo, number)
+        except APIError as exc:
+            if not client.is_diff_too_large(exc):
+                raise
+            raw_diff, fallback = _diff_from_files(client, repo, number)
+            diff_source = "files_api"
+            result["diff_fallback_reason"] = safe_text(str(exc.diagnostic.get("message", "")), 300)
+        all_lines = raw_diff.splitlines()
+        window = all_lines[diff_offset:diff_offset + max_diff_lines]
+        window_text = "\n".join(window)
+        bounded_diff, byte_cut = safe_text_tracked(window_text, limit=None, max_bytes=max_diff_bytes)
+        redacted = bounded_diff != window_text and not byte_cut
+        has_more = diff_offset + len(window) < len(all_lines)
+        result["diff"] = bounded_diff
+        result["diff_source"] = diff_source
+        result["diff_offset"] = diff_offset
+        result["diff_has_more"] = has_more
+        result["diff_truncated"] = has_more or byte_cut or diff_offset > 0
         result["diff_redacted"] = redacted
-        result["diff_truncated"] = result["diff_truncated"] or byte_cut
-        diff_complete = diff_complete and not byte_cut and not redacted
-        diff_file_count = sum(line.startswith("diff --git ") for line in raw_diff.splitlines())
-        if diff_file_count != initial_pr.get("changed_files", diff_file_count):
+        diff_complete = diff_offset == 0 and not has_more and not byte_cut and not redacted
+        diff_file_count = sum(line.startswith("diff --git ") for line in all_lines)
+        if fallback is not None:
+            result["diff_files_listed"] = fallback["files_listed"]
+            result["diff_files_total"] = total_files
+            result["diff_files_without_patch"] = fallback["files_without_patch"][:50]
+            if fallback["files_without_patch"] or fallback["byte_capped"] or fallback["files_listed"] != total_files:
+                diff_complete = False
+        elif diff_file_count != initial_pr.get("changed_files", diff_file_count):
             diff_complete = False
-        result["diff_total_lines"] = len(raw_diff.splitlines())
-        result["diff_returned_lines"] = min(total_diff_lines, max_diff_lines)
+        result["diff_total_lines"] = len(all_lines)
+        result["diff_returned_lines"] = len(window)
         result["diff_complete"] = diff_complete
     else:
         result["diff_complete"] = False

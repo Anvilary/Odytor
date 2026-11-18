@@ -71,9 +71,9 @@ def test_pat_used_only_for_exact_authenticated_identity_and_target():
         with github_client(settings(), remote=True, repo="Anvilary/git-plus"):
             pass
     assert created == [
-        {"token": PAT, "base_url": "https://api.github.com", "restricted_repo": TARGET,
+        {"token": PAT, "base_url": "https://api.github.com", "timeout": 120.0, "restricted_repo": TARGET,
          "principal": "alteixeira20"},
-        {"token": "normal-upstream", "base_url": "https://api.github.com", "principal": "alteixeira20"},
+        {"token": "normal-upstream", "base_url": "https://api.github.com", "timeout": 120.0, "principal": "alteixeira20"},
     ]
 
 
@@ -193,7 +193,7 @@ def test_non_pat_oauth_identity_can_still_use_its_own_token():
     ) as factory:
         with github_client(settings(allowed_github_users=("alteixeira20", "bob")), remote=True, repo=TARGET):
             pass
-        factory.assert_called_once_with(token="bob-oauth", base_url="https://api.github.com", principal="bob")
+        factory.assert_called_once_with(token="bob-oauth", base_url="https://api.github.com", timeout=120.0, principal="bob")
 
 
 def test_odysseus_pat_environment_loading(monkeypatch):

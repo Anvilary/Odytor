@@ -68,7 +68,7 @@ class GitHubClient:
         self,
         token: str | None = None,
         base_url: str = "https://api.github.com",
-        timeout: float = 30.0,
+        timeout: float = 120.0,
         max_retries: int = 3,
         session: requests.Session | None = None,
         max_response_bytes: int = 8 * 1024 * 1024,
@@ -82,7 +82,8 @@ class GitHubClient:
             raise ValidationError("Timeout and attempt count must be positive.")
         self.token = token
         self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
+        # (connect, read): GitHub can take a long time to build the diff or file list of a very large PR.
+        self.timeout = (min(10.0, timeout), timeout)
         self.max_response_bytes = max_response_bytes
         self.max_retries = max_retries
         self.session = session or requests.Session()
@@ -308,6 +309,12 @@ class GitHubClient:
         validate_repo(repo)
         resp = self.request("GET", f"repos/{repo}/pulls/{number}")
         return resp.json()
+
+    @staticmethod
+    def is_diff_too_large(exc: APIError) -> bool:
+        """GitHub refuses the diff of a PR over 20,000 lines or 300 files with 406; the files API still works."""
+        message = str((exc.diagnostic or {}).get("message", "")).lower()
+        return exc.status_code == 406 and "diff exceeded the maximum" in message
 
     def get_pr_diff(self, repo: str, number: int) -> str:
         """Fetch unified diff text for a pull request."""

@@ -34,6 +34,10 @@ def _verify_fork_network(base_repo: str, target: dict[str, Any]) -> None:
         raise SecurityError("PR head repository is not a fork in the base repository network.")
 
 
+# Fetching a large repository or a PR with hundreds of files and long history can take minutes.
+GIT_TIMEOUT_SECONDS = 300
+
+
 def _repo_id(repo: Any) -> int | None:
     """GitHub's stable numeric repository id from trusted API data, when present."""
     value = repo.get('id') if isinstance(repo, dict) else None
@@ -201,7 +205,7 @@ class GitWorkspace:
         try:
             result = subprocess.run(command, cwd=self.path,
                                     env=self.environment(network=network, credential_repo=credential_repo, write=write),
-                                    input=input, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+                                    input=input, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=GIT_TIMEOUT_SECONDS)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise GitOperationError("Git operation failed or timed out.") from exc
         if result.returncode not in allowed:

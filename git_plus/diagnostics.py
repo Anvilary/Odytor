@@ -9,8 +9,19 @@ from typing import Any
 
 TRUNCATION_MARKER = "\n[output truncated]"
 DEFAULT_TEXT_LIMIT = 8192
-DEFAULT_PAYLOAD_LIMIT = 65536
+DEFAULT_PAYLOAD_LIMIT = 262144
+MIN_PAYLOAD_LIMIT, MAX_PAYLOAD_LIMIT = 16384, 4 * 1024 * 1024
 MAX_RECURSION_DEPTH = 64
+
+_payload_limit = DEFAULT_PAYLOAD_LIMIT
+
+
+def set_payload_limit(limit: int) -> None:
+    """Total bytes of one tool response (before MCP framing); set once from configuration at server start."""
+    global _payload_limit
+    if type(limit) is not int or not MIN_PAYLOAD_LIMIT <= limit <= MAX_PAYLOAD_LIMIT:
+        raise ValueError(f"Response limit must be between {MIN_PAYLOAD_LIMIT} and {MAX_PAYLOAD_LIMIT} bytes.")
+    _payload_limit = limit
 
 _CONTROL_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _TOKEN_RE = re.compile(r"(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]+|\bBearer\s+[^\s,;]+", re.I)
@@ -105,15 +116,20 @@ def safe_payload(
     limit: int | None = DEFAULT_TEXT_LIMIT,
     *,
     max_bytes: int | None = None,
-    total_bytes: int = DEFAULT_PAYLOAD_LIMIT,
+    total_bytes: int | None = None,
 ) -> Any:
     """Enforce credential redaction and truncation tracking across arbitrary nested structures.
 
     Invariant: Whenever content is truncated, set diff_complete=False, complete=False,
     and evidence_complete=False. Populate truncated_fields with exact field paths.
     """
+    if total_bytes is None:
+        total_bytes = _payload_limit
     if total_bytes < 512:
         raise ValueError("total_bytes must be at least 512.")
+    # With the default per-string limit, a top-level `diff` is bounded by the caller's line and byte limits and by the
+    # response budget instead; an explicit limit from a caller binds every string.
+    exempt = ("diff",) if limit == DEFAULT_TEXT_LIMIT else ()
     result, _, _ = _safe_payload_track(
         payload,
         "",
@@ -121,6 +137,7 @@ def safe_payload(
         max_bytes=max_bytes,
         seen=set(),
         depth=0,
+        exempt_keys=exempt,
     )
     if isinstance(result, dict):
         # Per-string limits alone do not bound a response containing many records.
@@ -176,6 +193,7 @@ def _safe_payload_track(
     max_bytes: int | None,
     seen: set[int],
     depth: int,
+    exempt_keys: tuple[str, ...] = (),
 ) -> tuple[Any, list[str], bool]:
     """Internal recursive payload sanitizer tracking key paths and truncation."""
     if depth > MAX_RECURSION_DEPTH:
@@ -233,7 +251,7 @@ def _safe_payload_track(
                 child_val, child_cuts, child_incomplete = _safe_payload_track(
                     v,
                     child_path,
-                    limit=limit,
+                    limit=None if (depth == 0 and k in exempt_keys) else limit,
                     max_bytes=max_bytes,
                     seen=seen,
                     depth=depth + 1,

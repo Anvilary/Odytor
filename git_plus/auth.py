@@ -108,7 +108,7 @@ def github_client(settings: Settings, remote: bool = False, *, repo: str | None 
         kwargs["restricted_repo"] = restricted_repo
     if principal:
         kwargs["principal"] = principal
-    client = GitHubClient(token=token, base_url=settings.github_api_url, **kwargs)
+    client = GitHubClient(token=token, base_url=settings.github_api_url, timeout=settings.github_timeout, **kwargs)
     try:
         yield client
     finally:

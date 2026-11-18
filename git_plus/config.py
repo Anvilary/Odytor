@@ -103,6 +103,8 @@ class Settings:
     quick_fix_max_changed_lines: int = 1000
     quick_fix_max_patch_bytes: int = 262144
     testing: RunSettings | None = None
+    github_timeout: float = 120.0
+    max_response_bytes: int = 262144
     server_pat: str | None = field(default=None, repr=False)
     server_pat_login: str | None = None
     server_pat_repository: str | None = None
@@ -168,8 +170,28 @@ class Settings:
         raw_users = os.environ.get("GIT_PLUS_ALLOWED_GITHUB_USERS", "").strip()
         users = tuple(u.strip().casefold() for u in raw_users.split(",") if u.strip())
 
+        raw_timeout = os.environ.get("GIT_PLUS_GITHUB_TIMEOUT", "").strip()
+        try:
+            github_timeout = float(raw_timeout) if raw_timeout else 120.0
+        except ValueError:
+            github_timeout = 0.0
+        if not 10.0 <= github_timeout <= 600.0:
+            from git_plus.errors import ValidationError
+            raise ValidationError("GIT_PLUS_GITHUB_TIMEOUT must be between 10 and 600 seconds.")
+
+        raw_budget = os.environ.get("GIT_PLUS_MAX_RESPONSE_BYTES", "").strip()
+        try:
+            response_budget = int(raw_budget) if raw_budget else 262144
+        except ValueError:
+            response_budget = 0
+        if not 16384 <= response_budget <= 4 * 1024 * 1024:
+            from git_plus.errors import ValidationError
+            raise ValidationError("GIT_PLUS_MAX_RESPONSE_BYTES must be between 16384 and 4194304.")
+
         return cls(
             github_token=token,
+            github_timeout=github_timeout,
+            max_response_bytes=response_budget,
             github_api_url=api_url,
             auth_token=auth_token,
             default_max_diff_lines=max_lines,

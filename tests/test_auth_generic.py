@@ -101,12 +101,12 @@ def test_server_pat_is_used_only_for_its_owner_and_its_repository():
     with oauth("maintainer", "user-oauth"), patch("git_plus.auth.GitHubClient", return_value=MagicMock()) as factory:
         with github_client(settings(), remote=True, repo="Acme/Widgets"):
             pass
-        factory.assert_called_once_with(token=PAT, base_url="https://api.github.com", restricted_repo=REPO, principal="maintainer")
+        factory.assert_called_once_with(token=PAT, base_url="https://api.github.com", timeout=120.0, restricted_repo=REPO, principal="maintainer")
     for login, repo in (("bob", REPO), ("maintainer", "other/project")):
         with oauth(login, "user-oauth"), patch("git_plus.auth.GitHubClient", return_value=MagicMock()) as factory:
             with github_client(settings(), remote=True, repo=repo):
                 pass
-            factory.assert_called_once_with(token="user-oauth", base_url="https://api.github.com", principal=login)
+            factory.assert_called_once_with(token="user-oauth", base_url="https://api.github.com", timeout=120.0, principal=login)
 
 
 def test_unlisted_users_and_missing_identity_never_reach_a_credential():
@@ -196,7 +196,7 @@ def test_unset_repository_means_every_allowlisted_repository_for_the_owner_only(
         with oauth("maintainer", "user-oauth"), patch("git_plus.auth.GitHubClient", return_value=MagicMock()) as factory:
             with github_client(all_repos, remote=True, repo=repo):
                 pass
-            factory.assert_called_once_with(token=PAT, base_url="https://api.github.com", restricted_repo=repo.casefold(), principal="maintainer")
+            factory.assert_called_once_with(token=PAT, base_url="https://api.github.com", timeout=120.0, restricted_repo=repo.casefold(), principal="maintainer")
     with oauth("maintainer", "user-oauth"), patch("git_plus.auth.GitHubClient", return_value=MagicMock()) as factory:
         with github_client(all_repos, remote=True, repo="not/allowed"):
             pass
