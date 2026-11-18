@@ -58,7 +58,7 @@ Retained results: 48 h, expiring 6 h after a PR is seen closed or merged.
 Updating the runner software: build the wheel, `GP_RUNNER_IMAGE=... GP_WHEEL=... ./runner-vm.sh provision`. It is
 idempotent and does not restart the user manager unless cgroup delegation changed. Drain jobs first anyway.
 Changing a dependency policy: replace the file in `policies/` (a new digest builds a new environment; the old one
-ages out); no restart is needed because policies are read at startup, so restart the application container.
+ages out). Policies are read at startup, so recreate the application container afterwards.
 
 ## Rollback
 
