@@ -66,6 +66,18 @@ class RunSettings:
             min_free_bytes=number("MIN_FREE_MIB", 1024, 64, 1048576) * _MIB)
 
 
+LEGACY_PAT_REPOSITORY = "odysseus-dev/odysseus"
+
+
+@dataclass(frozen=True)
+class ServerPat:
+    """One server-held PAT, usable only by one exact OAuth login and only for one repository."""
+
+    token: str = field(repr=False)
+    login: str
+    repository: str
+
+
 @dataclass(frozen=True)
 class Settings:
     """Runtime configuration settings."""
@@ -87,6 +99,27 @@ class Settings:
     quick_fix_max_changed_lines: int = 1000
     quick_fix_max_patch_bytes: int = 262144
     testing: RunSettings | None = None
+    server_pat: str | None = field(default=None, repr=False)
+    server_pat_login: str | None = None
+    server_pat_repository: str | None = None
+
+    def server_pat_credential(self) -> ServerPat | None:
+        """The configured server-side PAT, from the generic settings or the documented Odysseus aliases."""
+        from git_plus.errors import SecurityError
+
+        generic = any((self.server_pat, self.server_pat_login, self.server_pat_repository))
+        legacy = any((self.odysseus_pat, self.odysseus_pat_login))
+        if generic and legacy:
+            raise SecurityError("Configure either GIT_PLUS_SERVER_PAT* or the legacy GIT_PLUS_ODYSSEUS_PAT*, not both.")
+        if not generic and not legacy:
+            return None
+        if generic:
+            token, login, repository = self.server_pat, self.server_pat_login, self.server_pat_repository
+        else:
+            token, login, repository = self.odysseus_pat, self.odysseus_pat_login, LEGACY_PAT_REPOSITORY
+        if not token or not (login or "").strip() or not (repository or "").strip():
+            raise SecurityError("A server-side PAT needs the token, the exact GitHub login allowed to use it and one repository.")
+        return ServerPat(token, login.strip(), repository.strip().casefold())
 
     @classmethod
     def load(cls) -> Settings:
@@ -144,6 +177,9 @@ class Settings:
             oauth_signing_key=os.environ.get("GIT_PLUS_OAUTH_SIGNING_KEY"),
             odysseus_pat=os.environ.get("GIT_PLUS_ODYSSEUS_PAT"),
             odysseus_pat_login=os.environ.get("GIT_PLUS_ODYSSEUS_PAT_LOGIN"),
+            server_pat=os.environ.get("GIT_PLUS_SERVER_PAT"),
+            server_pat_login=os.environ.get("GIT_PLUS_SERVER_PAT_LOGIN"),
+            server_pat_repository=os.environ.get("GIT_PLUS_SERVER_PAT_REPOSITORY"),
             quick_fix_max_files=quick_fix_limits[0],
             quick_fix_max_changed_lines=quick_fix_limits[1],
             quick_fix_max_patch_bytes=quick_fix_limits[2],

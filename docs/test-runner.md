@@ -115,6 +115,7 @@ Runner (`git-plus-runner`, environment of the runner account):
 | `..CPUS` `..MEMORY_MIB` `..PIDS` | 2, 4096, 512 |
 | `..WORK_MIB` `..TMP_MIB` | 1024, 512 (tmpfs; counted against memory) |
 | `..MAX_TIMEOUT` `..PREP_TIMEOUT` `..MAX_SOURCE_MIB` `..FRAME_TIMEOUT` | 600 s, 900 s, 256, 600 s |
+| `GIT_PLUS_RUNNER_MAX_QUEUED` `..QUEUE_WAIT` | 5, 900 s: host-wide admission (below) |
 | `GIT_PLUS_RUNNER_CONFIG` | optional file of `GIT_PLUS_RUNNER_*=value` lines; must be root-owned and not group/world writable (the provisioning script uses `/etc/git-plus-runner/runner.env`) |
 | `..ENV_TTL_DAYS` `..ENV_BUDGET_MIB` `..MIN_FREE_MIB` | 7, 10240, 2048 |
 | `..PIP_INDEX_URL` | optional private index/mirror |
@@ -129,6 +130,18 @@ directory without a valid ready marker is never used. Environments are mounted r
 job cannot alter another's dependencies; each job gets its own tmpfs. Changing the requirements, Python,
 image, profile version or platform produces a new key. Results report `cache_status`, key, preparation time,
 size and cumulative hit/miss counters.
+
+### Approved dependency policy for `odysseus-dev/odysseus`
+
+`deploy/policies/` holds the maintainer policy (`policy.toml`) and the approved requirements. They are the only
+dependency source: a PR cannot add, change or remove anything here. The Odysseus file records its origin in its
+header: `requirements.txt` of the trusted `dev` branch at commit `6e47bfd2…`, resolved with `pip
+--only-binary=:all:` on CPython 3.12.15 in the pinned runner image, with the full 109-package transitive closure
+pinned and every compatible wheel hash from PyPI attached. A hash-pinned file must hash every package, and pip
+then refuses anything unhashed, any sdist and any wheel whose bytes differ. Validation on 2026-11-18: cold
+preparation 24 s and 718 MB on a workstation, warm reuse 2.3 s, a tampered hash fails as `setup_error` (stage
+`prepare`) and leaves no environment. To change the policy, regenerate the file from the new `dev` revision,
+review the diff, and replace it; the new digest produces a new cache key and the old environment ages out.
 
 ## Cleanup and storage
 
@@ -196,12 +209,19 @@ policy, never from a contributor branch. It runs as container root, which is the
 through the user namespace, so the environment files belong to the runner account and are mounted read-only
 into test jobs. Prefer hash-pinned requirements and a package mirror (`GIT_PLUS_RUNNER_PIP_INDEX_URL`) in production.
 
+### Host-wide admission
+
+One job executes at a time on a runner, however many Git Plus processes or hosts connect. Each job takes a
+ticket (a file it holds a lock on while alive) and runs only when its ticket is the oldest live one, so jobs are
+served in arrival order and a crashed or disconnected job releases its place by itself. At most
+`GIT_PLUS_RUNNER_MAX_QUEUED` jobs wait; beyond that a submission is refused immediately with `setup_error` stage
+`busy` and nothing runs. A job that waits longer than `GIT_PLUS_RUNNER_QUEUE_WAIT` is also refused as `busy`.
+The time spent waiting is reported as `execution.runner_queue_wait_seconds`. Per-job CPU, memory and pid limits
+still apply inside the single slot.
+
 ### Sizing and re-provisioning
 
-Each Git Plus process admits up to five queued runs and runs one at a time, but the runner has no host-wide job
-limit: with several local agents (or several Git Plus hosts) sharing one runner, jobs run concurrently, each with
-up to `GIT_PLUS_RUNNER_CPUS` / `MEMORY_MIB`. Size the VM for the number of agents (for example 2 CPUs and
-4 GiB per concurrent job plus the environment cache), or keep to one agent per runner. `provision.sh` restarts
+Size the VM for one job at a time (the job memory limit plus the guest system, and the environment cache). `provision.sh` restarts
 the account's user manager (needed for cgroup delegation), which stops Podman and any job in flight: drain the
 runner (no running jobs) before re-provisioning an in-use host.
 

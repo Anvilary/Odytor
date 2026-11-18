@@ -450,3 +450,56 @@ def test_overlay_test_executes_against_real_production_code_path(root, tmp_path)
     files['tests/test_overlay.py'] = files['tests/test_overlay.py'].replace('not is_admin("owner")', 'is_admin("owner")')
     _, failing = execute(root, tmp_path, files, overlay_paths=('tests/test_overlay.py',))
     assert failing['status'] == 'failed' and any(t['id'].endswith('test_reviewer_regression') and t['outcome'] == 'failed' for t in failing['tests'])
+
+
+# --- host-wide admission with real containers -------------------------------------------------------------------
+
+SLOW = {'tests/test_a.py': 'import time\ndef test_a(): time.sleep(5)\n'}
+
+
+def test_concurrent_jobs_from_independent_clients_run_one_at_a_time(tmp_path_factory, tmp_path):
+    root = tmp_path_factory.mktemp('admission')
+    execute(root, tmp_path, {'tests/test_a.py': 'def test_a(): pass\n'})  # prepare the environment once
+    results, peak, stop = {}, [0], threading.Event()
+
+    def watch():
+        while not stop.is_set():
+            peak[0] = max(peak[0], len([n for n in containers() if n.startswith('gp-run-')]))
+            time.sleep(0.2)
+    threading.Thread(target=watch, daemon=True).start()
+
+    def go(name):
+        sub = tmp_path / name
+        sub.mkdir()
+        results[name] = execute(root, sub, SLOW)[1]
+    threads = []
+    for name in ('first', 'second', 'third'):
+        threads.append(threading.Thread(target=go, args=(name,)))
+        threads[-1].start()
+        time.sleep(0.5)
+    for thread in threads:
+        thread.join(300)
+    stop.set()
+    assert {r['status'] for r in results.values()} == {'passed'}
+    assert peak[0] == 1  # never two containers at once, however many clients
+    waits = sorted(r['execution']['runner_queue_wait_seconds'] for r in results.values())
+    assert waits[0] < 2 and waits[1] > 3 and waits[2] > 8  # served one after another
+    assert containers() == [] and not list((root / 'queue').glob('*.ticket')) and not list((root / 'jobs').iterdir())
+
+
+def test_full_queue_is_refused_not_run_and_never_green(tmp_path_factory, tmp_path):
+    root = tmp_path_factory.mktemp('admission-full')
+    execute(root, tmp_path, {'tests/test_a.py': 'def test_a(): pass\n'})
+    env = {'GIT_PLUS_RUNNER_MAX_QUEUED': '0'}
+    sub = tmp_path / 'holder'
+    sub.mkdir()
+    holder = threading.Thread(target=lambda: execute(root, sub, SLOW, env=env))
+    holder.start()
+    deadline = time.time() + 60
+    while time.time() < deadline and not any(n.startswith('gp-run-') for n in containers()):
+        time.sleep(0.2)
+    other = tmp_path / 'other'
+    other.mkdir()
+    _, refused = execute(root, other, {'tests/test_a.py': 'def test_a(): pass\n'}, env=env)
+    holder.join(120)
+    assert refused['status'] == 'setup_error' and refused['failure']['kind'] == 'busy'

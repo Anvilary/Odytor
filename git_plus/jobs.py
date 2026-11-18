@@ -214,7 +214,9 @@ def classify(payload: dict[str, Any], selectors: tuple[str, ...], expected_spec_
                    detail=safe_text(json.dumps(problem.get("detail", {}), default=str), 1200))
     sandbox = payload.get("sandbox") if isinstance(payload.get("sandbox"), dict) else {}
     limits = sandbox.get("limits") if isinstance(sandbox.get("limits"), dict) else {}
+    admission = payload.get("admission") if isinstance(payload.get("admission"), dict) else {}
     outcome["execution"] = {
+        "runner_queue_wait_seconds": round(_num(admission.get("waited_seconds"), 1e6), 3),
         "container_seconds": round(_num(sandbox.get("container_seconds"), 1e6), 3),
         "limits": {k: (v if isinstance(v, (int, float, str)) else None) for k, v in limits.items() if isinstance(k, str)}}
     if outcome["environment"]["requirements_sha256"] != expected_spec_sha:

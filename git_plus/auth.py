@@ -11,9 +11,6 @@ from git_plus.config import Settings
 from git_plus.errors import SecurityError
 from git_plus.github import GitHubClient
 
-_ODYSSEUS_REPO = "odysseus-dev/odysseus"
-
-
 def create_auth(settings: Settings, remote: bool = False):
     """Build FastMCP auth for remote mode, or leave local stdio unauthenticated."""
     oauth_values = (
@@ -25,13 +22,13 @@ def create_auth(settings: Settings, remote: bool = False):
     if not remote:
         return None
 
-    if settings.odysseus_pat:
-        login = (settings.odysseus_pat_login or "").strip().casefold()
+    pat = settings.server_pat_credential()
+    if pat:
         if (not all(oauth_values) or settings.auth_token
-                or not login or login not in settings.allowed_github_users
-                or _ODYSSEUS_REPO not in settings.allowed_repositories):
+                or pat.login.casefold() not in {u.casefold() for u in settings.allowed_github_users}
+                or pat.repository not in settings.allowed_repositories):
             raise SecurityError(
-                "Server-side Odysseus PAT requires OAuth, an explicitly allowed repository "
+                "A server-side PAT requires OAuth, an explicitly allowed repository "
                 "and a separately configured PAT owner in the authenticated user allowlist."
             )
 
@@ -88,13 +85,13 @@ def github_client(settings: Settings, remote: bool = False, *, repo: str | None 
             token = getattr(access_token, "token", None)
             if not token or settings.github_api_url != "https://api.github.com":
                 raise SecurityError("Authenticated GitHub credentials are unavailable.")
-            if settings.odysseus_pat:
+            pat = settings.server_pat_credential()
+            if pat:
                 if not repo:
                     raise SecurityError("Repository context is required for server-side PAT selection.")
-                if (repo.strip().casefold() == _ODYSSEUS_REPO
-                        and login.casefold() == (settings.odysseus_pat_login or "").casefold()):
-                    token = settings.odysseus_pat
-                    restricted_repo = _ODYSSEUS_REPO
+                if repo.strip().casefold() == pat.repository and login.casefold() == pat.login.casefold():
+                    token = pat.token
+                    restricted_repo = pat.repository
         elif settings.auth_token and settings.allowed_repositories:
             if access_token.client_id != "git-plus-service" or not hmac.compare_digest(access_token.token, settings.auth_token):
                 raise SecurityError("Invalid service credentials.")

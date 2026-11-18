@@ -87,3 +87,86 @@ def test_dead_job_workspaces_are_swept_quickly_but_live_ones_never(tmp_path):
     assert removed == 1 and live.exists() and not dead.exists()
     assert starting.exists()  # no lock file and younger than the long grace: may still be starting
     os.close(holder)
+
+
+# --- host-wide admission ------------------------------------------------------------------------------------------
+
+import json
+import subprocess
+import textwrap
+
+WORKER = textwrap.dedent('''
+    import json, os, sys, time
+    from pathlib import Path
+    from git_plus import sandbox
+    root, tag, hold, max_queued, wait, log = sys.argv[1], sys.argv[2], float(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5]), sys.argv[6]
+    cfg = sandbox.RunnerConfig(image="x", root=Path(root), max_queued=max_queued, queue_wait=wait)
+    record = {}
+    try:
+        with sandbox._admission(cfg, record):
+            with open(log, "a") as f: f.write(json.dumps({"tag": tag, "event": "enter", "t": time.time()}) + "\\n")
+            time.sleep(hold)
+            with open(log, "a") as f: f.write(json.dumps({"tag": tag, "event": "exit", "t": time.time()}) + "\\n")
+        print(json.dumps({"tag": tag, "ok": True, **record}))
+    except sandbox.SetupError as exc:
+        print(json.dumps({"tag": tag, "ok": False, "stage": exc.stage}))
+''')
+
+
+def spawn(root, tag, hold, log, *, max_queued=5, wait=60):
+    return subprocess.Popen([sys.executable, "-c", WORKER, str(root), tag, str(hold), str(max_queued), str(wait), str(log)],
+                            stdout=subprocess.PIPE, text=True)
+
+
+def events(log):
+    return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
+def test_admission_runs_one_job_at_a_time_in_arrival_order_across_processes(tmp_path):
+    log = tmp_path / "events.jsonl"
+    procs = []
+    for tag in "abcd":
+        procs.append(spawn(tmp_path / "root", tag, 0.6, log))
+        time.sleep(0.3)  # distinct arrival times
+    results = [json.loads(p.communicate(timeout=60)[0]) for p in procs]
+    assert all(r["ok"] for r in results)
+    seen = events(log)
+    assert [e["tag"] for e in seen if e["event"] == "enter"] == list("abcd")           # FIFO
+    for earlier, later in zip(seen[1::2], seen[2::2]):                                   # exit before the next enter
+        assert earlier["event"] == "exit" and later["event"] == "enter" and earlier["t"] <= later["t"]
+    assert results[-1]["waited_seconds"] > 1 and not list((tmp_path / "root" / "queue").glob("*.ticket"))
+
+
+def test_admission_refuses_beyond_the_queue_limit_without_running_anything(tmp_path):
+    log = tmp_path / "events.jsonl"
+    running = spawn(tmp_path / "root", "run", 3, log, max_queued=1)
+    time.sleep(0.5)
+    waiting = spawn(tmp_path / "root", "wait", 0.1, log, max_queued=1)
+    time.sleep(0.5)
+    refused = json.loads(spawn(tmp_path / "root", "third", 0.1, log, max_queued=1).communicate(timeout=30)[0])
+    assert refused == {"tag": "third", "ok": False, "stage": "busy"}
+    assert [json.loads(p.communicate(timeout=60)[0])["ok"] for p in (running, waiting)] == [True, True]
+    assert "third" not in {e["tag"] for e in events(log)}
+
+
+def test_a_killed_job_does_not_block_those_behind_it(tmp_path):
+    log = tmp_path / "events.jsonl"
+    dead = spawn(tmp_path / "root", "dead", 120, log)
+    time.sleep(0.6)
+    queued = spawn(tmp_path / "root", "next", 0.1, log)
+    time.sleep(0.6)
+    dead.kill()  # the holder dies without cleaning up; the kernel drops its lock
+    dead.wait()
+    assert json.loads(queued.communicate(timeout=30)[0])["ok"] is True
+    assert (tmp_path / "root" / "queue").exists() and any(e["tag"] == "next" for e in events(log))
+
+
+def test_a_waiter_gives_up_after_the_queue_wait_with_a_busy_error(tmp_path):
+    log = tmp_path / "events.jsonl"
+    holder = spawn(tmp_path / "root", "hold", 6, log)
+    time.sleep(0.5)
+    started = time.monotonic()
+    result = json.loads(spawn(tmp_path / "root", "late", 0.1, log, wait=2).communicate(timeout=30)[0])
+    assert result == {"tag": "late", "ok": False, "stage": "busy"} and 2 <= time.monotonic() - started < 6
+    holder.communicate(timeout=30)
+    assert not list((tmp_path / "root" / "queue").glob("*.ticket"))

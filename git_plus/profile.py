@@ -101,25 +101,37 @@ def validate_requirements(text: object) -> str:
     if len(lines) > MAX_REQUIREMENT_LINES:
         raise ProfileError("Requirements file has too many lines.")
     kept: list[str] = []
+    pins: list[list] = []  # [text, has_hash]
     for line in lines:
         body = line.strip()
         if not body or body.startswith("#"):
             continue
         body = body.removesuffix("\\").rstrip()
         if body.startswith("--hash=sha256:"):
-            if _HASHES.fullmatch(body) is None:
+            if _HASHES.fullmatch(body) is None or not pins:
                 raise ProfileError("Invalid hash line in requirements.")
+            pins[-1][1] = True
         else:
             requirement, _, marker = body.partition(";")
-            hashes_at = requirement.find("--hash")
             hashes = ""
-            if hashes_at >= 0:
-                requirement, hashes = requirement[:hashes_at], requirement[hashes_at:]
+            for part in ("requirement", "marker"):  # hashes may follow either the pin or the environment marker
+                text_ = requirement if part == "requirement" else marker
+                at = text_.find("--hash")
+                if at >= 0:
+                    hashes = text_[at:]
+                    if part == "requirement":
+                        requirement = text_[:at]
+                    else:
+                        marker = text_[:at]
             if (_REQUIREMENT.fullmatch(requirement.strip()) is None
-                    or (marker and _MARKER.fullmatch(marker.split("--hash")[0].strip()) is None)
+                    or (marker and _MARKER.fullmatch(marker.strip()) is None)
                     or (hashes and _HASHES.fullmatch(hashes) is None)):
                 raise ProfileError(f"Unsupported requirement line: {body[:80]!r}. Only name==version pins are allowed.")
+            pins.append([body, bool(hashes)])
         kept.append(line.rstrip())
+    if any(has for _, has in pins) and not all(has for _, has in pins):
+        missing = next(text for text, has in pins if not has)
+        raise ProfileError(f"Hash-pinned requirements must hash every package; missing for {missing[:60]!r}.")
     if not any(re.match(r"\s*pytest(?:\[[^\]]*\])?==", line, re.I) for line in kept):
         raise ProfileError("The approved requirements must pin pytest.")
     return "\n".join(kept) + "\n"

@@ -51,9 +51,19 @@ def test_selector_matching(selector, node, expected):
 
 
 def test_valid_requirements_are_normalized():
-    text = "# approved\npytest==8.3.5\nrequests[socks]==2.32.0 ; python_version >= '3.9'\nattrs==23.1.0 \\\n    --hash=sha256:" + 'a' * 64 + "\n"
+    text = "# approved\npytest==8.3.5\nrequests[socks]==2.32.0 ; python_version >= '3.9'\nattrs==23.1.0\n"
     out = validate_requirements(text)
     assert out.endswith('\n') and 'pytest==8.3.5' in out
+    h = '--hash=sha256:' + 'a' * 64
+    hashed = f"pytest==8.3.5 {h}\nattrs==23.1.0 \\\n    {h}\nrequests==2.32.0 ; python_version >= '3.9' {h}\n"
+    assert validate_requirements(hashed).count('--hash') == 3
+
+
+def test_hash_pinned_requirements_must_hash_every_package():
+    h = '--hash=sha256:' + 'a' * 64
+    for text in (f"pytest==8.3.5 {h}\nattrs==23.1.0\n", f"attrs==23.1.0\npytest==8.3.5 {h}\n", f"{h}\npytest==8.3.5\n"):
+        with pytest.raises(ProfileError):
+            validate_requirements(text)
 
 
 @pytest.mark.parametrize('line', [
@@ -83,3 +93,12 @@ def test_policy_file(tmp_path):
     (tmp_path / 'bad2.toml').write_text('[repos."o/r"]\nrequirements = "req.txt"\nprofile = "shell"\n')
     with pytest.raises(ProfileError):
         load_policies(tmp_path / 'bad2.toml')
+
+
+def test_the_shipped_odysseus_policy_is_valid_hash_complete_and_pins_pytest():
+    from pathlib import Path
+    from git_plus.profile import load_policies
+    policy = load_policies(Path(__file__).resolve().parents[1] / 'deploy' / 'policies' / 'policy.toml')['odysseus-dev/odysseus']
+    lines = [line for line in policy.requirements.splitlines() if line]
+    assert len(lines) > 50 and all('==' in line and '--hash=sha256:' in line for line in lines)
+    assert policy.test_dirs == ('tests',) and len(policy.requirements_sha256) == 64

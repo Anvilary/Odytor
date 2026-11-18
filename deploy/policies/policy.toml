@@ -1,0 +1,5 @@
+# Maintainer test policy: repositories not listed here cannot be tested. Requirements files sit beside this file.
+[repos."odysseus-dev/odysseus"]
+profile = "python-pytest"
+test_dirs = ["tests"]
+requirements = "odysseus-dev-odysseus.requirements.txt"

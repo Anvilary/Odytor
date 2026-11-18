@@ -153,6 +153,36 @@ class GitHubClient:
                     return
         raise SecurityError("Server-side PAT request is outside its supported repository scope.")
 
+    def _credential_diagnostic(self, resp: requests.Response) -> dict[str, Any]:
+        """Say what GitHub told us about the credential without claiming more than it did.
+
+        Classic and fine-grained PATs, OAuth tokens and server-side PATs authorize differently; GitHub reports
+        the permissions an endpoint accepts (`X-Accepted-GitHub-Permissions`) and the scopes of classic and OAuth
+        tokens (`X-OAuth-Scopes`), so those are passed on verbatim and truncated.
+        """
+        status = resp.status_code
+        if status not in {401, 403, 404}:
+            return {}
+        if not self.token:
+            return {"classification": "no_credential_configured",
+                    "hint": "No GitHub credential is configured; set GITHUB_TOKEN or GH_TOKEN (or authenticate through OAuth)."}
+        info: dict[str, Any] = {}
+        accepted = resp.headers.get("x-accepted-github-permissions")
+        granted = resp.headers.get("x-oauth-scopes")
+        if accepted:
+            info["accepted_permissions"] = safe_text(accepted, 200)
+        if granted is not None:
+            info["token_scopes"] = safe_text(granted, 200)
+        if status == 401:
+            return {**info, "classification": "bad_credentials",
+                    "hint": "GitHub rejected the credential: it may be expired, revoked or malformed."}
+        if status == 403:
+            return {**info, "classification": "insufficient_permissions",
+                    "hint": "The credential is valid but lacks a permission or scope this operation needs, or the "
+                            "organization has not approved it. Compare accepted_permissions with the token's grants."}
+        return {**info, "classification": "not_found_or_no_access",
+                "hint": "GitHub answers 404 both for missing resources and for repositories this credential cannot see."}
+
     def _headers(self, accept: str = "application/vnd.github+json") -> dict[str, str]:
         headers = {
             "Accept": accept,
@@ -206,6 +236,7 @@ class GitHubClient:
                         "url": path,
                         "method": method,
                         "message": safe_text(resp.text.replace(self.token, "[REDACTED]") if self.token else resp.text, 2048),
+                        **self._credential_diagnostic(resp),
                     }
                     raise APIError(
                         f"GitHub API request failed with status {resp.status_code}.",

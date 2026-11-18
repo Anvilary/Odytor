@@ -61,6 +61,8 @@ class RunnerConfig:
     max_source_bytes: int = 256 * _MIB
     prep_timeout: int = 900
     frame_timeout: int = 600
+    max_queued: int = 5
+    queue_wait: int = 900
     pip_index_url: str | None = None
     env_ttl_days: float = 7.0
     env_budget_bytes: int = 10 * 1024 * _MIB
@@ -92,6 +94,7 @@ class RunnerConfig:
             tmp_mib=number("TMP_MIB", 512, 16, 8192), max_timeout=number("MAX_TIMEOUT", 600, 10, 3600),
             max_source_bytes=number("MAX_SOURCE_MIB", 256, 1, 4096) * _MIB,
             prep_timeout=number("PREP_TIMEOUT", 900, 30, 7200), frame_timeout=number("FRAME_TIMEOUT", 600, 10, 3600),
+            max_queued=number("MAX_QUEUED", 5, 0, 50), queue_wait=number("QUEUE_WAIT", 900, 1, 7200),
             pip_index_url=env.get("GIT_PLUS_RUNNER_PIP_INDEX_URL") or None,
             env_ttl_days=number("ENV_TTL_DAYS", 7.0, 0.01, 365.0, float),
             env_budget_bytes=number("ENV_BUDGET_MIB", 10240, 1, 4194304) * _MIB,
@@ -424,6 +427,50 @@ def _single_flight(cfg: RunnerConfig, job_id: str):
         os.close(fd)
 
 
+@contextlib.contextmanager
+def _admission(cfg: RunnerConfig, record: dict):
+    """Host-wide admission: one job executes at a time, at most `max_queued` wait, in arrival order.
+
+    Every runner process takes a ticket (a file it holds a lock on for its whole life). A job may run only when
+    its ticket is the oldest live one, so tickets of crashed or disconnected processes drop out by themselves
+    (the kernel releases their locks) and nobody starves behind them. Beyond `1 + max_queued` live tickets, or
+    after `queue_wait` seconds of waiting, the job is refused with stage `busy` and nothing has run.
+    """
+    queue = cfg.root / "queue"
+    queue.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ticket = queue / f"{time.time_ns():020d}-{os.getpid()}-{os.urandom(3).hex()}.ticket"
+    fd = os.open(ticket, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+
+    def live() -> list[Path]:
+        found = []
+        for entry in sorted(queue.glob("*.ticket")):
+            if entry == ticket:
+                found.append(entry)
+            elif not _lock_free(entry):
+                found.append(entry)
+            elif time.time() - entry.stat().st_mtime > 2:  # the grace covers a ticket being created and locked
+                entry.unlink(missing_ok=True)
+        return found
+
+    started = time.monotonic()
+    try:
+        tickets = live()
+        record["position_at_arrival"] = tickets.index(ticket)
+        if len(tickets) > 1 + cfg.max_queued:
+            raise SetupError("busy", "The runner queue is full; retry later.",
+                             {"live_jobs": len(tickets) - 1, "max_queued": cfg.max_queued})
+        while live()[0] != ticket:
+            if time.monotonic() - started > cfg.queue_wait:
+                raise SetupError("busy", "Timed out waiting for the runner; retry later.", {"waited_seconds": round(time.monotonic() - started)})
+            time.sleep(0.25)
+        record["waited_seconds"] = round(time.monotonic() - started, 3)
+        yield
+    finally:
+        ticket.unlink(missing_ok=True)
+        os.close(fd)
+
+
 def _sweep_active(cfg: RunnerConfig) -> None:
     for entry in list((cfg.root / "active").glob("test-*.lock")):
         if _lock_free(entry):
@@ -461,6 +508,9 @@ def gc(cfg: RunnerConfig) -> dict:
     """Scheduled housekeeping: the same reaping and eviction that precede every job, for idle periods."""
     reaped = reap_orphan_containers(cfg, strict=True)
     _sweep_active(cfg)
+    for stale in list((cfg.root / "queue").glob("*.ticket")):
+        if _lock_free(stale) and time.time() - stale.stat().st_mtime > 2:
+            stale.unlink(missing_ok=True)
     try:
         report = dep_cache.collect(cfg.root, ttl_seconds=cfg.env_ttl_days * 86400, budget_bytes=cfg.env_budget_bytes,
                                    min_free_bytes=cfg.min_free_bytes)
@@ -533,8 +583,10 @@ def main() -> int:
             job = validate_header(cfg, read_job(FdReader(0, cfg.frame_timeout), cfg, source))
             armed.set()
             threading.Thread(target=_watch_client, args=(0, armed), daemon=True).start()
-            with _single_flight(cfg, job["job_id"]):
+            admission: dict = {}
+            with _single_flight(cfg, job["job_id"]), _admission(cfg, admission):
                 result = execute(cfg, job, source, job_dir)
+                result["admission"] = admission
         except SetupError as exc:
             result = {"schema": SCHEMA, "setup_error": {"stage": exc.stage, "message": exc.message, "detail": exc.detail}}
         armed.clear()

@@ -62,23 +62,30 @@ Local validation covers Git fixtures, mocked GitHub writes and in-process HTTP a
 
 Git Plus complements the [official GitHub MCP server](https://github.com/github/github-mcp-server). That server already exposes general Actions controls and Discussion read/comment/answer operations. This release adds revision-aware coordination instead of duplicating that inventory. Milestone intelligence and additional Discussion writes are deferred until a concrete maintenance workflow justifies them. Conflict inspection plus precise patches and rebase provide the current conflict workflow; automatic conflict resolution is not exposed.
 
-### Optional personal Odysseus credential (single-user deployment)
+### Optional server-held PAT for one repository (single-user deployment)
 
 For a deployment where the OAuth App can authenticate the operator but does not
-have organization-approved access to `odysseus-dev/odysseus`, a server-held
-classic PAT may be used **only** for that repository. This is deliberately
-opt-in and requires an exact GitHub login and a nonempty repository allowlist:
+have organization-approved access to a repository, a server-held PAT (classic or
+fine-grained; GitHub grants them different permissions, and Git Plus reports what
+GitHub says is missing) may be used **only** for that one repository. This is
+deliberately opt-in and requires an exact GitHub login and a nonempty repository
+allowlist:
 
 ```dotenv
 GIT_PLUS_ALLOWED_GITHUB_USERS=alteixeira20
-GIT_PLUS_ALLOWED_REPOSITORIES=odysseus-dev/odysseus,Anvilary/git-plus
-GIT_PLUS_ODYSSEUS_PAT_LOGIN=alteixeira20
-GIT_PLUS_ODYSSEUS_PAT=YOUR_PRIVATE_PAT
+GIT_PLUS_ALLOWED_REPOSITORIES=owner/repo,Anvilary/git-plus
+GIT_PLUS_SERVER_PAT_LOGIN=alteixeira20
+GIT_PLUS_SERVER_PAT_REPOSITORY=owner/repo
+GIT_PLUS_SERVER_PAT=YOUR_PRIVATE_PAT
 ```
+
+The earlier `GIT_PLUS_ODYSSEUS_PAT` / `GIT_PLUS_ODYSSEUS_PAT_LOGIN` variables remain supported as an
+alias for `GIT_PLUS_SERVER_PAT*` with the repository fixed to `odysseus-dev/odysseus`; configuring both
+generations at once is refused. Local stdio use needs none of this: set `GITHUB_TOKEN` or `GH_TOKEN`.
 
 Preserve the existing OAuth client ID, secret, signing key and public URL. Git
 Plus first verifies the request's OAuth identity; only requests authenticated
-as `GIT_PLUS_ODYSSEUS_PAT_LOGIN` and targeting the exact Odysseus repository
+as `GIT_PLUS_SERVER_PAT_LOGIN` and targeting the configured repository
 use the PAT. All other allowed repositories continue using each caller's OAuth
 token. A missing login or repository allowlist fails server startup.
 
