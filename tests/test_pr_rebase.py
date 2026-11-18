@@ -77,7 +77,7 @@ def test_rebase_applies_with_branch_lease_and_verifies(local_fetch, monkeypatch)
                 assert 'https://github.com/contributor/repo.git' in args
                 pushes.append(args)
                 run(repo, 'config', 'receive.denyCurrentBranch', 'ignore')
-            args = tuple(str(repo) if a == 'https://github.com/contributor/repo.git' else a for a in args)
+            args = tuple(str(repo) if a.startswith('https://github.com/') else a for a in args)
             return run(self.path, '-c', 'protocol.file.allow=always', *args)
         return git(self, *args, **kwargs)
     monkeypatch.setattr(GitWorkspace, 'git', local_push)
@@ -95,6 +95,9 @@ def test_rebase_rejects_concurrent_update_at_push(local_fetch, monkeypatch):
     client.get_pr.return_value['base']['sha'] = base
     git = GitWorkspace.git
     def concurrent(self, *args, **kwargs):
+        if args[0] == 'ls-remote':  # the live base-tip recheck reads the fixture repository
+            args = tuple(str(repo) if a.startswith('https://github.com/') else a for a in args)
+            return run(self.path, '-c', 'protocol.file.allow=always', *args)
         if args[0] == 'push':
             # Move the fixture remote after all API checks, before the receive.
             run(repo, 'update-ref', 'refs/heads/feature', base)
@@ -160,3 +163,68 @@ def test_rebase_ignores_hostile_hooks_and_filters(local_fetch, monkeypatch, tmp_
     result = rebase_pr(client, 'owner/repo', 1, head, base)
     assert result['status'] == 'rebased'
     assert not marker.exists()
+
+
+def test_preview_rebases_onto_the_live_tip_when_the_pr_base_snapshot_lags(local_fetch):
+    """GitHub's recorded PR base can be an old ancestor of the branch tip; that is exactly when a rebase is wanted."""
+    repo, initial = local_fetch
+    base, head = diverge(repo, conflict=False)
+    client = client_for(head)
+    client.get_pr.return_value['base']['sha'] = initial  # what the PR API still reports: an ancestor of the live tip
+    result = rebase_pr(client, 'owner/repo', 1, head, base)
+    assert result['status'] == 'rebased' and result['applied'] is False
+    assert result['base_sha'] == base and result['base_sha_role'] == 'live_target_branch_tip'
+    assert result['pr_api_base_snapshot'] == initial
+    assert run(repo, 'rev-parse', 'HEAD').decode().strip() == head
+
+
+def test_expected_base_must_still_be_the_live_branch_tip(local_fetch):
+    repo, initial = local_fetch
+    base, head = diverge(repo, conflict=False)
+    client = client_for(head)
+    client.get_pr.return_value['base']['sha'] = initial
+    with pytest.raises(RevisionMismatchError) as err:  # the stale snapshot is not the tip, and is refused
+        rebase_pr(client, 'owner/repo', 1, head, initial)
+    assert err.value.diagnostic['actual_base'] == base  # the error names the tip to use
+
+
+def _local_transport(repo, monkeypatch, *, advance_base_before_push=None):
+    git = GitWorkspace.git
+
+    def transport(self, *args, **kwargs):
+        if args[0] in {'push', 'ls-remote'}:
+            if args[0] == 'ls-remote' and advance_base_before_push and 'refs/heads/main' in args:
+                advance_base_before_push()
+            if args[0] == 'push':
+                run(repo, 'config', 'receive.denyCurrentBranch', 'ignore')
+            args = tuple(str(repo) if a.startswith('https://github.com/') else a for a in args)
+            return run(self.path, '-c', 'protocol.file.allow=always', *args)
+        return git(self, *args, **kwargs)
+    monkeypatch.setattr(GitWorkspace, 'git', transport)
+
+
+def test_apply_with_a_lagging_snapshot_rechecks_the_live_tip_and_pushes(local_fetch, monkeypatch):
+    repo, initial = local_fetch
+    base, head = diverge(repo, conflict=False)
+    client = client_for(head)
+    client.get_pr.return_value['base']['sha'] = initial
+    _local_transport(repo, monkeypatch)
+    result = rebase_pr(client, 'owner/repo', 1, head, base, apply=True, allow_history_rewrite=True)
+    assert result['applied'] and result['remote_verified']
+    assert run(repo, 'rev-parse', 'feature^').decode().strip() == base
+
+
+def test_apply_refuses_when_the_base_branch_advanced_after_the_preview_was_built(local_fetch, monkeypatch):
+    repo, initial = local_fetch
+    base, head = diverge(repo, conflict=False)
+    client = client_for(head)
+    client.get_pr.return_value['base']['sha'] = initial
+
+    def advance():
+        run(repo, 'update-ref', 'refs/heads/main', run(repo, 'commit-tree', f'{base}^{{tree}}', '-p', base, '-m', 'moved').decode().strip())
+    _local_transport(repo, monkeypatch, advance_base_before_push=advance)
+    with pytest.raises(RevisionMismatchError) as err:
+        rebase_pr(client, 'owner/repo', 1, head, base, apply=True, allow_history_rewrite=True)
+    assert err.value.diagnostic['revision'] == 'base' and err.value.diagnostic['expected_base'] == base
+    assert 'moved since the rebase was built' in str(err.value)  # refused by the live-tip recheck, not by the snapshot
+    assert run(repo, 'rev-parse', 'feature').decode().strip() == head  # nothing was pushed

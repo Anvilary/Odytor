@@ -11,7 +11,11 @@ from git_plus.git_workspace import GitWorkspace, pr_context, verify_context
 
 def rebase_pr(client: GitHubClient, repo: str, number: int, expected_head: str, expected_base: str,
               *, apply: bool = False, allow_history_rewrite: bool = False) -> dict[str, Any]:
-    """Replay linear commits onto the captured base; apply only with explicit consent.
+    """Replay linear commits onto an exact base revision; apply only with explicit consent.
+
+    expected_base must be the live tip of the PR's target branch (verified by fetching it, and again immediately
+    before an applied push). GitHub's recorded PR base can lag the branch, which is exactly when a PR needs
+    rebasing, so that snapshot is reported but is not required to match.
 
     Existing empty commits and newly empty commits are preserved. Merge histories
     are rejected. Signatures on rewritten commits cannot be preserved. No tests run.
@@ -20,12 +24,11 @@ def rebase_pr(client: GitHubClient, repo: str, number: int, expected_head: str, 
         raise SecurityError('Applying a rebase requires allow_history_rewrite=true.')
     expected_base = validate_sha(expected_base, 'expected_base')
     context = pr_context(client, repo, number, expected_head, write=apply)
-    if context['base_sha'] != expected_base:
-        raise RevisionMismatchError(expected_base, context['base_sha'], revision='base')
     result: dict[str, Any] = {'repo': repo, 'number': number, 'head_repo': context['head_repo'],
         'head_ref': context['head_ref'], 'old_sha': context['head_sha'], 'base_sha': expected_base,
+        'base_sha_role': 'live_target_branch_tip', 'pr_api_base_snapshot': context['base_sha'],
         'applied': False, 'validation': {'tests_run': False},
-        'base_revision_scope': 'captured snapshot, rechecked immediately before push'}
+        'base_revision_scope': 'exact live base branch tip, rechecked immediately before push'}
     with GitWorkspace(client) as work:
         work.fetch(context['head_repo'], context['head_ref'], context['head_sha'], 'head')
         work.fetch(context['base_repo'], context['base_ref'], expected_base, 'base')
@@ -69,6 +72,10 @@ def rebase_pr(client: GitHubClient, repo: str, number: int, expected_head: str, 
                       signatures_preserved=False)
         verify_context(client, repo, number, context, write=apply, base=True)
         if apply:
+            live = work.git('ls-remote', '--refs', '--', work.url(context['base_repo']), f'refs/heads/{context["base_ref"]}',
+                            network=True, credential_repo=context['base_repo']).decode().split()
+            if not live or live[0] != expected_base:
+                raise RevisionMismatchError(expected_base, live[0] if live else '', 'Base branch moved since the rebase was built; nothing was pushed.', revision='base')
             ref = f'refs/heads/{context["head_ref"]}'
             lease = f'--force-with-lease={ref}:{context["head_sha"]}'
             try:

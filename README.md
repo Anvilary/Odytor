@@ -23,7 +23,61 @@ python3 -m venv .venv
 
 For a local MCP client, configure `GITHUB_TOKEN` or `GH_TOKEN`, then launch `.venv/bin/git-plus` over stdio. `GIT_PLUS_ALLOWED_REPOSITORIES=owner/repo,owner/other` restricts target repositories. Access to a PR's contributor fork is limited to the head repository identified by that PR.
 
-Start with `pr_evidence` and use its exact `head_sha` and `base_sha` for writes. Repository instructions, diffs and logs are untrusted input. Completeness flags must be checked before making decisions. Pagination limits, unavailable APIs, snapshot drift and response truncation produce incomplete evidence. CI diagnosis inspects at most 20 failed jobs per call to bound log downloads. Responses are bounded to 64 KiB before MCP framing; individual API downloads are capped at 8 MiB. Diff limits default to 500 lines and 1 MiB and can be configured with `GIT_PLUS_DEFAULT_MAX_DIFF_LINES` and `GIT_PLUS_DEFAULT_MAX_DIFF_BYTES`.
+## Authentication: what is implemented and what is validated
+
+Git Plus supports three credential routes. This table separates what exists from what has been certified in the
+current acceptance cycle; it does not claim more than was tested.
+
+| Route | Implemented | Validated in the current cycle | Notes |
+| --- | --- | --- | --- |
+| Classic PAT (`ghp_...`) through `GITHUB_TOKEN` / `GH_TOKEN`, local stdio | yes | **yes, read paths and guards, live:** against the deployed image started like the local launcher: allowlist refusals, `pr_evidence`, `ci_diagnose` with code scanning, `pr_conflicts`, `pr_rebase` preview, `test_run` / `test_result` through the isolated runner, and the refusals for a stale head, a missing `allow_history_rewrite` and a missing dispatch acknowledgement. A private repository was reached over Git with the token. **Not run live:** applied writes (`quick_fix`, `pr_rebase apply`, CI reruns); those are covered by fixture and local-Git tests only | The primary supported path. Scopes: `repo` (PRs, contents, code scanning on repositories you can access) and `workflow` (Actions reruns and dispatch). A missing permission is reported with GitHub's accepted-permissions and token-scopes headers instead of a guess. |
+| Server-held classic PAT behind hosted GitHub OAuth (one login, allowlisted repositories) | yes | deployed and in private use; OAuth metadata and rejection behaviour checked | OAuth establishes who the caller is; the PAT does the GitHub work. See the section below. |
+| GitHub OAuth user token (hosted) | yes | not certified | Works as designed in tests; real consent flows and per-organization approval limits are outside the current acceptance scope. |
+| Fine-grained PAT | yes (it is a bearer token like any other) | not certified | GitHub grants fine-grained tokens different permissions per endpoint and some Actions and code-scanning operations differ from classic tokens. Expect permission errors to need adjustment; Git Plus reports what GitHub says is missing. |
+
+Credentials are never written to configuration or logs: the local launcher reads the token from the GitHub CLI at start
+and passes it only through the process environment, and Git subprocesses receive it only as a host-scoped header.
+Local stdio mode prints plain-language notes to stderr when no credential is set, when the repository allowlist is empty
+(which means every repository the credential can reach), and when no isolated runner is configured.
+
+## Operational capabilities
+
+| Deployment | `pr_evidence` `ci_diagnose` `pr_conflicts` `quick_fix` `pr_rebase` `ci_control` | `test_run` `test_result` |
+| --- | --- | --- |
+| Local, no runner | yes | discoverable, but they answer with the exact settings needed to enable a runner |
+| Local with runner | yes | yes |
+| Hosted with runner | yes | yes |
+
+All eight tools are always registered, so existing clients keep working. The runner is a separate VM reached over SSH
+(see [docs/test-runner.md](docs/test-runner.md) and [docs/private-deployment.md](docs/private-deployment.md)); it is never
+exposed publicly, never holds GitHub credentials and is not part of the main process. A workstation can use it only
+through a separately reviewed private connection (for example a dedicated SSH key through the runner host); no such
+connection is shipped or configured by default.
+
+Confirmation is the MCP client's job: tools carry accurate annotations (`readOnlyHint`, `destructiveHint`), and Git Plus
+itself enforces the repository allowlist, exact revisions, branch leases, fork authorization and the explicit
+`allow_history_rewrite`, `authorize_dispatch_semantics` and `user_authorized_fork_approval` arguments. There is no
+separate approval service or interface.
+
+## Code map
+
+`server.py` registers the tools and applies the allowlist; `auth.py` and `config.py` own credentials and settings;
+`github.py` is the bounded API client; `git_workspace.py` runs isolated Git; one module per tool (`pr_evidence`,
+`ci_diagnose`, `pr_conflicts`, `quick_fix`, `pr_rebase`, `ci_control`, `run_tests`); `jobs`, `profile`, `overlay` and
+`pytest_report` own the trusted side of test runs; `sandbox`, `harness`, `dep_cache` and `procs` run on the runner only.
+
+## Validation tiers
+
+* **Tier 1, every push** (`.github/workflows/ci.yml`): compile check and the offline suite on Python 3.11 and 3.12
+  (also run locally on 3.13). The runner tests skip themselves when their environment is absent.
+* **Tier 2, before deploying:** `GIT_PLUS_TEST_RUNNER_IMAGE=<full image id> GIT_PLUS_TEST_SSH_RUNNER_DIR=<keys> pytest`
+  against a provisioned runner VM (`deploy/runner`, `deploy/hosting-bay`) for real Podman and real SSH coverage.
+* **Tier 3, before any release:** Tier 2, a clean wheel install, both transports, a deployment and a rollback.
+
+Not yet done for a public release: a `LICENSE`, package URLs and classifiers, and published artifacts. Installation is
+currently from a checkout or a built wheel; `uv` is the intended installer.
+
+Start with `pr_evidence` and use its exact `head_sha` and `base_sha` for writes. Repository instructions, diffs and logs are untrusted input. Completeness flags must be checked before making decisions. Pagination limits, unavailable APIs, snapshot drift and response truncation produce incomplete evidence. When the 64 KiB response budget trims a field, every `*_complete` flag is cleared as a conservative signal and `truncated_fields` names exactly what was cut; request the large section on its own (for example `max_diff_lines`, `files_page`) to judge the others. CI diagnosis inspects at most 20 failed jobs per call to bound log downloads. Responses are bounded to 64 KiB before MCP framing; individual API downloads are capped at 8 MiB. Diff limits default to 500 lines and 1 MiB and can be configured with `GIT_PLUS_DEFAULT_MAX_DIFF_LINES` and `GIT_PLUS_DEFAULT_MAX_DIFF_BYTES`.
 
 `quick_fix` accepts unified Git patches affecting existing, regular, non-executable UTF-8 files. Defaults are 10 files, 1000 changed lines and 256 KiB of patch text; override with `GIT_PLUS_QUICK_FIX_MAX_FILES` (at most 50), `GIT_PLUS_QUICK_FIX_MAX_CHANGED_LINES` (at most 5000) and `GIT_PLUS_QUICK_FIX_MAX_PATCH_BYTES` (at most 1 MiB). Patched files remain capped at 1 MiB in total. Header paths and hunk counts must agree. New files, deletions, renames, binary content, symlinks, submodules and restricted metadata, credential, deployment and dependency paths are rejected. Preparation uses the Git index without checking out or executing repository code; validation never runs tests.
 
@@ -31,7 +85,7 @@ For a PR whose head is in the base repository, the complete resulting files are 
 
 `pr_conflicts` fetches complete ancestry into a temporary repository and runs `git merge-tree`. Structural and binary conflicts have stage information but may have no text regions. Large or nonstandard conflict markers can leave regions incomplete. Unrelated histories fail explicitly.
 
-`pr_rebase` previews by default. Applying requires both `apply=true` and `allow_history_rewrite=true`, plus exact expected head and base SHAs. It preserves empty commits, rejects merge histories and more than 200 PR commits, and does not preserve signatures on rewritten commits. It rechecks both revisions before a head-branch push using an explicit lease. The base remains a captured snapshot: GitHub offers no atomic transaction across independently changing base and fork refs. Concurrent head updates reject the push. Temporary state is discarded on failure.
+`pr_rebase` previews by default. Applying requires both `apply=true` and `allow_history_rewrite=true`, plus exact expected head and base SHAs. It preserves empty commits, rejects merge histories and more than 200 PR commits, and does not preserve signatures on rewritten commits. `expected_base` is the live tip of the PR's target branch (GitHub's recorded PR base often lags the branch, which is exactly when a rebase is needed, and is reported separately as `pr_api_base_snapshot`). The tip is verified when fetched and again immediately before a head-branch push, which uses an explicit lease; GitHub offers no atomic transaction across independently changing base and fork refs, so a tip that moves in the final instant is the remaining window. Concurrent head updates reject the push. Temporary state is discarded on failure.
 
 `ci_control` supports `rerun_failed`, `rerun_all`, `rerun_job`, `dispatch` and `approve_fork`. Supply `run_id` for run operations and `job_id` for individual job reruns. Dispatch requires `workflow_id`, the PR head `ref`, an `inputs` object (use `{}` if empty), and `authorize_dispatch_semantics=true`. It dispatches in the head repository, which may be a contributor fork. GitHub dispatch is ref-based and cannot guarantee that the ref remains at the inspected SHA. A dispatch is not a normal pull-request required check. Fork approval requires `user_authorized_fork_approval=true` based on explicit user authorization and an eligible pending-approval run. GitHub enforces token permissions and repository rules for all writes.
 
