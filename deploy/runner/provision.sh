@@ -60,6 +60,7 @@ rm -f /tmp/gp-delegate.conf
 echo "== runner software (root-owned, not writable by the runner account)"
 install -d -m 0755 /opt/git-plus-runner
 [ -x /opt/git-plus-runner/venv/bin/python ] || python3 -m venv /opt/git-plus-runner/venv
+/opt/git-plus-runner/venv/bin/pip uninstall --quiet -y git-plus 2>/dev/null || true   # the pre-rename distribution, if present
 /opt/git-plus-runner/venv/bin/pip install --quiet --no-deps --force-reinstall "$GP_WHEEL"
 install -m 0755 -o root -g root "$HERE/git-plus-runner-entry" /usr/local/libexec/git-plus-runner-entry
 
