@@ -2,13 +2,17 @@
 # Forced command for the gp-runner account (installed root-owned at /usr/local/libexec).
 # sshd runs exactly this; anything the client asked to run is ignored. With no argument it serves one
 # job on stdin/stdout. `check` and `gc` are for the administrator and the housekeeping timer only.
+# The file names, account and paths here are persistent identifiers of existing runner hosts, not branding.
 set -eu
 uid=$(id -u)
+bin=/opt/git-plus-runner/venv/bin
+[ -x "$bin/odytor-runner" ] || bin_cmd="$bin/git-plus-runner"   # an older wheel during the transition
 exec env -i \
   PATH=/usr/local/bin:/usr/bin:/bin \
   HOME="$(getent passwd "$(id -un)" | cut -d: -f6)" \
   LANG=C.UTF-8 \
   XDG_RUNTIME_DIR="/run/user/$uid" \
   DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+  ODYTOR_RUNNER_CONFIG=/etc/git-plus-runner/runner.env \
   GIT_PLUS_RUNNER_CONFIG=/etc/git-plus-runner/runner.env \
-  /opt/git-plus-runner/venv/bin/git-plus-runner "$@"
+  "${bin_cmd:-$bin/odytor-runner}" "$@"

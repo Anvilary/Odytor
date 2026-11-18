@@ -1,4 +1,7 @@
-# Minimal production image for Git Plus MCP
+# Minimal production image for the Odytor MCP server.
+#
+# The container user, its home (/home/git-plus) and the data paths below are legacy identifiers of the existing
+# deployment: its .env pins HOME and FASTMCP_HOME there and its volumes are mounted there. They are not branding.
 FROM python:3.12-slim AS base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -16,7 +19,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /app
 
 COPY pyproject.toml README.md ./
-COPY git_plus/ ./git_plus/
+COPY odytor/ ./odytor/
 
 RUN uv pip install --system --no-cache "."
 
@@ -38,5 +41,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -fsS -H "Host: git-plus.alexandreteixeira.dev" http://127.0.0.1:8000/.well-known/oauth-authorization-server || exit 1
 
-ENTRYPOINT ["git-plus"]
+ENTRYPOINT ["odytor"]
 CMD ["--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8000"]

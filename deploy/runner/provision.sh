@@ -1,21 +1,23 @@
 #!/bin/bash
-# Provision a dedicated Git Plus test-runner host (Debian 13). Run as root. Idempotent.
+# Provision a dedicated Odytor test-runner host (Debian 13). Run as root. Idempotent.
+# The gp-runner account, /opt/git-plus-runner, /etc/git-plus-runner, the systemd units and the firewall table keep their
+# original names: they identify existing runner hosts, and a re-run must update them in place.
 #
 #   GP_RUNNER_IMAGE=docker.io/library/python@sha256:<digest> \
 #   GP_AUTHORIZED_KEY_FILE=/root/git-plus-runner.pub \
-#   GP_WHEEL=/root/git_plus-0.1.0-py3-none-any.whl \
+#   GP_WHEEL=/root/odytor-0.1.0-py3-none-any.whl \
 #   GP_ALLOW_FROM=203.0.113.10 \
 #   ./provision.sh
 #
-# GP_ALLOW_FROM  address of the Git Plus host; only it may reach sshd (strongly recommended)
+# GP_ALLOW_FROM  address of the Odytor host; only it may reach sshd (strongly recommended)
 # GP_DNS         space-separated resolvers the account may use (default: from /etc/resolv.conf)
 # GP_PIP_INDEX_URL  optional package index/mirror for dependency preparation
 # GP_JOB_MEMORY_MIB per-job memory limit (default: 60% of this host's RAM, so a job can never exhaust the guest)
 set -euo pipefail
 
 : "${GP_RUNNER_IMAGE:?pin the image by digest, e.g. docker.io/library/python@sha256:...}"
-: "${GP_AUTHORIZED_KEY_FILE:?public key of the dedicated Git Plus runner identity}"
-: "${GP_WHEEL:?path to the git_plus wheel}"
+: "${GP_AUTHORIZED_KEY_FILE:?public key of the dedicated Odytor runner identity}"
+: "${GP_WHEEL:?path to the odytor wheel}"
 GP_ALLOW_FROM="${GP_ALLOW_FROM:-}"
 GP_PIP_INDEX_URL="${GP_PIP_INDEX_URL:-}"
 GP_USER=gp-runner
@@ -65,17 +67,19 @@ echo "== configuration"
 install -d -m 0755 -o root -g root /etc/git-plus-runner
 {
   echo "# managed by provision.sh"
-  echo "GIT_PLUS_RUNNER_IMAGE=$GP_RUNNER_IMAGE"
-  [ -z "$GP_PIP_INDEX_URL" ] || echo "GIT_PLUS_RUNNER_PIP_INDEX_URL=$GP_PIP_INDEX_URL"
-  if [ -n "${GP_JOB_MEMORY_MIB:-}" ]; then echo "GIT_PLUS_RUNNER_MEMORY_MIB=$GP_JOB_MEMORY_MIB"
-  elif ! grep -q '^GIT_PLUS_RUNNER_MEMORY_MIB=' /etc/git-plus-runner/runner.env 2>/dev/null; then
-    awk '/^MemTotal:/ {printf "GIT_PLUS_RUNNER_MEMORY_MIB=%d\n", $2/1024*0.6}' /proc/meminfo
+  echo "ODYTOR_RUNNER_IMAGE=$GP_RUNNER_IMAGE"
+  [ -z "$GP_PIP_INDEX_URL" ] || echo "ODYTOR_RUNNER_PIP_INDEX_URL=$GP_PIP_INDEX_URL"
+  if [ -n "${GP_JOB_MEMORY_MIB:-}" ]; then echo "ODYTOR_RUNNER_MEMORY_MIB=$GP_JOB_MEMORY_MIB"
+  elif ! grep -q -E '^(ODYTOR|GIT_PLUS)_RUNNER_MEMORY_MIB=' /etc/git-plus-runner/runner.env 2>/dev/null; then
+    awk '/^MemTotal:/ {printf "ODYTOR_RUNNER_MEMORY_MIB=%d\n", $2/1024*0.6}' /proc/meminfo
   fi
   # keep administrator tuning that is not managed here (the job memory limit only when it was not set explicitly above)
   keep='CPUS|PIDS|WORK_MIB|TMP_MIB|MAX_TIMEOUT|PREP_TIMEOUT|FRAME_TIMEOUT|MAX_SOURCE_MIB|ENV_TTL_DAYS|ENV_BUDGET_MIB|MIN_FREE_MIB|ROOT|MAX_QUEUED|QUEUE_WAIT'
   [ -n "${GP_JOB_MEMORY_MIB:-}" ] || keep="$keep|MEMORY_MIB"
-  [ ! -f /etc/git-plus-runner/runner.env ] || grep -E "^GIT_PLUS_RUNNER_($keep)=" /etc/git-plus-runner/runner.env || true
+  # (retained lines written under the older GIT_PLUS_ spelling are rewritten under the canonical name)
+  [ ! -f /etc/git-plus-runner/runner.env ] || grep -E "^(ODYTOR|GIT_PLUS)_RUNNER_($keep)=" /etc/git-plus-runner/runner.env | sed 's/^GIT_PLUS_/ODYTOR_/' || true
 } > /etc/git-plus-runner/runner.env.new
+[ ! -f /etc/git-plus-runner/runner.env ] || cp -p /etc/git-plus-runner/runner.env "/etc/git-plus-runner/runner.env.before-$(date +%Y%m%dT%H%M%S)"   # rollback copy
 install -m 0644 -o root -g root /etc/git-plus-runner/runner.env.new /etc/git-plus-runner/runner.env
 rm -f /etc/git-plus-runner/runner.env.new
 
@@ -99,7 +103,7 @@ for ns in $GP_DNS; do dns_set="$dns_set, $ns"; done
 ssh_rule='tcp dport 22 accept'
 [ -z "$GP_ALLOW_FROM" ] || ssh_rule="ip saddr $GP_ALLOW_FROM tcp dport 22 accept"
 cat > /etc/git-plus-runner/nftables.conf <<NFT
-# Ingress: SSH only from the Git Plus host. Egress of the runner account (dependency preparation only):
+# Ingress: SSH only from the Odytor host. Egress of the runner account (dependency preparation only):
 # the package index and DNS, never private, link-local or carrier-grade NAT networks.
 table inet git_plus_runner
 delete table inet git_plus_runner

@@ -1,5 +1,5 @@
 [Unit]
-Description=Git Plus runner housekeeping
+Description=Odytor runner housekeeping
 
 [Timer]
 OnBootSec=5min

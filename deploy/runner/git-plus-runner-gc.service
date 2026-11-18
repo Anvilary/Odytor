@@ -1,5 +1,5 @@
 [Unit]
-Description=Git Plus runner housekeeping (orphan containers, expired environments)
+Description=Odytor runner housekeeping (orphan containers, expired environments)
 After=user@.service
 
 [Service]

@@ -1,30 +1,30 @@
-name: git-plus
+name: git-plus   # legacy Compose project name: renaming it would create new, empty volumes and networks
 
 services:
   git-plus:
-    image: git-plus:@COMMIT@
-    container_name: git-plus
+    image: odytor:@COMMIT@
+    container_name: git-plus            # legacy name: the Nginx upstream and the tunnel address the app by it
     restart: unless-stopped
     user: "10001:10001"
     group_add: ["1000"]            # read access to the 0640 runner key owned by the host account
     env_file:
       - .env
     environment:
-      GIT_PLUS_TEST_RUNNER_COMMAND: >-
-        ["ssh","-F","/dev/null","-T","-i","/etc/git-plus/runner/runner_key","-o","IdentitiesOnly=yes","-o","BatchMode=yes",
-        "-o","StrictHostKeyChecking=yes","-o","UserKnownHostsFile=/etc/git-plus/runner/known_hosts","-o","ConnectTimeout=10",
+      ODYTOR_TEST_RUNNER_COMMAND: >-
+        ["ssh","-F","/dev/null","-T","-i","/etc/odytor/runner/runner_key","-o","IdentitiesOnly=yes","-o","BatchMode=yes",
+        "-o","StrictHostKeyChecking=yes","-o","UserKnownHostsFile=/etc/odytor/runner/known_hosts","-o","ConnectTimeout=10",
         "-o","ServerAliveInterval=15","-o","ServerAliveCountMax=3","-o","ClearAllForwardings=yes","-o","ForwardAgent=no",
         "-p","2222","gp-runner@git-plus-runner-vm"]
-      GIT_PLUS_TEST_POLICIES: /etc/git-plus/policies/policy.toml
-      GIT_PLUS_TEST_DATA_DIR: /home/git-plus/test-data
+      ODYTOR_TEST_POLICIES: /etc/odytor/policies/policy.toml
+      ODYTOR_TEST_DATA_DIR: /home/git-plus/test-data
     networks:
       - edge
       - runner
     volumes:
       - git_plus_data:/home/git-plus/data
       - git_plus_test_data:/home/git-plus/test-data
-      - ./runner-ssh:/etc/git-plus/runner:ro
-      - ./policies:/etc/git-plus/policies:ro
+      - ./runner-ssh:/etc/odytor/runner:ro
+      - ./policies:/etc/odytor/policies:ro
     tmpfs:
       - /tmp:rw,nosuid,nodev,size=512m
     security_opt:

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Lifecycle of the dedicated Git Plus runner VM on hosting-bay. No root needed: QEMU runs in an unprivileged
+# Lifecycle of the dedicated Odytor runner VM on hosting-bay. No root needed: QEMU runs in an unprivileged
 # container that holds /dev/kvm and one private bridge network; the guest has its own kernel.
 #
 #   runner-vm.sh init        keys, base image, qemu image, network, disk, cloud-init seed (idempotent)
@@ -13,6 +13,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE="${GP_VM_BASE:-$HOME/services/git-plus-runner-vm}"
 NET="${GP_VM_NET:-gp-runner-net}"; SUBNET="${GP_VM_SUBNET:-172.30.77.0/28}"; GUEST_IP="${GP_VM_IP:-172.30.77.2}"
+# Container, image, network and directory names identify the existing runner VM; they are not branding.
 CT=git-plus-runner-vm; IMG=git-plus-runner-qemu:1
 VM_MEM="${GP_VM_MEM_MIB:-3072}"; VM_CPUS="${GP_VM_CPUS:-2}"; DISK="${GP_VM_DISK:-40G}"
 BASE_URL=https://cloud.debian.org/images/cloud/trixie/latest
@@ -71,7 +72,7 @@ status)
   docker stats --no-stream --format '{{.Name}} cpu={{.CPUPerc}} mem={{.MemUsage}}' "$CT" 2>/dev/null || true ;;
 ssh) shift; ssh_admin "$@" ;;
 provision)
-  : "${GP_RUNNER_IMAGE:?pin the runner image by digest}" "${GP_WHEEL:?path to the git_plus wheel}"
+  : "${GP_RUNNER_IMAGE:?pin the runner image by digest}" "${GP_WHEEL:?path to the odytor wheel}"
   TMP="$(mktemp -d)"; cp -r "$HERE/../runner" "$TMP/runner"; cp "$GP_WHEEL" "$TMP/"; cp "$BASE/keys/runner.pub" "$TMP/"
   ssh_admin 'rm -rf /tmp/gp-prov && mkdir -p /tmp/gp-prov'
   scp -q -r -i "$BASE/keys/admin" -o IdentitiesOnly=yes -o UserKnownHostsFile="$BASE/keys/known_hosts" -o StrictHostKeyChecking=yes \
