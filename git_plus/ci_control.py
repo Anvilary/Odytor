@@ -107,7 +107,7 @@ def control_ci(
 
     assert run_id is not None
     run = client.request("GET", f"{base}/runs/{run_id}").json()
-    _validate_run(run, run_id, expected_head, context["head_repo"], number, repo)
+    _validate_run(run, run_id, expected_head, context["head_repo"], number, repo, context)
     head_repo = (run.get("head_repository") or {}).get("full_name")
     if operation == "approve_fork":
         if user_authorized_fork_approval is not True:
@@ -133,7 +133,7 @@ def control_ci(
             raise ValidationError("Only completed failed jobs can be rerun.")
 
     latest = client.request("GET", f"{base}/runs/{run_id}").json()
-    _validate_run(latest, run_id, expected_head, context["head_repo"], number, repo)
+    _validate_run(latest, run_id, expected_head, context["head_repo"], number, repo, context)
     if latest.get("run_attempt") != run.get("run_attempt") or latest.get("status") != run.get("status") or latest.get("conclusion") != run.get("conclusion"):
         raise ValidationError("Actions run changed before the requested operation.")
     verify_context(client, repo, number, context)
@@ -153,7 +153,7 @@ def control_ci(
 
 
 def _validate_run(run: dict[str, Any], run_id: int, expected_head: str, head_repo: str,
-                  number: int, repo: str) -> None:
+                  number: int, repo: str, context: dict[str, Any]) -> None:
     if run.get("id") != run_id:
         raise ValidationError("GitHub returned a different Actions run ID.")
     attempt = run.get("run_attempt")
@@ -167,14 +167,43 @@ def _validate_run(run: dict[str, Any], run_id: int, expected_head: str, head_rep
         raise SecurityError("Actions run head repository does not match the PR head repository.")
     if run.get("event") != "pull_request":
         raise SecurityError("Actions run is not a pull_request event.")
-    # GitHub may omit pull_requests for fork runs. When present, require an exact PR/base link.
-    linked = run.get("pull_requests")
-    if linked and not any(
-        p.get("number") == number and
-        (p.get("base") or {}).get("repo", {}).get("full_name", "").casefold() == repo.casefold()
-        for p in linked
-    ):
+    _verify_pr_association(run.get("pull_requests"), number, repo, context)
+
+
+def _verify_pr_association(linked: Any, number: int, repo: str, context: dict[str, Any]) -> None:
+    """Tie the run to exactly the requested PR in exactly the requested repository.
+
+    Repository identity is checked against the PR as GitHub reports it for the requested repository, never
+    against tool arguments alone: the numeric repository id when both sides carry one, otherwise the complete
+    owner/name. GitHub's workflow-run payload may carry either (or both); an entry that carries neither, that
+    contradicts itself, or that names another repository or PR is refused.
+    """
+    if not linked:
+        # GitHub omits the association for runs from forks; a same-repository PR's run must carry it.
+        if context["is_fork"]:
+            return
+        raise SecurityError("Actions run has no pull request association (GitHub lists only open pull requests, and omits it for fork runs).")
+    if not isinstance(linked, list) or len(linked) != 1 or not isinstance(linked[0], dict):
+        raise SecurityError("Actions run is associated with several pull requests; the association is ambiguous.")
+    entry = linked[0]
+    if entry.get("number") != number:
         raise SecurityError("Actions run is linked to a different pull request.")
+    base_repo = (entry.get("base") or {}).get("repo")
+    if not isinstance(base_repo, dict):
+        raise SecurityError("Actions run pull request association has no verifiable repository identity.")
+    verified = False
+    repo_id, trusted_id = base_repo.get("id"), context.get("base_repo_id")
+    if repo_id is not None and trusted_id is not None:
+        if type(repo_id) is not int or repo_id != trusted_id:
+            raise SecurityError("Actions run is linked to a pull request in a different repository.")
+        verified = True
+    name = base_repo.get("full_name")
+    if name is not None:
+        if not isinstance(name, str) or name.casefold() != repo.casefold():
+            raise SecurityError("Actions run is linked to a pull request in a different repository.")
+        verified = True
+    if not verified:
+        raise SecurityError("Actions run pull request association has no verifiable repository identity.")
 
 
 def _raise_mutation_outcome(exc: APIError) -> None:

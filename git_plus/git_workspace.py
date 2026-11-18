@@ -34,6 +34,12 @@ def _verify_fork_network(base_repo: str, target: dict[str, Any]) -> None:
         raise SecurityError("PR head repository is not a fork in the base repository network.")
 
 
+def _repo_id(repo: Any) -> int | None:
+    """GitHub's stable numeric repository id from trusted API data, when present."""
+    value = repo.get('id') if isinstance(repo, dict) else None
+    return value if type(value) is int and value > 0 else None
+
+
 def pr_context(client: GitHubClient, repo: str, number: int, expected_head: str, *,
                write: bool = False, operation: str | None = None) -> dict[str, Any]:
     validate_repo(repo)
@@ -65,7 +71,7 @@ def pr_context(client: GitHubClient, repo: str, number: int, expected_head: str,
         if is_fork:
             _authorize_fork_write(client, repo, number, pr, head_repo, head_ref, actual, operation)
     return {'head_repo': head_repo, 'head_ref': head_ref, 'head_sha': actual,
-            'base_repo': base_repo, 'base_ref': base_ref, 'base_sha': validate_sha(base.get('sha', '')),
+            'base_repo': base_repo, 'base_repo_id': _repo_id(base.get('repo')), 'base_ref': base_ref, 'base_sha': validate_sha(base.get('sha', '')),
             'is_fork': is_fork, 'state': pr.get('state'), 'merged': bool(pr.get('merged'))}
 
 

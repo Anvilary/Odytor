@@ -16,13 +16,16 @@ def response(data):
     return obj
 
 
+REPO_ID = 1297682797
+
+
 def setup_client(*, fork=False):
     client = MagicMock(spec=GitHubClient)
     client.token = "token"
     head_repo = "fork/project" if fork else "owner/project"
     client.get_pr.return_value = {
         "head": {"sha": SHA, "repo": {"full_name": head_repo}, "ref": "topic"},
-        "base": {"sha": "c" * 40, "repo": {"full_name": "owner/project"}, "ref": "main"},
+        "base": {"sha": "c" * 40, "repo": {"id": REPO_ID, "full_name": "owner/project"}, "ref": "main"},
         "state": "open", "maintainer_can_modify": False,
     }
     return client, head_repo
@@ -31,7 +34,8 @@ def setup_client(*, fork=False):
 def run_data(head_repo="owner/project", **overrides):
     return {"id": 10, "head_sha": SHA, "head_repository": {"full_name": head_repo},
             "event": "pull_request", "status": "completed", "conclusion": "failure",
-            "run_attempt": 2, **overrides}
+            "run_attempt": 2, "pull_requests": [{"number": 4, "base": {"repo": {"id": REPO_ID, "full_name": "owner/project"}}}],
+            **overrides}
 
 
 def test_rerun_failed_verifies_revision_and_attempt_before_post():
