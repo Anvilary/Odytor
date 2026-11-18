@@ -1,6 +1,6 @@
 # Git Plus
 
-A small GitHub MCP companion for PR maintenance from web agents. One server, six tools, disposable Git workspaces, no workflow engine or operation registry.
+A small GitHub MCP companion for PR maintenance from web agents. One server, eight tools, disposable Git workspaces, no workflow engine or operation registry.
 
 | Tool | Purpose |
 | --- | --- |
@@ -10,6 +10,8 @@ A small GitHub MCP companion for PR maintenance from web agents. One server, six
 | `pr_conflicts` | Inspect an actual Git merge, including conflicting paths, stages and available text regions. |
 | `ci_control` | Coordinate PR revision-aware reruns, individual failed-job reruns, dispatches and explicitly authorized fork approvals. |
 | `pr_rebase` | Preview or apply a genuine linear rebase onto an exact base revision with a branch-specific push lease. |
+| `test_run` | Queue an isolated pytest run against an exact PR head or prospective merge, with an optional test-only reviewer overlay. Requires a separately configured runner host; see [docs/test-runner.md](docs/test-runner.md). |
+| `test_result` | Retrieve per-test evidence, tested tree, overlay digest, runner image and cache status for a run. |
 
 Requires Python 3.11+, Git 2.38+ and GitHub access appropriate to each operation. Install from this checkout:
 
@@ -33,7 +35,7 @@ For a PR whose head is in the base repository, the complete resulting files are 
 
 `ci_control` supports `rerun_failed`, `rerun_all`, `rerun_job`, `dispatch` and `approve_fork`. Supply `run_id` for run operations and `job_id` for individual job reruns. Dispatch requires `workflow_id`, the PR head `ref`, an `inputs` object (use `{}` if empty), and `authorize_dispatch_semantics=true`. It dispatches in the head repository, which may be a contributor fork. GitHub dispatch is ref-based and cannot guarantee that the ref remains at the inspected SHA. A dispatch is not a normal pull-request required check. Fork approval requires `user_authorized_fork_approval=true` based on explicit user authorization and an eligible pending-approval run. GitHub enforces token permissions and repository rules for all writes.
 
-No repository tests, build tools, hooks or configured filters are executed by Git Plus. Write results distinguish patch validation from tests not run. Mutation requests are never automatically retried. A lost response can leave the outcome unknown; reconcile the remote branch or workflow before retrying.
+Git Plus itself never executes repository tests, build tools, hooks or configured filters. The optional `test_run` tool delegates execution to an isolated runner host (see [docs/test-runner.md](docs/test-runner.md)); without that configuration it reports that testing is unavailable. Write results distinguish patch validation from tests not run. Mutation requests are never automatically retried. A lost response can leave the outcome unknown; reconcile the remote branch or workflow before retrying.
 
 For a future remote installation on hosting-bay, use Streamable HTTP behind an HTTPS reverse proxy. The CLI binds to loopback by default and refuses network startup without authentication. Do not start a public listener until deployment is authorized.
 
@@ -54,7 +56,7 @@ OAuth is provided by FastMCP's standard `GitHubProvider`, including discovery, c
 
 For compatible clients that supply a static bearer token, `GIT_PLUS_AUTH_TOKEN` can instead protect a deliberately shared service identity. This mode requires both a configured GitHub token and a nonempty repository allowlist. It does not provide OAuth discovery or per-user GitHub identities; use OAuth for ChatGPT. Do not combine the two configurations.
 
-In ChatGPT, use the custom MCP server connection flow available to your account or workspace, enter `https://YOUR-HOST/mcp`, select OAuth and complete consent, then review the six discovered tools. Current connection guidance: [OpenAI custom MCP connections](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt). The implementation follows [MCP Streamable HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) and [FastMCP GitHub OAuth](https://gofastmcp.com/docs/integrations/github).
+In ChatGPT, use the custom MCP server connection flow available to your account or workspace, enter `https://YOUR-HOST/mcp`, select OAuth and complete consent, then review the discovered tools. Current connection guidance: [OpenAI custom MCP connections](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt). The implementation follows [MCP Streamable HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) and [FastMCP GitHub OAuth](https://gofastmcp.com/docs/integrations/github).
 
 Local validation covers Git fixtures, mocked GitHub writes and in-process HTTP authentication and discovery. Real OAuth browser consent, production reverse-proxy behavior and live GitHub mutations have not been exercised. Nothing is deployed by installation or tests.
 
