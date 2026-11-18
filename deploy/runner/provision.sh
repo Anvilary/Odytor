@@ -10,6 +10,7 @@
 # GP_ALLOW_FROM  address of the Git Plus host; only it may reach sshd (strongly recommended)
 # GP_DNS         space-separated resolvers the account may use (default: from /etc/resolv.conf)
 # GP_PIP_INDEX_URL  optional package index/mirror for dependency preparation
+# GP_JOB_MEMORY_MIB per-job memory limit (default: 60% of this host's RAM, so a job can never exhaust the guest)
 set -euo pipefail
 
 : "${GP_RUNNER_IMAGE:?pin the image by digest, e.g. docker.io/library/python@sha256:...}"
@@ -46,9 +47,13 @@ loginctl enable-linger "$GP_USER"
 
 echo "== cgroup delegation (cpu/memory/pids limits for rootless containers)"
 install -d /etc/systemd/system/user@.service.d
-printf '[Service]\nDelegate=cpu cpuset io memory pids\n' > /etc/systemd/system/user@.service.d/git-plus-runner.conf
-systemctl daemon-reload
-systemctl restart "user@${GP_UID}.service"
+printf '[Service]\nDelegate=cpu cpuset io memory pids\n' > /tmp/gp-delegate.conf
+if ! cmp -s /tmp/gp-delegate.conf /etc/systemd/system/user@.service.d/git-plus-runner.conf; then
+  install -m 0644 /tmp/gp-delegate.conf /etc/systemd/system/user@.service.d/git-plus-runner.conf
+  systemctl daemon-reload
+  systemctl restart "user@${GP_UID}.service"   # only when the delegation changed: this stops Podman and any running job
+fi
+rm -f /tmp/gp-delegate.conf
 
 echo "== runner software (root-owned, not writable by the runner account)"
 install -d -m 0755 /opt/git-plus-runner
@@ -62,8 +67,14 @@ install -d -m 0755 -o root -g root /etc/git-plus-runner
   echo "# managed by provision.sh"
   echo "GIT_PLUS_RUNNER_IMAGE=$GP_RUNNER_IMAGE"
   [ -z "$GP_PIP_INDEX_URL" ] || echo "GIT_PLUS_RUNNER_PIP_INDEX_URL=$GP_PIP_INDEX_URL"
-  # keep administrator tuning that is not managed here
-  [ ! -f /etc/git-plus-runner/runner.env ] || grep -E '^GIT_PLUS_RUNNER_(CPUS|MEMORY_MIB|PIDS|WORK_MIB|TMP_MIB|MAX_TIMEOUT|PREP_TIMEOUT|FRAME_TIMEOUT|MAX_SOURCE_MIB|ENV_TTL_DAYS|ENV_BUDGET_MIB|MIN_FREE_MIB|ROOT)=' /etc/git-plus-runner/runner.env || true
+  if [ -n "${GP_JOB_MEMORY_MIB:-}" ]; then echo "GIT_PLUS_RUNNER_MEMORY_MIB=$GP_JOB_MEMORY_MIB"
+  elif ! grep -q '^GIT_PLUS_RUNNER_MEMORY_MIB=' /etc/git-plus-runner/runner.env 2>/dev/null; then
+    awk '/^MemTotal:/ {printf "GIT_PLUS_RUNNER_MEMORY_MIB=%d\n", $2/1024*0.6}' /proc/meminfo
+  fi
+  # keep administrator tuning that is not managed here (the job memory limit only when it was not set explicitly above)
+  keep='CPUS|PIDS|WORK_MIB|TMP_MIB|MAX_TIMEOUT|PREP_TIMEOUT|FRAME_TIMEOUT|MAX_SOURCE_MIB|ENV_TTL_DAYS|ENV_BUDGET_MIB|MIN_FREE_MIB|ROOT|MAX_QUEUED|QUEUE_WAIT'
+  [ -n "${GP_JOB_MEMORY_MIB:-}" ] || keep="$keep|MEMORY_MIB"
+  [ ! -f /etc/git-plus-runner/runner.env ] || grep -E "^GIT_PLUS_RUNNER_($keep)=" /etc/git-plus-runner/runner.env || true
 } > /etc/git-plus-runner/runner.env.new
 install -m 0644 -o root -g root /etc/git-plus-runner/runner.env.new /etc/git-plus-runner/runner.env
 rm -f /etc/git-plus-runner/runner.env.new
@@ -116,6 +127,7 @@ systemctl enable nftables >/dev/null 2>&1
 
 echo "== pinned image"
 runas() { runuser -u "$GP_USER" -- env XDG_RUNTIME_DIR="/run/user/$GP_UID" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$GP_UID/bus" HOME="/home/$GP_USER" "$@"; }
+runas podman system migrate >/dev/null 2>&1 || true   # clears a stale pause process left by a user-manager restart
 runas podman image exists "$GP_RUNNER_IMAGE" || runas podman pull --quiet "$GP_RUNNER_IMAGE" >/dev/null
 
 echo "== housekeeping timer"

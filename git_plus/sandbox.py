@@ -492,6 +492,12 @@ def check(cfg: RunnerConfig) -> dict:
     cfg.root.mkdir(parents=True, exist_ok=True)
     checks["free_bytes"] = shutil.disk_usage(cfg.root).free
     checks["free_ok"] = checks["free_bytes"] >= cfg.min_free_bytes
+    try:
+        host_mib = next(int(line.split()[1]) // 1024 for line in Path("/proc/meminfo").read_text().splitlines() if line.startswith("MemTotal:"))
+    except (OSError, StopIteration, ValueError):
+        host_mib = 0
+    checks["job_memory_mib"], checks["host_memory_mib"] = cfg.memory_mib, host_mib
+    checks["job_memory_safe"] = bool(host_mib) and cfg.memory_mib <= host_mib * 0.75  # a job must not be able to exhaust the guest
     probe = _engine(cfg, "run", "--rm", "--pull=never", "--network=none", "--read-only", "--cap-drop=ALL",
                     "--security-opt=no-new-privileges", "--user", "65534:65534", f"--memory={cfg.memory_mib}m",
                     f"--cpus={cfg.cpus}", f"--pids-limit={cfg.pids}", "--entrypoint", "python", image.image_id, "-c",
@@ -499,7 +505,7 @@ def check(cfg: RunnerConfig) -> dict:
     checks["isolated_container_runs"] = probe.returncode == 0 and probe.stdout.decode().strip() == "65534"
     if probe.returncode != 0:
         checks["isolated_container_error"] = probe.stderr_tail.decode("utf-8", "replace")[-300:]
-    report["ok"] = bool(checks["rootless"] and checks["cgroup_limits_delegated"] and checks["free_ok"]
+    report["ok"] = bool(checks["rootless"] and checks["cgroup_limits_delegated"] and checks["free_ok"] and checks["job_memory_safe"]
                         and checks["isolated_container_runs"])
     return report
 
