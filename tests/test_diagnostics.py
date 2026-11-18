@@ -118,3 +118,14 @@ def test_a_diff_is_not_held_to_the_small_per_string_cap_but_other_text_is():
     assert result['truncated_fields'] == ['note'] and result['diff_complete'] is False
     explicit = safe_payload({'diff': text, 'diff_complete': True}, limit=1000)
     assert len(explicit['diff']) < 1100  # an explicit limit still binds the diff
+
+
+def test_an_over_budget_field_keeps_most_of_the_budget_instead_of_half():
+    import json
+    line = '+                if count == 0 or force or time.monotonic() >= deadline: unicode é ü'
+    payload = {'diff': '\n'.join(line for _ in range(5000)), 'diff_complete': True, 'diff_returned_lines': 5000}
+    result = safe_payload(payload, total_bytes=262144)
+    size = len(json.dumps(result, ensure_ascii=True).encode())
+    assert 0.9 * 262144 <= size <= 262144
+    assert result['diff_complete'] is False and result['truncated_fields'] == ['diff']
+    assert result['diff_returned_lines'] == len(result['diff'].removesuffix('\n[output truncated]').splitlines())

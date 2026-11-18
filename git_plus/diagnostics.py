@@ -153,7 +153,13 @@ def safe_payload(
             if isinstance(value, str):
                 # Remove an old marker before cutting again.
                 value = value.removesuffix(TRUNCATION_MARKER)
-                result[key] = value[:len(value)//2] + TRUNCATION_MARKER if len(value) > 1 else ""
+                # Cut by the amount actually over budget (JSON-escaped size), not blindly in half, so a very large
+                # field keeps nearly all of the budget instead of about half of it.
+                excess = len(json.dumps(result, ensure_ascii=True).encode()) - total_bytes
+                encoded = len(json.dumps(value, ensure_ascii=True))
+                keep = int(len(value) * (encoded - excess) / encoded * 0.97) if encoded > excess > 0 else len(value) // 2
+                keep = min(max(keep, 0), len(value) - 1) if len(value) > 1 else 0
+                result[key] = value[:keep] + TRUNCATION_MARKER if len(value) > 1 else ""
             elif isinstance(value, list):
                 result[key] = value[:len(value)//2]
             else:
