@@ -499,3 +499,51 @@ def test_disk_pressure_evicts_idle_environments_but_never_one_in_use(tmp_path):
 def test_housekeeping_timer_is_installed_and_scheduled():
     assert 'git-plus-runner-gc.timer' in vm('systemctl list-timers --no-legend | cat')
     assert vm('systemctl is-enabled git-plus-runner-gc.timer').strip() == 'enabled'
+
+
+# --- network policy and silent partitions -----------------------------------------------------------------
+
+EGRESS = '''import socket
+for name, (host, port) in {"public": ("pypi.org", 443), "gateway": ("10.0.2.2", 22), "private": ("192.168.0.1", 80), "metadata": ("169.254.169.254", 80)}.items():
+    s = socket.socket(); s.settimeout(4)
+    try:
+        s.connect((host, port)); print(name, "reachable")
+    except OSError:
+        print(name, "blocked")
+'''
+
+
+def test_runner_account_egress_reaches_the_package_index_but_no_internal_network(tmp_path):
+    local = tmp_path / 'egress.py'
+    local.write_text(EGRESS)
+    subprocess.run(['scp', '-q', '-i', f'{KEYS}/admin', '-o', 'IdentitiesOnly=yes', '-o', f'UserKnownHostsFile={KEYS}/known_hosts', '-P', PORT,
+                    str(local), f'vmadmin@{HOST}:/tmp/egress.py'], check=True)
+    vm('chmod 644 /tmp/egress.py')
+    seen = dict(line.split() for line in as_runner('python3 /tmp/egress.py').splitlines())
+    assert seen == {'public': 'reachable', 'gateway': 'blocked', 'private': 'blocked', 'metadata': 'blocked'}
+
+
+def test_silent_network_partition_is_detected_by_the_server_and_cleaned_up():
+    run_id = new_run_id()
+    proc = subprocess.Popen(RUNNER, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    proc.stdin.write(raw_frame(header_for(run_id, timeout=300), tar_bytes(SLEEPER)))
+    proc.stdin.flush()
+    assert wait_until(lambda: any(n.startswith('gp-run-') for n in containers()), 60)
+    proc.send_signal(signal.SIGSTOP)  # no FIN, no RST: the client simply stops answering keepalives
+    try:
+        assert wait_until(lambda: not containers() and not workspaces(), 120)  # ClientAliveInterval 15 x CountMax 3, plus cleanup
+    finally:
+        proc.send_signal(signal.SIGCONT)
+        proc.kill()
+
+
+def test_authorized_key_is_bound_to_the_git_plus_source_address():
+    original = vm('sudo cat /etc/ssh/git-plus-runner.authorized_keys')
+    assert 'restrict,command="/usr/local/libexec/git-plus-runner-entry"' in original and 'from="' in original
+    vm("sudo sed -i 's/from=\"[^\"]*\"/from=\"203.0.113.9\"/' /etc/ssh/git-plus-runner.authorized_keys")
+    try:
+        done = subprocess.run(RUNNER + ['id'], input=b'', capture_output=True, timeout=30)
+        assert done.returncode == 255 and b'Permission denied' in done.stderr
+    finally:
+        vm("sudo tee /etc/ssh/git-plus-runner.authorized_keys >/dev/null <<'EOF'\n" + original + "EOF")
+    assert vm('sudo cat /etc/ssh/git-plus-runner.authorized_keys') == original
