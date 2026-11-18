@@ -130,6 +130,16 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         record = service.get(run_id) if isinstance(run_id, str) else None
         if record is None:
             return safe_payload(ValidationError("Unknown run_id.").to_dict())
-        return invoke_runs(record["repo"], fetch_test_result, run_id)
+        # Ownership is decided before anything about the run (including its repository) can be disclosed.
+        try:
+            with github_client(cfg, remote, repo=record["repo"]) as client:
+                owner = getattr(client, "principal", None) or ("service" if remote else "local")
+                if record["owner"] != owner:
+                    return safe_payload(ValidationError("Unknown run_id.").to_dict())
+                if not cfg.is_repo_allowed(record["repo"]):
+                    return safe_payload(SecurityError("This run's repository is no longer permitted by Git Plus configuration.").to_dict())
+                return safe_payload(fetch_test_result(client, record["repo"], run_id, service=service, owner=owner))
+        except GitPlusError as err:
+            return safe_payload(err.to_dict())
 
     return mcp

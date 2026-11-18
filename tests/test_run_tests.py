@@ -318,3 +318,15 @@ def test_approval_is_not_a_terminal_pr_state(stack):
     stack.client.get_pr.return_value.update({'state': 'open', 'merged': False, 'review_comments': 1, 'mergeable_state': 'clean'})
     fetch_test_result(stack.client, REPO, queued['run_id'], service=stack.service, owner='alice')
     assert stack.service.store.load(queued['run_id'])['expires_at'] == before
+
+
+def test_foreign_run_never_discloses_its_repository_even_when_the_allowlist_would_reject_it(stack, monkeypatch):
+    server = make_server(stack, monkeypatch, allowed=(REPO,))
+    submitted = tool(server, 'test_run').fn(repo=REPO, number=1, expected_head=stack.head)
+    wait_for(stack.service, submitted['run_id'], {'passed'})
+    stack.client.principal = 'mallory'
+    other = make_server(stack, monkeypatch, principal='mallory', allowed=('someone/else',))
+    assert tool(other, 'test_result').fn(run_id=submitted['run_id']) == {'error': 'Unknown run_id.', 'error_type': 'ValidationError'}
+    stack.client.principal = 'alice'
+    owner_view = tool(make_server(stack, monkeypatch, principal='alice', allowed=('someone/else',)), 'test_result').fn(run_id=submitted['run_id'])
+    assert 'no longer permitted' in owner_view['error']
