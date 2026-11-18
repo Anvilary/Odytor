@@ -6,14 +6,14 @@ guest. This is the private-testing deployment, not a public release.
 ## Layout
 
 ```text
-Cloudflare tunnel -> git-plus (container, edge + gp-runner-net)  -- SSH, forced command -->  git-plus-runner-vm
+Cloudflare tunnel -> app (container "git-plus", edge + gp-runner-net)  -- SSH, forced command -->  git-plus-runner-vm
                                                                     (QEMU/KVM guest, 2 vCPU, 3 GiB, 40 GiB thin)
                                                                          rootless Podman -> disposable test containers
 ```
 
 | Piece | Where |
 | --- | --- |
-| Application | container `git-plus`, image `git-plus:<commit>`, `~/services/git-plus/compose.yaml`, `.env` (OAuth, allowlists, PAT: unchanged) |
+| Application | container `git-plus` (legacy name; Nginx and the tunnel address it), image `odytor:<commit>` (older images are `git-plus:<commit>`), `~/services/git-plus/compose.yaml`, `.env` (OAuth, allowlists, PAT: unchanged) |
 | Runner key and pinned host key | `~/services/git-plus/runner-ssh/` (`runner_key` 0640 for the container's group, `known_hosts`) |
 | Approved dependency policy | `~/services/git-plus/policies/` (read-only mount); source of truth `deploy/policies/` |
 | Results and spool | named volume `git_plus_test_data` (separate from the OAuth volume `git_plus_data`) |
@@ -30,8 +30,8 @@ link-local, CGNAT or loopback range.
 
 Resource budget on the 11.9 GiB host (measured 2026-11-18, memory pressure PSI 0 before and after): the guest uses
 about 0.45 GiB idle and 0.7 GiB after jobs (virtio balloon with free-page reporting returns unused guest memory),
-hard-capped at 3.5 GiB by the container. One job at a time, at most 1.75 GiB of it (`GIT_PLUS_RUNNER_MEMORY_MIB`
-1787, derived from guest RAM; `git-plus-runner check` refuses a limit above 75% of guest RAM).
+hard-capped at 3.5 GiB by the container. One job at a time, at most 1.75 GiB of it (`ODYTOR_RUNNER_MEMORY_MIB`
+1787, derived from guest RAM; `odytor-runner check` refuses a limit above 75% of guest RAM).
 
 ## Everyday operations
 
@@ -49,7 +49,7 @@ Retained results: 48 h, expiring 6 h after a PR is seen closed or merged.
 
 ## Deploying a new application commit
 
-1. `git archive` the tested commit, transfer, `docker build -f deploy/app/Dockerfile` to `git-plus:<commit>`.
+1. `git archive` the tested commit, transfer, `docker build -f deploy/app/Dockerfile` to `odytor:<commit>`.
 2. Copy `compose.yaml` to `compose.yaml.before-<commit>`, change only the `image:` tag.
 3. `docker compose up -d --no-deps git-plus` (never `down -v`; the tunnel and Nginx are not touched), wait for `healthy`.
 4. Check `https://git-plus.alexandreteixeira.dev/.well-known/oauth-authorization-server` (200) and an unauthenticated
@@ -62,7 +62,7 @@ ages out). Policies are read at startup, so recreate the application container a
 
 ## Rollback
 
-* Test tools only: remove the `GIT_PLUS_TEST_*` lines from `compose.yaml` (or stop the VM). Both tools then report
+* Test tools only: remove the `ODYTOR_TEST_*` lines from `compose.yaml` (or stop the VM). Both tools then report
   that test execution is not configured or unavailable; the other six tools and OAuth are unaffected.
 * Application: `cp compose.yaml.before-<commit> compose.yaml && docker compose up -d --no-deps git-plus`. The previous
   images (`git-plus:4eab036` and earlier) are kept. The OAuth volume is never touched.
@@ -102,8 +102,8 @@ Setup: connect the MCP in ChatGPT/Perplexity (OAuth as the allowed user). PR #61
    with a stale base or head: rejected with the actual revision; on a conflicting PR: `merge_conflict`, nothing ran.
 7. Ask for an empty selection, an all-skipped file or a hanging test: `setup_error` / `no_tests_executed` /
    `timeout`, never green.
-8. Authentication: use the tools from a GitHub account that is not in `GIT_PLUS_ALLOWED_GITHUB_USERS` (expect a
-   refusal), and ask for a repository outside `GIT_PLUS_ALLOWED_REPOSITORIES` (refusal).
+8. Authentication: use the tools from a GitHub account that is not in `ODYTOR_ALLOWED_GITHUB_USERS` (expect a
+   refusal), and ask for a repository outside `ODYTOR_ALLOWED_REPOSITORIES` (refusal).
 9. Write tools (`quick_fix`, `pr_rebase`, `ci_control`): exercise only on a throwaway branch/PR in a repository you own
    and have added to the allowlist; they are unchanged by this deployment. Contributor-fork edits additionally need
    a fork PR with maintainer edits allowed.
