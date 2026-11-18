@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "git-plus"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Minimalist, secure, highly efficient GitHub MCP companion optimized for web-based AI agents."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -22,6 +22,9 @@ dev = [
 [project.scripts]
 git-plus = "git_plus.cli:main"
 git-plus-runner = "git_plus.sandbox:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "git_plus.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["git_plus*"]
