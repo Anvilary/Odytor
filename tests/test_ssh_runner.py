@@ -171,30 +171,33 @@ def test_adversarial_fixture_inside_the_remote_boundary(tmp_path):
 
 
 def test_memory_pids_and_disk_limits_are_enforced_remotely(tmp_path):
-    files = {'tests/test_a.py': '''
-        import os, subprocess, sys
+    pids = {'tests/test_p.py': '''
+        import subprocess
         def test_pids():
             made = 0
             try:
                 while made < 5000:
-                    subprocess.Popen([sys.executable, "-c", "import time;time.sleep(30)"]); made += 1
+                    subprocess.Popen(["sleep", "30"]); made += 1
             except OSError:
                 pass
-            assert made < 5000
+            assert 0 < made < 5000
+    '''}
+    disk = {'tests/test_d.py': '''
         def test_disk():
             try:
                 with open("/work/big", "wb") as handle:
-                    for _ in range(4096):
+                    for _ in range(1500):
                         handle.write(b"x" * (1 << 20))
             except OSError as exc:
                 assert exc.errno == 28
                 return
             raise AssertionError("tmpfs was not bounded")
-    ''', 'tests/test_m.py': 'def test_mem():\n    blocks = [bytearray(64 * 1024 * 1024) for _ in range(100)]\n'}
-    _, out = submit(tmp_path, files, timeout=120)
-    by_id = {t['id']: t['outcome'] for t in out['tests']}
-    assert by_id['tests/test_a.py::test_pids'] == 'passed' and by_id['tests/test_a.py::test_disk'] == 'passed', out
-    assert out['status'] == 'failed' and out['counts']['passed'] == 2
+    '''}
+    memory = {'tests/test_m.py': 'def test_mem():\n    blocks = [bytearray(64 * 1024 * 1024) for _ in range(100)]\n'}
+    assert submit(tmp_path, pids, timeout=120)[1]['status'] == 'passed'
+    assert submit(tmp_path, disk, timeout=120)[1]['status'] == 'passed'
+    killed = submit(tmp_path, memory, timeout=120)[1]  # 6.4 GiB requested against the job's memory limit
+    assert killed['status'] == 'failed' and killed['failure']['kind'] == 'killed_by_signal'
 
 
 def test_timeout_over_ssh_is_reported_and_cleaned(tmp_path):
@@ -453,7 +456,7 @@ def test_failed_preparation_is_cleaned_and_reported(tmp_path):
     assert env_dirs() == [] and as_runner(f'ls -A {ENVS} | grep -c "^.prep-" || true').strip() == '0'
 
 
-def test_concurrent_jobs_prepare_one_environment(tmp_path):
+def test_concurrent_jobs_are_admitted_one_at_a_time_and_prepare_one_environment(tmp_path):
     reset_envs()
     results = {}
 
@@ -466,34 +469,30 @@ def test_concurrent_jobs_prepare_one_environment(tmp_path):
         t.start()
     for t in threads:
         t.join()
-    assert sorted(results.values()) == ['hit_after_wait', 'hit_after_wait', 'miss'] and len(env_dirs()) == 1
+    assert sorted(results.values()) == ['hit', 'hit', 'miss'] and len(env_dirs()) == 1  # admitted one at a time
 
 
 def test_disk_pressure_evicts_idle_environments_but_never_one_in_use(tmp_path):
     reset_envs()
-    held = reqs()
-    other = reqs('six==1.17.0\n')
-    submit(tmp_path, OK, requirements=other)  # idle environment, oldest
+    held, idle = reqs(), reqs('six==1.17.0\n')
+    idle_key = submit(tmp_path, OK, requirements=idle)[1]['environment']['cache_key']  # idle environment, oldest
     run_id = new_run_id()
-    spool = tmp_path / run_id
-    spool.mkdir()
     proc = subprocess.Popen(RUNNER, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    proc.stdin.write(raw_frame(header_for(run_id, timeout=120, requirements=held), tar_bytes({'tests/test_a.py': 'import time\ndef test_a(): time.sleep(12)\n'})))
+    proc.stdin.write(raw_frame(header_for(run_id, timeout=120, requirements=held), tar_bytes({'tests/test_a.py': 'import time\ndef test_a(): time.sleep(15)\n'})))
     proc.stdin.flush()
     assert wait_until(lambda: any(n.startswith('gp-run-') for n in containers()), 60)  # `held` is now mounted by a live job
-    assert len(env_dirs()) == 2
+    held_keys = set(env_dirs()) - {idle_key}
+    assert len(held_keys) == 1
     vm("sudo sh -c 'echo GIT_PLUS_RUNNER_ENV_BUDGET_MIB=1 >> /etc/git-plus-runner/runner.env'")
-    try:
-        third = submit(tmp_path, OK, requirements=reqs('idna==3.10\n'))[1]  # budget exceeded: collect() must pick victims
+    try:  # the housekeeping timer runs exactly this while jobs may be running
+        report = json.loads(vm('cd /; sudo -u gp-runner /usr/local/libexec/git-plus-runner-entry gc'))['storage']
     finally:
         vm("sudo sed -i '/ENV_BUDGET_MIB=1$/d' /etc/git-plus-runner/runner.env")
-    evicted = {e['key'] for e in third['storage']['evicted']}
-    keys = env_dirs()
     result = json.loads(proc.stdout.read())
     proc.stdin.close()
+    assert {e['key'] for e in report['evicted']} == {idle_key} and held_keys <= set(report['protected'])
     assert classify(result, ('tests',), requirements_digest(held), ())['status'] == 'passed'  # the running job was untouched
-    assert evicted and third['storage']['protected_in_use'] >= 1 and third['status'] == 'passed'
-    assert result['environment']['cache_key'] not in evicted and result['environment']['cache_key'] in keys
+    assert set(env_dirs()) == held_keys
 
 
 def test_housekeeping_timer_is_installed_and_scheduled():
