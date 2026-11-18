@@ -135,3 +135,148 @@ def acquire(root: Path, identity: EnvIdentity, prepare: Callable[[Path], dict]) 
             os.utime(envs / f"{key}.use")
         yield EnvHandle(key, final, status, seconds, float(meta.get("prepared_at", 0.0)),
                         int(meta.get("size_bytes", 0)), float(meta.get("prepare_seconds", 0.0)))
+
+
+class ResourceUnavailable(Exception):
+    def __init__(self, message: str, detail: dict | None = None):
+        super().__init__(message)
+        self.detail = detail or {}
+
+
+def _try_lock(path: Path, *, exclusive: bool) -> int | None:
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+        return fd
+    except BlockingIOError:
+        os.close(fd)
+        return None
+
+
+def bump_stats(root: Path, **increments: int) -> dict:
+    """Persistent hit/miss/eviction counters, updated under a lock."""
+    root.mkdir(parents=True, exist_ok=True)
+    with _flock(root / "stats.lock", exclusive=True, wait=30):
+        path = root / "stats.json"
+        try:
+            stats = json.loads(path.read_text())
+        except (OSError, ValueError):
+            stats = {}
+        for name, amount in increments.items():
+            stats[name] = int(stats.get(name, 0)) + amount
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(stats))
+        os.replace(tmp, path)
+    return stats
+
+
+def inventory(root: Path) -> list[dict]:
+    """Ready environments with size and last use; anything else is not an environment."""
+    envs = root / "envs"
+    found = []
+    for entry in envs.iterdir() if envs.is_dir() else ():
+        if entry.name.startswith(".") or not entry.is_dir():
+            continue
+        try:
+            meta = json.loads((entry / READY).read_text())
+            used = (envs / f"{entry.name}.use").stat().st_mtime
+        except (OSError, ValueError):
+            continue
+        found.append({"key": entry.name, "size": int(meta.get("size_bytes", 0)), "last_used": used})
+    return sorted(found, key=lambda e: e["last_used"])
+
+
+def _evict(envs: Path, key: str) -> bool:
+    """Remove one environment unless a job holds it. Rename first so it vanishes atomically."""
+    fd = _try_lock(envs / f"{key}.use", exclusive=True)
+    if fd is None:
+        return False
+    try:
+        victim = envs / f".evict-{key}-{os.getpid()}"
+        os.replace(envs / key, victim)
+        shutil.rmtree(victim, ignore_errors=True)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def sweep_debris(root: Path, *, now: float, grace: float = 300.0) -> int:
+    """Remove interrupted preparations, half-evicted trees, incomplete environments and dead job workspaces."""
+    envs, removed = root / "envs", 0
+    for entry in list(envs.iterdir()) if envs.is_dir() else ():
+        if not entry.is_dir() or now - entry.stat().st_mtime < grace:
+            continue
+        name = entry.name
+        if name.startswith(".evict-"):
+            shutil.rmtree(entry, ignore_errors=True)
+            removed += 1
+        elif name.startswith(".prep-"):
+            fd = _try_lock(envs / f"{name[6:]}.prep", exclusive=True)  # a live preparation holds this
+            if fd is not None:
+                shutil.rmtree(entry, ignore_errors=True)
+                os.close(fd)
+                removed += 1
+        elif not name.startswith(".") and not (entry / READY).exists():
+            fd = _try_lock(envs / f"{name}.use", exclusive=True)
+            if fd is not None:
+                shutil.rmtree(entry, ignore_errors=True)
+                os.close(fd)
+                removed += 1
+    jobs = root / "jobs"
+    for entry in list(jobs.iterdir()) if jobs.is_dir() else ():
+        if not entry.is_dir() or now - entry.stat().st_mtime < grace:
+            continue
+        fd = _try_lock(entry / ".lock", exclusive=True) if (entry / ".lock").exists() else -1
+        if fd is not None:  # no lock file, or nobody holds it: the owner is gone
+            shutil.rmtree(entry, ignore_errors=True)
+            removed += 1
+            if fd >= 0:
+                os.close(fd)
+    return removed
+
+
+def collect(root: Path, *, ttl_seconds: float, budget_bytes: int, min_free_bytes: int,
+            now: float | None = None, debris_grace: float = 300.0, keep: frozenset[str] = frozenset()) -> dict:
+    """Evict expired, then least recently used, environments until within budget and free-space floor.
+
+    Environments held by a running job, and those named in `keep` (the one the incoming job needs), are
+    skipped. Raises ResourceUnavailable if free space
+    cannot be restored, so a new job is rejected rather than run on a full disk.
+    """
+    now = time.time() if now is None else now
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "envs").mkdir(exist_ok=True)
+    debris = sweep_debris(root, now=now, grace=debris_grace)
+    entries = inventory(root)
+    total = sum(e["size"] for e in entries)
+    free_before = shutil.disk_usage(root).free
+    report = {"env_bytes_before": total, "env_count_before": len(entries), "free_bytes_before": free_before,
+              "evicted": [], "protected": [], "debris_removed": debris}
+    envs = root / "envs"
+
+    def evict(entry: dict, reason: str) -> None:
+        nonlocal total
+        if _evict(envs, entry["key"]):
+            total -= entry["size"]
+            report["evicted"].append({"key": entry["key"], "reason": reason, "bytes": entry["size"]})
+        else:
+            report["protected"].append(entry["key"])
+
+    for entry in entries:
+        if entry["key"] not in keep and now - entry["last_used"] > ttl_seconds:
+            evict(entry, "ttl")
+    for entry in [e for e in entries if e["key"] not in {x["key"] for x in report["evicted"]}
+                  and e["key"] not in report["protected"] and e["key"] not in keep]:
+        if total <= budget_bytes and shutil.disk_usage(root).free >= min_free_bytes:
+            break
+        evict(entry, "disk_budget" if total > budget_bytes else "free_space")
+    after = inventory(root)
+    free_after = shutil.disk_usage(root).free
+    report.update(env_bytes_after=sum(e["size"] for e in after), env_count_after=len(after), free_bytes_after=free_after)
+    if report["evicted"]:
+        bump_stats(root, evictions=len(report["evicted"]))
+    if free_after < min_free_bytes:
+        raise ResourceUnavailable("Insufficient free disk space on the runner after evicting unused environments.", report)
+    return report

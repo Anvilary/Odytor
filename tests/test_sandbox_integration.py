@@ -286,3 +286,68 @@ def test_sigterm_removes_the_container_and_workspace(root, tmp_path):
     proc.terminate()
     assert proc.wait(30) == 143
     assert containers() == [] and not list((root / 'jobs').iterdir())
+
+
+# --- phase 2: environment reuse and lifecycle through the real runner ------------------------------
+def env_dirs(root):
+    return sorted(p.name for p in (root / 'envs').iterdir() if p.is_dir() and (p / '.gp-ready').exists())
+
+
+def test_environment_is_prepared_once_then_reused_across_different_sources(tmp_path_factory, tmp_path):
+    root = tmp_path_factory.mktemp('reuse')
+    _, first = execute(root, tmp_path, {'tests/test_a.py': 'def test_a(): pass\n'})
+    _, second = execute(root, tmp_path, {'tests/test_a.py': 'def test_a(): assert True\n', 'src/changed.py': 'X = 2\n'})
+    assert (first['environment']['cache_status'], second['environment']['cache_status']) == ('miss', 'hit')
+    assert first['environment']['prepare_seconds'] > 0 and second['environment']['prepare_seconds'] == 0
+    assert first['environment']['cache_key'] == second['environment']['cache_key'] and len(env_dirs(root)) == 1
+    assert second['storage']['cache_totals'] == {'hits': 1, 'misses': 1}
+    assert second['storage']['job_workspace_removed'] is True and second['storage']['env_count_before'] == 1
+
+
+def test_changed_dependencies_get_a_new_environment_and_budget_evicts_the_old_one(tmp_path_factory, tmp_path):
+    root = tmp_path_factory.mktemp('budget')
+    files = {'tests/test_a.py': 'def test_a(): pass\n'}
+    _, first = execute(root, tmp_path, files)
+    changed = validate_requirements(PYTEST_PIN + '\nattrs==24.2.0\n')
+    _, second = execute(root, tmp_path, files, requirements=changed)
+    assert second['environment']['cache_status'] == 'miss' and second['environment']['cache_key'] != first['environment']['cache_key']
+    assert len(env_dirs(root)) == 2
+    _, third = execute(root, tmp_path, files, requirements=changed, env={'GIT_PLUS_RUNNER_ENV_BUDGET_MIB': '1'})
+    evicted = {e['key']: e['reason'] for e in third['storage']['evicted']}
+    assert evicted == {first['environment']['cache_key']: 'disk_budget'} and third['environment']['cache_status'] == 'hit'
+    assert env_dirs(root) == [second['environment']['cache_key']]
+    assert third['storage']['env_bytes_after'] < third['storage']['env_bytes_before']
+
+
+def test_insufficient_disk_rejects_the_job_with_a_clear_diagnostic(tmp_path_factory, tmp_path):
+    root = tmp_path_factory.mktemp('full')
+    payload, out = execute(root, tmp_path, {'tests/test_a.py': 'def test_a(): pass\n'}, env={'GIT_PLUS_RUNNER_MIN_FREE_MIB': '4000000'})
+    assert out['status'] == 'setup_error' and out['failure']['kind'] == 'resources'
+    assert 'Insufficient free disk space' in out['failure']['message'] and not env_dirs(root) and not list((root / 'jobs').iterdir())
+
+
+def test_runner_recovers_from_crash_debris_before_running(tmp_path_factory, tmp_path):
+    root = tmp_path_factory.mktemp('debris')
+    old = time.time() - 7200
+    for path in (root / 'jobs' / 'job-dead', root / 'envs' / '.prep-abandoned', root / 'envs' / '.evict-half'):
+        path.mkdir(parents=True)
+        (path / 'junk').write_text('x')
+        os.utime(path, (old, old))
+    payload, out = execute(root, tmp_path, {'tests/test_a.py': 'def test_a(): pass\n'})
+    assert out['status'] == 'passed' and out['storage']['debris_removed'] == 3
+    assert not (root / 'jobs' / 'job-dead').exists() and not (root / 'envs' / '.prep-abandoned').exists()
+
+
+def test_concurrent_runners_share_one_environment_preparation(tmp_path_factory, tmp_path):
+    root = tmp_path_factory.mktemp('concurrent')
+    results = {}
+
+    def go(name):
+        sub = tmp_path / name
+        sub.mkdir()
+        results[name] = execute(root, sub, {'tests/test_a.py': 'import time\ndef test_a(): time.sleep(0.5)\n'})[1]
+    threads = [threading.Thread(target=go, args=(n,)) for n in ('a', 'b', 'c')]
+    [t.start() for t in threads]; [t.join(300) for t in threads]
+    statuses = sorted(r['environment']['cache_status'] for r in results.values())
+    assert all(r['status'] == 'passed' for r in results.values()) and statuses.count('miss') == 1
+    assert len(env_dirs(root)) == 1 and results['a']['environment']['cache_key'] == results['b']['environment']['cache_key']

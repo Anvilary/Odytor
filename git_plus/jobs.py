@@ -158,6 +158,21 @@ def _sanitize_environment(raw: Any) -> dict[str, Any]:
             "prepared_at": _num(raw.get("prepared_at")), "size_bytes": _int(raw.get("size_bytes"), 10**13)}
 
 
+def _sanitize_storage(payload: dict[str, Any]) -> dict[str, Any]:
+    storage = payload.get("storage") if isinstance(payload.get("storage"), dict) else {}
+    cleanup = payload.get("cleanup") if isinstance(payload.get("cleanup"), dict) else {}
+    totals = payload.get("cache_totals") if isinstance(payload.get("cache_totals"), dict) else {}
+    evicted = [{"key": _str(e.get("key"), 40), "reason": _str(e.get("reason"), 20), "bytes": _int(e.get("bytes"), 10**13)}
+               for e in (storage.get("evicted") or [])[:20] if isinstance(e, dict)]
+    keys = ("env_bytes_before", "env_bytes_after", "env_count_before", "env_count_after", "free_bytes_before",
+            "free_bytes_after", "debris_removed")
+    return {**{k: _int(storage.get(k), 10**15) for k in keys}, "evicted": evicted,
+            "protected_in_use": len(storage.get("protected") or []),
+            "job_workspace_bytes": _int(cleanup.get("job_workspace_bytes"), 10**13),
+            "job_workspace_removed": cleanup.get("job_workspace_removed") is True,
+            "cache_totals": {k: _int(v, 10**9) for k, v in totals.items() if isinstance(k, str)}}
+
+
 def _sanitize_tests(raw: Any) -> list[dict[str, Any]]:
     tests, used = [], 0
     for item in raw if isinstance(raw, list) else []:
@@ -183,7 +198,7 @@ def classify(payload: dict[str, Any], selectors: tuple[str, ...], expected_spec_
     outcome: dict[str, Any] = {"runner": _sanitize_runner(payload.get("runner")),
                                "environment": _sanitize_environment(payload.get("environment")),
                                "failure": None, "counts": None, "tests": [], "selector_coverage": [], "log": None,
-                               "execution": None, "reports": {}}
+                               "execution": None, "reports": {}, "storage": _sanitize_storage(payload)}
 
     def end(status: str, kind: str | None = None, message: str | None = None, **extra: Any) -> dict[str, Any]:
         outcome["status"] = status

@@ -6,6 +6,7 @@ Standard library only.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -88,8 +89,8 @@ class RunnerConfig:
             prep_timeout=number("PREP_TIMEOUT", 900, 30, 7200),
             pip_index_url=env.get("GIT_PLUS_RUNNER_PIP_INDEX_URL") or None,
             env_ttl_days=number("ENV_TTL_DAYS", 7.0, 0.01, 365.0, float),
-            env_budget_bytes=number("ENV_BUDGET_GIB", 10, 1, 4096) * 1024 * _MIB,
-            min_free_bytes=number("MIN_FREE_GIB", 2, 1, 4096) * 1024 * _MIB)
+            env_budget_bytes=number("ENV_BUDGET_MIB", 10240, 1, 4194304) * _MIB,
+            min_free_bytes=number("MIN_FREE_MIB", 2048, 1, 4194304) * _MIB)
 
 
 @dataclass(frozen=True)
@@ -263,6 +264,34 @@ def validate_header(cfg: RunnerConfig, header: object) -> dict:
             "requirements": requirements, "timeout": timeout}
 
 
+def _run_job(cfg: RunnerConfig, job: dict, image: ImageInfo, env: dep_cache.EnvHandle, source: Path,
+             job_dir: Path, result: dict) -> None:
+    run = job_dir / "run"
+    run.mkdir(mode=0o755)
+    os.chmod(run, 0o755)
+    os.replace(source, run / "source.tar")
+    os.chmod(run / "source.tar", 0o644)
+    argv = build_argv(job["selectors"])
+    _write(run / "job.json", json.dumps({"argv": argv, "selectors": list(job["selectors"]), "timeout": job["timeout"],
+                                         "limits": {"files": 200000, "bytes": cfg.work_mib * _MIB}}))
+    for name in ("harness.py", "pytest_report.py"):
+        _write(run / name, Path(__file__).with_name(name).read_bytes())
+    name = f"gp-run-{job['job_id'][5:21]}"
+    args = _container_args(
+        cfg, name, image, test=True, mounts=[f"{run}:{INPUT_DIR}:ro", f"{env.path}:{ENV_DIR}:ro"],
+        timeout=job["timeout"] + 60, memory_mib=cfg.memory_mib,
+        tmpfs=[f"/tmp:rw,nosuid,nodev,exec,size={cfg.tmp_mib}m", f"{WORK_DIR}:rw,nosuid,nodev,exec,size={cfg.work_mib}m"],
+        env={}, command=[f"{INPUT_DIR}/harness.py", "test"])
+    outcome, seconds = _run_container(cfg, name, args, job["timeout"] + 90)
+    result["sandbox"] = {
+        "engine_exit_code": outcome.returncode, "timed_out": outcome.timed_out, "output_overflow": outcome.overflowed,
+        "container_seconds": seconds, "engine_stderr_tail": outcome.stderr_tail.decode("utf-8", "replace")[-1024:],
+        "limits": {"cpus": cfg.cpus, "memory_mib": cfg.memory_mib, "pids": cfg.pids, "network": "none",
+                   "work_tmpfs_mib": cfg.work_mib, "tmp_tmpfs_mib": cfg.tmp_mib, "timeout_seconds": job["timeout"],
+                   "user": "65534:65534", "root_filesystem": "read-only", "capabilities": "none"}}
+    result["report"] = _parse_report(outcome.stdout)
+
+
 def execute(cfg: RunnerConfig, job: dict, source: Path, job_dir: Path) -> dict:
     image = resolve_image(cfg)
     spec_sha = requirements_digest(job["requirements"])
@@ -271,37 +300,30 @@ def execute(cfg: RunnerConfig, job: dict, source: Path, job_dir: Path) -> dict:
                     "runner": {"image": image.ref, "image_id": image.image_id, "image_digest": image.digest,
                                "platform": image.platform, "python": image.python, "engine": cfg.engine}}
     try:
+        result["storage"] = dep_cache.collect(cfg.root, ttl_seconds=cfg.env_ttl_days * 86400,
+                                              budget_bytes=cfg.env_budget_bytes, min_free_bytes=cfg.min_free_bytes,
+                                              keep=frozenset({identity.key()}))
+    except dep_cache.ResourceUnavailable as exc:
+        raise SetupError("resources", exc.args[0], exc.detail) from exc
+    try:
         with dep_cache.acquire(cfg.root, identity, _prepare(cfg, job["job_id"], image, job["requirements"], job_dir)) as env:
+            stats = dep_cache.bump_stats(cfg.root, **{"misses" if env.cache_status == "miss" else "hits": 1})
             result["environment"] = {"cache_key": env.key, "cache_status": env.cache_status, "requirements_sha256": spec_sha,
                                      "prepare_seconds": env.prepare_seconds, "prepared_at": env.prepared_at,
                                      "size_bytes": env.size_bytes}
-            run = job_dir / "run"
-            run.mkdir(mode=0o755)
-            os.chmod(run, 0o755)
-            os.replace(source, run / "source.tar")
-            os.chmod(run / "source.tar", 0o644)
-            argv = build_argv(job["selectors"])
-            _write(run / "job.json", json.dumps({"argv": argv, "selectors": list(job["selectors"]), "timeout": job["timeout"],
-                                                 "limits": {"files": 200000, "bytes": cfg.work_mib * _MIB}}))
-            for name in ("harness.py", "pytest_report.py"):
-                _write(run / name, Path(__file__).with_name(name).read_bytes())
-            name = f"gp-run-{job['job_id'][5:21]}"
-            args = _container_args(
-                cfg, name, image, test=True, mounts=[f"{run}:{INPUT_DIR}:ro", f"{env.path}:{ENV_DIR}:ro"],
-                timeout=job["timeout"] + 60, memory_mib=cfg.memory_mib,
-                tmpfs=[f"/tmp:rw,nosuid,nodev,exec,size={cfg.tmp_mib}m", f"{WORK_DIR}:rw,nosuid,nodev,exec,size={cfg.work_mib}m"],
-                env={}, command=[f"{INPUT_DIR}/harness.py", "test"])
-            outcome, seconds = _run_container(cfg, name, args, job["timeout"] + 90)
-            result["sandbox"] = {
-                "engine_exit_code": outcome.returncode, "timed_out": outcome.timed_out, "output_overflow": outcome.overflowed,
-                "container_seconds": seconds, "engine_stderr_tail": outcome.stderr_tail.decode("utf-8", "replace")[-1024:],
-                "limits": {"cpus": cfg.cpus, "memory_mib": cfg.memory_mib, "pids": cfg.pids, "network": "none",
-                           "work_tmpfs_mib": cfg.work_mib, "tmp_tmpfs_mib": cfg.tmp_mib, "timeout_seconds": job["timeout"],
-                           "user": "65534:65534", "root_filesystem": "read-only", "capabilities": "none"}}
-            result["report"] = _parse_report(outcome.stdout)
+            result["cache_totals"] = {k: int(v) for k, v in stats.items()}
+            _run_job(cfg, job, image, env, source, job_dir, result)
     except dep_cache.EnvPreparationError as exc:
+        dep_cache.bump_stats(cfg.root, prepare_failures=1)
         raise SetupError("prepare", exc.args[0], exc.detail) from exc
     return result
+
+
+def remove_workspace(job_dir: Path) -> dict:
+    """Delete the disposable workspace and prove it is gone."""
+    size = dep_cache.tree_size(job_dir) if job_dir.exists() else 0
+    shutil.rmtree(job_dir, ignore_errors=True)
+    return {"job_workspace_bytes": size, "job_workspace_removed": not job_dir.exists()}
 
 
 def _handler(_signum, _frame):
@@ -312,18 +334,22 @@ def main() -> int:
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, _handler)
     job_dir: Path | None = None
+    lock_fd = None
     try:
         try:
             cfg = RunnerConfig.load()
             (cfg.root / "jobs").mkdir(parents=True, exist_ok=True, mode=0o700)
-            job_dir = cfg.root / "jobs" / f"pending-{os.getpid()}"
+            job_dir = cfg.root / "jobs" / f"job-{os.getpid()}-{os.urandom(4).hex()}"
             job_dir.mkdir(mode=0o755)
             os.chmod(job_dir, 0o755)
+            lock_fd = os.open(job_dir / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)  # a live job holds this; crash recovery sweeps unlocked workspaces
             source = job_dir / "source.tar"
             job = validate_header(cfg, read_job(sys.stdin.buffer, cfg, source))
             result = execute(cfg, job, source, job_dir)
         except SetupError as exc:
             result = {"schema": SCHEMA, "setup_error": {"stage": exc.stage, "message": exc.message, "detail": exc.detail}}
+        result["cleanup"] = remove_workspace(job_dir) if job_dir else {}
         sys.stdout.write(json.dumps(result, separators=(",", ":")))
         sys.stdout.flush()
         return 0
@@ -332,6 +358,8 @@ def main() -> int:
     finally:
         if job_dir is not None:
             shutil.rmtree(job_dir, ignore_errors=True)
+        if lock_fd is not None:
+            os.close(lock_fd)
 
 
 if __name__ == "__main__":

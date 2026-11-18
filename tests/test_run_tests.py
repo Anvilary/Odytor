@@ -309,3 +309,12 @@ def test_mcp_enforces_allowlist_and_unconfigured_state(stack, monkeypatch):
                                    default_max_diff_lines=500, default_max_diff_bytes=1048576, allowed_repositories=()))
     assert 'not configured' in tool(plain, 'test_run').fn(repo=REPO, number=1, expected_head='a' * 40)['error']
     assert 'not configured' in tool(plain, 'test_result').fn(run_id='test-' + '1' * 32)['error']
+
+
+def test_approval_is_not_a_terminal_pr_state(stack):
+    queued = submit(stack)
+    wait_for(stack.service, queued['run_id'], {'passed'})
+    before = stack.service.store.load(queued['run_id'])['expires_at']
+    stack.client.get_pr.return_value.update({'state': 'open', 'merged': False, 'review_comments': 1, 'mergeable_state': 'clean'})
+    fetch_test_result(stack.client, REPO, queued['run_id'], service=stack.service, owner='alice')
+    assert stack.service.store.load(queued['run_id'])['expires_at'] == before

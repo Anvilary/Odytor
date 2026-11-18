@@ -169,7 +169,7 @@ def public_view(record: dict[str, Any], currency: dict[str, Any] | None = None) 
     if status in TERMINAL:
         view.update({k: result.get(k) for k in ("failure", "counts", "tests", "tests_total", "tests_truncated",
                                                   "selector_coverage", "log", "execution", "runner", "environment",
-                                                  "reports", "conflict") if k in result})
+                                                  "reports", "conflict", "storage") if k in result})
         view["green"] = status == "passed"
         view["evidence_complete"] = status in {"passed", "failed", "no_tests_executed", "no_tests_collected"} and bool(result.get("counts") is not None)
     else:
