@@ -331,3 +331,17 @@ def test_foreign_run_never_discloses_its_repository_even_when_the_allowlist_woul
     stack.client.principal = 'alice'
     owner_view = tool(make_server(stack, monkeypatch, principal='alice', allowed=('someone/else',)), 'test_result').fn(run_id=submitted['run_id'])
     assert 'no longer permitted' in owner_view['error']
+
+
+def test_unconfigured_runner_explains_how_to_enable_it_and_that_other_tools_are_unaffected():
+    plain = create_server(Settings(github_token='t', github_api_url='https://api.github.com', auth_token=None,
+                                   default_max_diff_lines=500, default_max_diff_bytes=1048576, allowed_repositories=()))
+    for result in (tool(plain, 'test_run').fn(repo=REPO, number=1, expected_head='a' * 40),
+                   tool(plain, 'test_result').fn(run_id='test-' + '1' * 32)):
+        assert result['error_type'] == 'ValidationError'
+        assert result['diagnostic']['classification'] == 'runner_not_configured'
+        assert result['diagnostic']['enable'] == ['GIT_PLUS_TEST_RUNNER_COMMAND', 'GIT_PLUS_TEST_POLICIES']
+        assert 'GIT_PLUS_TEST_RUNNER_COMMAND' in result['error'] and 'docs/test-runner.md' in result['error']
+        assert 'six tools' in result['error']
+    names = {t.name for t in asyncio.run(plain.list_tools())}
+    assert {'test_run', 'test_result'} <= names and len(names) == 8  # still discoverable; never silently removed

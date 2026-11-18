@@ -20,6 +20,20 @@ from git_plus.jobs import JobService
 from git_plus.profile import PROFILE_NAME, load_policies
 from git_plus.run_tests import fetch_test_result, submit_test_run
 
+RUNNER_NOT_CONFIGURED = (
+    "Isolated test execution is not configured on this server. test_run and test_result need a separately "
+    "provisioned runner host: set GIT_PLUS_TEST_RUNNER_COMMAND (a JSON argv, normally an SSH command to the runner) "
+    "and GIT_PLUS_TEST_POLICIES (the maintainer test policy), then restart. See docs/test-runner.md. "
+    "The other six tools do not need a runner."
+)
+
+
+def runner_not_configured() -> dict[str, Any]:
+    return ValidationError(RUNNER_NOT_CONFIGURED, {
+        "classification": "runner_not_configured",
+        "enable": ["GIT_PLUS_TEST_RUNNER_COMMAND", "GIT_PLUS_TEST_POLICIES"], "docs": "docs/test-runner.md"}).to_dict()
+
+
 Number = Annotated[int, Field(ge=1)]
 SHA = Annotated[str, Field(pattern=r"^[0-9a-fA-F]{40}$")]
 
@@ -104,7 +118,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
     def invoke_runs(repo, operation, *args, **kwargs):
         """Like invoke, with the caller's identity bound to the run so run IDs are never bearer tokens."""
         if service is None:
-            return safe_payload(ValidationError("Test execution is not configured on this server.").to_dict())
+            return safe_payload(runner_not_configured())
         if not cfg.is_repo_allowed(repo):
             raise SecurityError(f"Repository '{repo}' is not permitted by Git Plus configuration.")
         try:
@@ -115,7 +129,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             return safe_payload(err.to_dict())
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
-              description="Queue an isolated pytest run against an exact PR head (mode=head) or a disposable merge with an exact target-branch tip (mode=prospective_merge, requires expected_base). Optional test_overlay is a bounded test-only unified diff applied to a disposable tree; nothing is committed, pushed or posted. Profile and selectors are validated; no arbitrary commands or pytest flags. Poll test_result with the returned run_id.")
+              description="Queue an isolated pytest run against an exact PR head (mode=head) or a disposable merge with an exact target-branch tip (mode=prospective_merge, requires expected_base). Optional test_overlay is a bounded test-only unified diff applied to a disposable tree; nothing is committed, pushed or posted. Profile and selectors are validated; no arbitrary commands or pytest flags. Poll test_result with the returned run_id. Requires a configured isolated runner; without one it returns instructions for enabling it.")
     def test_run(repo: str, number: Number, expected_head: SHA, profile: str = PROFILE_NAME,
                  selectors: list[str] | None = None, mode: str = "head", expected_base: SHA | None = None,
                  test_overlay: str | None = None) -> dict[str, Any]:
@@ -126,7 +140,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
               description="Retrieve status and evidence for a test_run: verified revisions, tested tree, overlay digest, runner image, dependency cache status, exact pytest invocation, per-test outcomes and bounded logs. Only the submitting user can read a run. A green result requires executed, passing tests; zero collected, skipped-only, missing-report and setup failures are never green.")
     def test_result(run_id: str) -> dict[str, Any]:
         if service is None:
-            return safe_payload(ValidationError("Test execution is not configured on this server.").to_dict())
+            return safe_payload(runner_not_configured())
         record = service.get(run_id) if isinstance(run_id, str) else None
         if record is None:
             return safe_payload(ValidationError("Unknown run_id.").to_dict())

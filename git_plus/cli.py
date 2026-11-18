@@ -3,11 +3,26 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from urllib.parse import urlsplit
 
 from git_plus import __version__
 from git_plus.config import Settings
 from git_plus.server import create_server
+
+
+def startup_notes(settings: Settings) -> list[str]:
+    """Plain-language notes for a local (stdio) start. They go to stderr; stdout belongs to the MCP protocol."""
+    notes = []
+    if not settings.github_token:
+        notes.append("no GitHub credential: set GITHUB_TOKEN or GH_TOKEN. Only public data can be read and writes will fail.")
+    if not settings.allowed_repositories:
+        notes.append("GIT_PLUS_ALLOWED_REPOSITORIES is not set: every repository the credential can reach is permitted. "
+                     "Set it to owner/repo,owner/other to restrict access.")
+    if settings.testing is None:
+        notes.append("isolated testing is not configured: test_run and test_result will explain how to enable it "
+                     "(the other six tools are unaffected).")
+    return notes
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -42,6 +57,8 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     settings = Settings.load()
     if args.transport == "stdio":
+        for note in startup_notes(settings):
+            print(f"git-plus: {note}", file=sys.stderr)
         server = create_server(settings)
         server.run(transport="stdio")
     else:
