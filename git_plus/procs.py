@@ -30,8 +30,11 @@ def _kill_group(proc: subprocess.Popen) -> None:
 
 def run_bounded(argv: Sequence[str], *, env: Mapping[str, str], timeout: float, max_stdout: int,
                 stdin_chunks: Iterable[bytes] | None = None, cancel: threading.Event | None = None,
-                grace: float = 5.0, stderr_limit: int = 8192) -> ProcResult:
-    """Run without a shell; never buffer more than max_stdout bytes; always reap the process group."""
+                grace: float = 5.0, stderr_limit: int = 8192, hold_stdin: bool = False) -> ProcResult:
+    """Run without a shell; never buffer more than max_stdout bytes; always reap the process group.
+
+    hold_stdin keeps the child's stdin open after the chunks are written, so its EOF means this process is gone.
+    """
     proc = subprocess.Popen(list(argv), env=dict(env), stdin=subprocess.PIPE if stdin_chunks is not None else subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     out = bytearray()
@@ -56,7 +59,9 @@ def run_bounded(argv: Sequence[str], *, env: Mapping[str, str], timeout: float, 
         try:
             for chunk in stdin_chunks or ():
                 proc.stdin.write(chunk)
-            proc.stdin.close()
+            proc.stdin.flush()
+            if not hold_stdin:
+                proc.stdin.close()
         except (BrokenPipeError, OSError, ValueError):
             pass
 
@@ -87,6 +92,11 @@ def run_bounded(argv: Sequence[str], *, env: Mapping[str, str], timeout: float, 
     finally:
         _kill_group(proc)
         proc.wait()
+        if proc.stdin is not None:
+            try:
+                proc.stdin.close()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
         for thread in threads:
             thread.join(timeout=5)
     return ProcResult(proc.returncode, bytes(out), b"".join(err)[-stderr_limit:], timed_out, canceled, state["overflow"])

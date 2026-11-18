@@ -1,4 +1,5 @@
 """Evidence-based classification and the bounded job service (no real sandbox)."""
+import os
 import threading
 import time
 
@@ -145,7 +146,7 @@ def test_queue_is_bounded_and_spool_is_removed(tmp_path):
         gate.set()
         for run_id in [first, *queued]:
             assert wait_for(service, run_id, {'passed'})['status'] == 'passed'
-        assert not spool.exists() and not list(service.spool_root.iterdir())
+        assert not spool.exists() and not list((service.spool_root / service.instance).iterdir())
         service.reserve(); service.release()
     finally:
         gate.set(); service.shutdown()
@@ -204,9 +205,59 @@ def test_restart_reconciles_unfinished_runs_and_drops_spool(tmp_path):
         service.start()
         statuses = {r['status']: r['result']['failure']['kind'] for r in store.records()}
         assert statuses == {'setup_error': 'service_restarted'}
-        assert not list(service.spool_root.iterdir())
+        assert [p.name for p in service.spool_root.iterdir()] == []
     finally:
         service.shutdown()
+
+
+def _running_record(service, gate):
+    run_id = new_run_id()
+    service.reserve()
+    spool = service.spool_dir(run_id)
+    (spool / 'source.tar').write_bytes(b'x')
+    service.enqueue(record(run_id, now=service.clock()), QueuedJob(run_id, spool, {'job_id': run_id}, 10))
+    return run_id, spool
+
+
+def test_a_second_local_agent_does_not_disturb_the_first_ones_runs(tmp_path):
+    """stdio agents share one data directory; a newcomer must only reconcile instances that are really gone."""
+    cfg = settings(tmp_path)
+    gate = threading.Event()
+    first = JobService(cfg, runner=lambda j, c: (gate.wait(20), payload())[1])
+    try:
+        run_id, spool = _running_record(first, gate)
+        wait_for(first, run_id, {'running'})
+        second = JobService(cfg, runner=lambda j, c: payload())
+        try:
+            second.start()
+            assert first.store.load(run_id)['status'] == 'running' and spool.exists()
+            assert second.get(run_id)['status'] == 'running'  # readable by either process
+        finally:
+            second.shutdown()
+        gate.set()
+        assert wait_for(first, run_id, {'passed'})['status'] == 'passed'
+    finally:
+        gate.set()
+        first.shutdown()
+
+
+def test_runs_of_a_dead_instance_are_closed_and_its_spool_removed(tmp_path):
+    cfg = settings(tmp_path)
+    gate = threading.Event()
+    dead = JobService(cfg, runner=lambda j, c: (gate.wait(20), payload())[1])
+    run_id, spool = _running_record(dead, gate)
+    wait_for(dead, run_id, {'running'})
+    os.close(dead._instance_fd)  # simulate the process dying: the OS drops its liveness lock
+    dead._instance_fd = None
+    survivor = JobService(cfg, runner=lambda j, c: payload())
+    try:
+        survivor.start()
+        done = survivor.store.load(run_id)
+        assert done['status'] == 'setup_error' and done['result']['failure']['kind'] == 'service_restarted'
+        assert not spool.exists() and not (tmp_path / 'data' / 'instances' / f'{dead.instance}.lock').exists()
+    finally:
+        gate.set()
+        survivor.shutdown()
 
 
 def test_retention_purges_only_expired_terminal_results(tmp_path):

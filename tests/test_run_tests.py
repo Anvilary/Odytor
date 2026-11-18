@@ -58,7 +58,8 @@ def submit(stack, client=None, expected_head=None, **kw):
 
 
 def spool_files(stack):
-    return list(stack.service.spool_root.iterdir()) if stack.service.spool_root.exists() else []
+    base = stack.service.spool_root / stack.service.instance
+    return list(base.iterdir()) if base.exists() else []
 
 
 def tar_files(data):
@@ -135,7 +136,7 @@ def test_queue_saturation_rejects_and_releases_reservation(stack):
         submit(stack); submit(stack)
         with pytest.raises(QueueFullError):
             submit(stack)
-        assert len(list(stack.service.spool_root.iterdir())) == 3
+        assert len(spool_files(stack)) == 3
     finally:
         gate.set()
 

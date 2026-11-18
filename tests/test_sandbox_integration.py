@@ -6,6 +6,7 @@ classifier. They need podman and a pinned local image; set GIT_PLUS_TEST_RUNNER_
 """
 import hashlib
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -279,7 +280,7 @@ def test_sigterm_removes_the_container_and_workspace(root, tmp_path):
     proc = subprocess.Popen([sys.executable, '-m', 'git_plus.sandbox'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
     for chunk in _frame(header, tmp_path / 'source.tar'):
         proc.stdin.write(chunk)
-    proc.stdin.close()
+    proc.stdin.flush()  # stdin stays open: EOF now means the client is gone
     deadline = time.time() + 60
     while time.time() < deadline and not any(n.startswith('gp-run-') for n in containers()):
         time.sleep(0.2)
@@ -287,6 +288,90 @@ def test_sigterm_removes_the_container_and_workspace(root, tmp_path):
     proc.terminate()
     assert proc.wait(30) == 143
     assert containers() == [] and not list((root / 'jobs').iterdir())
+
+
+def _start_sleeper(root, tmp_path, run_id=None):
+    from git_plus.jobs import _frame
+    run_id = run_id or new_run_id()
+    (tmp_path / 'source.tar').write_bytes(make_tar({'tests/test_a.py': 'import time\ndef test_a(): time.sleep(100)\n'}))
+    header = {'schema': 1, 'job_id': run_id, 'repo': 'owner/repo', 'profile': 'python-pytest', 'profile_version': '1',
+              'test_dirs': ['tests'], 'selectors': ['tests'], 'requirements': REQ, 'timeout_seconds': 100}
+    env = {**os.environ, 'GIT_PLUS_RUNNER_IMAGE': IMAGE, 'GIT_PLUS_RUNNER_ROOT': str(root)}
+    proc = subprocess.Popen([sys.executable, '-m', 'git_plus.sandbox'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
+    for chunk in _frame(header, tmp_path / 'source.tar'):
+        proc.stdin.write(chunk)
+    proc.stdin.flush()
+    deadline = time.time() + 60
+    while time.time() < deadline and not any(n.startswith('gp-run-') for n in containers()):
+        time.sleep(0.2)
+    assert any(n.startswith('gp-run-') for n in containers())
+    return proc, env
+
+
+def test_client_disconnect_removes_the_container_and_workspace(root, tmp_path):
+    proc, _ = _start_sleeper(root, tmp_path)
+    proc.stdin.close()  # EOF on stdin is how a lost SSH session looks to the runner
+    assert proc.wait(30) == 143
+    assert containers() == [] and not list((root / 'jobs').iterdir())
+
+
+def test_sigkilled_runner_orphan_is_reaped_by_housekeeping_and_never_by_a_live_job(root, tmp_path):
+    proc, env = _start_sleeper(root, tmp_path)
+    proc.kill()  # nothing can clean up after SIGKILL
+    proc.wait()
+    assert any(n.startswith('gp-run-') for n in containers())  # the documented residual: it lives until its hard timeout
+    done = subprocess.run([sys.executable, '-m', 'git_plus.sandbox', 'gc'], env=env, capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout)['orphan_containers_removed']
+    assert containers() == []
+    subprocess.run(['rm', '-rf', *map(str, (root / 'jobs').glob('job-*'))])
+
+
+def test_gc_leaves_a_live_jobs_container_alone(root, tmp_path):
+    proc, env = _start_sleeper(root, tmp_path)
+    try:
+        done = subprocess.run([sys.executable, '-m', 'git_plus.sandbox', 'gc'], env=env, capture_output=True, text=True, timeout=120)
+        assert json.loads(done.stdout)['orphan_containers_removed'] == []
+        assert any(n.startswith('gp-run-') for n in containers())
+    finally:
+        proc.terminate()
+        proc.wait(30)
+    assert containers() == []
+
+
+def test_duplicate_job_id_is_rejected_without_touching_the_first(root, tmp_path):
+    run_id = new_run_id()
+    first, env = _start_sleeper(root, tmp_path, run_id)
+    try:
+        from git_plus.jobs import _frame
+        (tmp_path / 'dup').mkdir()
+        (tmp_path / 'dup' / 'source.tar').write_bytes(make_tar({'tests/test_a.py': 'def test_a(): pass\n'}))
+        header = {'schema': 1, 'job_id': run_id, 'repo': 'owner/repo', 'profile': 'python-pytest', 'profile_version': '1',
+                  'test_dirs': ['tests'], 'selectors': ['tests'], 'requirements': REQ, 'timeout_seconds': 60}
+        second = subprocess.Popen([sys.executable, '-m', 'git_plus.sandbox'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
+        for chunk in _frame(header, tmp_path / 'dup' / 'source.tar'):
+            second.stdin.write(chunk)
+        second.stdin.flush()
+        out = json.loads(second.stdout.read())
+        second.stdin.close()
+        assert out['setup_error']['stage'] == 'duplicate'
+        assert any(n.startswith('gp-run-') for n in containers())
+    finally:
+        first.terminate()
+        first.wait(30)
+    assert containers() == []
+
+
+def test_stalled_client_is_cut_off_by_the_frame_deadline(root, tmp_path):
+    env = {**os.environ, 'GIT_PLUS_RUNNER_IMAGE': IMAGE, 'GIT_PLUS_RUNNER_ROOT': str(root), 'GIT_PLUS_RUNNER_FRAME_TIMEOUT': '10'}
+    proc = subprocess.Popen([sys.executable, '-m', 'git_plus.sandbox'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
+    proc.stdin.write((100).to_bytes(4, 'big') + b'{')  # a header that never completes
+    proc.stdin.flush()
+    started = time.time()
+    out = json.loads(proc.stdout.read())
+    proc.stdin.close()
+    assert out['setup_error']['stage'] == 'frame' and 'Timed out' in out['setup_error']['message']
+    assert time.time() - started < 30 and not list((root / 'jobs').iterdir())
 
 
 # --- phase 2: environment reuse and lifecycle through the real runner ------------------------------

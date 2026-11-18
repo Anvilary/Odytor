@@ -7,6 +7,7 @@ overlay, export) completes during the request and only a credential-free artifac
 from __future__ import annotations
 
 import collections
+import fcntl
 import json
 import os
 import re
@@ -124,7 +125,7 @@ def make_subprocess_runner(command: tuple[str, ...], *, extra_wait: int = 1500) 
     def run(job: QueuedJob, cancel: threading.Event) -> dict[str, Any]:
         result = run_bounded(command, env=runner_environment(), timeout=job.timeout + extra_wait,
                              max_stdout=MAX_RUNNER_OUTPUT, cancel=cancel,
-                             stdin_chunks=_frame(job.header, job.spool / "source.tar"))
+                             stdin_chunks=_frame(job.header, job.spool / "source.tar"), hold_stdin=True)
         if result.canceled:
             return {"canceled": True}
         stderr = safe_text(result.stderr_tail.decode("utf-8", "replace"), 600)
@@ -311,6 +312,8 @@ class JobService:
         self.root = Path(cfg.data_dir)
         self.store = RunStore(self.root / "results")
         self.spool_root = self.root / "spool"
+        self.instance = os.urandom(8).hex()  # several local agent processes may share one data directory
+        self._instance_fd: int | None = None
         self._cv = threading.Condition()
         self._queue: collections.deque[QueuedJob] = collections.deque()
         self._reserved = 0
@@ -327,19 +330,47 @@ class JobService:
                 return
             self.store.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
             self.spool_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            (self.root / "instances").mkdir(exist_ok=True, mode=0o700)
+            self._instance_fd = os.open(self._lock_path(self.instance), os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(self._instance_fd, fcntl.LOCK_EX)  # held for the process lifetime: proves this instance is alive
             self._reconcile()
             self._started = True
             self._thread = threading.Thread(target=self._work, name="git-plus-test-worker", daemon=True)
             self._thread.start()
 
+    def _lock_path(self, instance: str) -> Path:
+        return self.root / "instances" / f"{instance}.lock"
+
+    def _live_instances(self) -> set[str]:
+        """Other service processes still alive on this data directory (their liveness lock cannot be taken)."""
+        live: set[str] = set()
+        for lock in (self.root / "instances").glob("*.lock"):
+            if lock.stem == self.instance:
+                continue
+            try:
+                fd = os.open(lock, os.O_RDWR)
+            except OSError:
+                continue
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                live.add(lock.stem)
+            else:
+                lock.unlink(missing_ok=True)  # its owner is gone
+            finally:
+                os.close(fd)
+        return live
+
     def _reconcile(self) -> None:
-        """After a restart, no run can still be queued or running: close them and drop spooled sources."""
+        """Close runs and spool that belonged to dead service instances; never touch a live sibling's."""
+        live = self._live_instances() | {self.instance}
         for record in self.store.records():
-            if record.get("status") in {"queued", "running"}:
+            if record.get("status") in {"queued", "running"} and record.get("instance") not in live:
                 self._finish(record, {"status": "setup_error", "failure": {
                     "kind": "service_restarted", "message": "Git Plus restarted before this run finished."}})
         for child in self.spool_root.iterdir():
-            shutil.rmtree(child, ignore_errors=True)
+            if child.name not in live:
+                shutil.rmtree(child, ignore_errors=True)
         self.purge(force=True)
 
     def shutdown(self, wait: float = 10.0) -> None:
@@ -357,6 +388,11 @@ class JobService:
             shutil.rmtree(job.spool, ignore_errors=True)
         if self._thread:
             self._thread.join(wait)
+        if self._instance_fd is not None:
+            self._lock_path(self.instance).unlink(missing_ok=True)
+            shutil.rmtree(self.spool_root / self.instance, ignore_errors=True)
+            os.close(self._instance_fd)
+            self._instance_fd = None
 
     # --- admission -------------------------------------------------------------------------
     def reserve(self) -> None:
@@ -379,14 +415,15 @@ class JobService:
     def enqueue(self, record: dict[str, Any], job: QueuedJob) -> None:
         """Convert a held reservation into a queued job."""
         with self._cv:
+            record["instance"] = self.instance
             self.store.save(record)
             self._queue.append(job)
             self._reserved = max(self._reserved - 1, 0)
             self._cv.notify()
 
     def spool_dir(self, run_id: str) -> Path:
-        path = self.spool_root / run_id
-        path.mkdir(mode=0o700)
+        path = self.spool_root / self.instance / run_id
+        path.mkdir(parents=True, mode=0o700)
         return path
 
     # --- retrieval -------------------------------------------------------------------------

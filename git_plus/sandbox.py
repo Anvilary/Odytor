@@ -6,14 +6,17 @@ Standard library only.
 """
 from __future__ import annotations
 
+import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import re
+import select
 import shutil
 import signal
-import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +34,7 @@ MAX_REPORT_BYTES = 4 * 1024 * 1024
 _PIN_DIGEST = re.compile(r"[^@\s]+@sha256:([0-9a-f]{64})")
 _PIN_ID = re.compile(r"(?:sha256:)?([0-9a-f]{64})")
 _MIB = 1024 * 1024
+LABEL_ROOT, LABEL_WORKSPACE = "git-plus.root", "git-plus.workspace"
 
 
 class SetupError(Exception):
@@ -56,6 +60,7 @@ class RunnerConfig:
     max_timeout: int = 600
     max_source_bytes: int = 256 * _MIB
     prep_timeout: int = 900
+    frame_timeout: int = 600
     pip_index_url: str | None = None
     env_ttl_days: float = 7.0
     env_budget_bytes: int = 10 * 1024 * _MIB
@@ -86,7 +91,7 @@ class RunnerConfig:
             pids=number("PIDS", 512, 32, 8192), work_mib=number("WORK_MIB", 1024, 64, 16384),
             tmp_mib=number("TMP_MIB", 512, 16, 8192), max_timeout=number("MAX_TIMEOUT", 600, 10, 3600),
             max_source_bytes=number("MAX_SOURCE_MIB", 256, 1, 4096) * _MIB,
-            prep_timeout=number("PREP_TIMEOUT", 900, 30, 7200),
+            prep_timeout=number("PREP_TIMEOUT", 900, 30, 7200), frame_timeout=number("FRAME_TIMEOUT", 600, 10, 3600),
             pip_index_url=env.get("GIT_PLUS_RUNNER_PIP_INDEX_URL") or None,
             env_ttl_days=number("ENV_TTL_DAYS", 7.0, 0.01, 365.0, float),
             env_budget_bytes=number("ENV_BUDGET_MIB", 10240, 1, 4194304) * _MIB,
@@ -100,6 +105,34 @@ class ImageInfo:
     digest: str | None
     platform: str
     python: str
+
+
+def load_config_file(path: str) -> dict[str, str]:
+    """Read GIT_PLUS_RUNNER_* assignments from a root-owned file; anything else, or a writable file, is refused."""
+    info = os.stat(path)
+    if info.st_uid != 0 or info.st_mode & 0o022:
+        raise SetupError("config", "The runner configuration file must be owned by root and not group/world writable.")
+    values: dict[str, str] = {}
+    for number, line in enumerate(Path(path).read_text().splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        if not sep or not re.fullmatch(r"GIT_PLUS_RUNNER_[A-Z_]+", key.strip()):
+            raise SetupError("config", f"Invalid runner configuration line {number}.")
+        values[key.strip()] = value.strip().strip("'\"")
+    return values
+
+
+def _runtime_config() -> RunnerConfig:
+    """Process environment, overlaid by the optional root-owned file named by GIT_PLUS_RUNNER_CONFIG."""
+    path = os.environ.get("GIT_PLUS_RUNNER_CONFIG")
+    if not path:
+        return RunnerConfig.load()
+    try:
+        return RunnerConfig.load({**os.environ, **load_config_file(path)})
+    except OSError as exc:
+        raise SetupError("config", f"Cannot read the runner configuration file: {exc.strerror}.") from exc
 
 
 def _engine(cfg: RunnerConfig, *args: str, timeout: float = 60, max_stdout: int = 65536):
@@ -142,12 +175,13 @@ def _write(path: Path, data: bytes | str, mode: int = 0o644) -> None:
     os.chmod(path, mode)
 
 
-def _container_args(cfg: RunnerConfig, name: str, image: ImageInfo, *, test: bool, mounts: list[str],
+def _container_args(cfg: RunnerConfig, name: str, image: ImageInfo, *, test: bool, mounts: list[str], workspace: str,
                     timeout: int, memory_mib: int, tmpfs: list[str], env: dict[str, str], command: list[str]) -> list[str]:
     args = [cfg.engine, "run", "--rm", "--name", name, "--pull=never", "--read-only", "--cap-drop=ALL",
             "--security-opt=no-new-privileges", f"--pids-limit={cfg.pids}", f"--memory={memory_mib}m",
             f"--memory-swap={memory_mib}m", f"--cpus={cfg.cpus}", "--ulimit=nofile=4096:4096", "--ulimit=core=0",
-            f"--timeout={timeout}", "--entrypoint", "python", "--workdir", WORK_DIR if test else "/tmp"]
+            f"--timeout={timeout}", f"--label={LABEL_ROOT}={_root_tag(cfg.root)}", f"--label={LABEL_WORKSPACE}={workspace}",
+            "--entrypoint", "python", "--workdir", WORK_DIR if test else "/tmp"]
     if test:
         args += ["--network=none", "--user", "65534:65534"]
     for mount in mounts:
@@ -196,8 +230,9 @@ def _prepare(cfg: RunnerConfig, job_id: str, image: ImageInfo, requirements: str
         _write(prep / "job.json", json.dumps({"timeout": cfg.prep_timeout}))
         _write(prep / "harness.py", Path(__file__).with_name("harness.py").read_bytes())
         env = {"PIP_INDEX_URL": cfg.pip_index_url} if cfg.pip_index_url else {}
-        name = f"gp-prep-{job_id[5:21]}"
-        args = _container_args(cfg, name, image, test=False, mounts=[f"{prep}:{INPUT_DIR}:ro", f"{tmp}:{ENV_DIR}:rw"],
+        name = f"gp-prep-{job_dir.name[4:]}"
+        args = _container_args(cfg, name, image, test=False, workspace=job_dir.name,
+                               mounts=[f"{prep}:{INPUT_DIR}:ro", f"{tmp}:{ENV_DIR}:rw"],
                                timeout=cfg.prep_timeout + 60, memory_mib=cfg.memory_mib, env=env,
                                tmpfs=[f"/tmp:rw,nosuid,nodev,exec,size={cfg.tmp_mib * 2}m"],
                                command=[f"{INPUT_DIR}/harness.py", "prep"])
@@ -212,11 +247,27 @@ def _prepare(cfg: RunnerConfig, job_id: str, image: ImageInfo, requirements: str
     return build
 
 
+class FdReader:
+    """Blocking reads from a pipe with one overall deadline, so a stalled client cannot hold a workspace."""
+
+    def __init__(self, fd: int, deadline_seconds: float) -> None:
+        self.fd, self.deadline = fd, time.monotonic() + deadline_seconds
+
+    def read(self, count: int) -> bytes:
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0 or not select.select([self.fd], [], [], remaining)[0]:
+            raise SetupError("frame", "Timed out waiting for the job frame.")
+        return os.read(self.fd, min(count, _MIB))
+
+
 def _read_exact(stream, count: int) -> bytes:
-    data = stream.read(count)
-    if data is None or len(data) != count:
-        raise SetupError("frame", "Truncated job frame.")
-    return data
+    data = bytearray()
+    while len(data) < count:
+        chunk = stream.read(count - len(data))
+        if not chunk:
+            raise SetupError("frame", "Truncated job frame.")
+        data += chunk
+    return bytes(data)
 
 
 def read_job(stream, cfg: RunnerConfig, source: Path) -> dict:
@@ -234,9 +285,7 @@ def read_job(stream, cfg: RunnerConfig, source: Path) -> dict:
     remaining = length
     with source.open("wb") as handle:
         while remaining:
-            chunk = stream.read(min(remaining, _MIB))
-            if not chunk:
-                raise SetupError("frame", "Truncated source artifact.")
+            chunk = _read_exact(stream, min(remaining, _MIB))
             handle.write(chunk)
             remaining -= len(chunk)
     return header
@@ -281,9 +330,9 @@ def _run_job(cfg: RunnerConfig, job: dict, image: ImageInfo, env: dep_cache.EnvH
                                          "limits": {"files": 200000, "bytes": cfg.work_mib * _MIB}}))
     for name in ("harness.py", "pytest_report.py"):
         _write(run / name, Path(__file__).with_name(name).read_bytes())
-    name = f"gp-run-{job['job_id'][5:21]}"
+    name = f"gp-run-{job_dir.name[4:]}"
     args = _container_args(
-        cfg, name, image, test=True, mounts=[f"{run}:{INPUT_DIR}:ro", f"{env.path}:{ENV_DIR}:ro"],
+        cfg, name, image, test=True, workspace=job_dir.name, mounts=[f"{run}:{INPUT_DIR}:ro", f"{env.path}:{ENV_DIR}:ro"],
         timeout=job["timeout"] + 60, memory_mib=cfg.memory_mib,
         tmpfs=[f"/tmp:rw,nosuid,nodev,exec,size={cfg.tmp_mib}m", f"{WORK_DIR}:rw,nosuid,nodev,exec,size={cfg.work_mib}m"],
         env={}, command=[f"{INPUT_DIR}/harness.py", "test"])
@@ -299,6 +348,8 @@ def _run_job(cfg: RunnerConfig, job: dict, image: ImageInfo, env: dep_cache.EnvH
 
 def execute(cfg: RunnerConfig, job: dict, source: Path, job_dir: Path) -> dict:
     image = resolve_image(cfg)
+    reap_orphan_containers(cfg)
+    _sweep_active(cfg)
     spec_sha = requirements_digest(job["requirements"])
     identity = dep_cache.EnvIdentity(job["repo"], spec_sha, image.python, image.image_id, PROFILE_VERSION, image.platform)
     result: dict = {"schema": SCHEMA, "job_id": job["job_id"],
@@ -324,6 +375,100 @@ def execute(cfg: RunnerConfig, job: dict, source: Path, job_dir: Path) -> dict:
     return result
 
 
+def _root_tag(root: Path) -> str:
+    return hashlib.sha256(str(root).encode()).hexdigest()[:16]
+
+
+def _lock_free(path: Path) -> bool:
+    """True when no live runner holds this workspace lock (or the lock file is gone)."""
+    fd = dep_cache._try_lock(path, exclusive=True) if path.exists() else -1
+    if fd is None:
+        return False
+    if fd >= 0:
+        os.close(fd)
+    return True
+
+
+def reap_orphan_containers(cfg: RunnerConfig, *, strict: bool = False) -> list[str]:
+    """Remove containers whose runner is gone (SIGKILL, crash, lost SSH session) instead of waiting for their hard timeout."""
+    listing = _engine(cfg, "ps", "-a", "--filter", f"label={LABEL_ROOT}={_root_tag(cfg.root)}", "--format",
+                      '{{.Names}} {{index .Labels "' + LABEL_WORKSPACE + '"}}')
+    if listing.returncode != 0:
+        if strict:
+            raise SetupError("engine", "Could not list runner containers.", {"stderr": listing.stderr_tail.decode("utf-8", "replace")[-300:]})
+        return []
+    reaped = []
+    for line in listing.stdout.decode("utf-8", "replace").splitlines():
+        name, _, workspace = line.partition(" ")
+        if not re.fullmatch(r"gp-(?:run|prep)-[0-9]+-[0-9a-f]{8}", name) or not re.fullmatch(r"job-[0-9]+-[0-9a-f]{8}", workspace):
+            continue
+        if _lock_free(cfg.root / "jobs" / workspace / ".lock"):
+            _kill_container(cfg, name)
+            reaped.append(name)
+    return reaped
+
+
+@contextlib.contextmanager
+def _single_flight(cfg: RunnerConfig, job_id: str):
+    """One execution per job id: a replayed submission is rejected without touching the first one's containers."""
+    active = cfg.root / "active"
+    active.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = active / f"{job_id}.lock"
+    fd = dep_cache._try_lock(path, exclusive=True)
+    if fd is None:
+        raise SetupError("duplicate", "A job with this id is already running on the runner.")
+    try:
+        yield
+    finally:
+        path.unlink(missing_ok=True)
+        os.close(fd)
+
+
+def _sweep_active(cfg: RunnerConfig) -> None:
+    for entry in list((cfg.root / "active").glob("test-*.lock")):
+        if _lock_free(entry):
+            entry.unlink(missing_ok=True)
+
+
+def check(cfg: RunnerConfig) -> dict:
+    """Deployment self-test: rootless engine, pinned image, cgroup limits, storage and an isolated container."""
+    report: dict = {"ok": False, "checks": {}}
+    checks = report["checks"]
+    info = _engine(cfg, "info", "--format", "{{.Host.Security.Rootless}}|{{json .Host.CgroupControllers}}|{{.Host.CgroupManager}}")
+    parts = info.stdout.decode().strip().split("|", 2) if info.returncode == 0 else []
+    checks["rootless"] = len(parts) == 3 and parts[0] == "true"
+    controllers = set(json.loads(parts[1] or "[]")) if len(parts) == 3 else set()
+    checks["cgroup_controllers"] = sorted(controllers)
+    checks["cgroup_limits_delegated"] = {"cpu", "memory", "pids"} <= controllers
+    image = resolve_image(cfg)
+    checks["image"] = {"id": image.image_id, "digest": image.digest, "python": image.python, "platform": image.platform}
+    cfg.root.mkdir(parents=True, exist_ok=True)
+    checks["free_bytes"] = shutil.disk_usage(cfg.root).free
+    checks["free_ok"] = checks["free_bytes"] >= cfg.min_free_bytes
+    probe = _engine(cfg, "run", "--rm", "--pull=never", "--network=none", "--read-only", "--cap-drop=ALL",
+                    "--security-opt=no-new-privileges", "--user", "65534:65534", f"--memory={cfg.memory_mib}m",
+                    f"--cpus={cfg.cpus}", f"--pids-limit={cfg.pids}", "--entrypoint", "python", image.image_id, "-c",
+                    "import os;print(os.getuid())", timeout=120)
+    checks["isolated_container_runs"] = probe.returncode == 0 and probe.stdout.decode().strip() == "65534"
+    if probe.returncode != 0:
+        checks["isolated_container_error"] = probe.stderr_tail.decode("utf-8", "replace")[-300:]
+    report["ok"] = bool(checks["rootless"] and checks["cgroup_limits_delegated"] and checks["free_ok"]
+                        and checks["isolated_container_runs"])
+    return report
+
+
+def gc(cfg: RunnerConfig) -> dict:
+    """Scheduled housekeeping: the same reaping and eviction that precede every job, for idle periods."""
+    reaped = reap_orphan_containers(cfg, strict=True)
+    _sweep_active(cfg)
+    try:
+        report = dep_cache.collect(cfg.root, ttl_seconds=cfg.env_ttl_days * 86400, budget_bytes=cfg.env_budget_bytes,
+                                   min_free_bytes=cfg.min_free_bytes)
+    except dep_cache.ResourceUnavailable as exc:
+        report = {"error": exc.args[0], **exc.detail}
+    return {"orphan_containers_removed": reaped, "storage": report}
+
+
 def remove_workspace(job_dir: Path) -> dict:
     """Delete the disposable workspace and prove it is gone."""
     size = dep_cache.tree_size(job_dir) if job_dir.exists() else 0
@@ -335,14 +480,49 @@ def _handler(_signum, _frame):
     raise Interrupted()
 
 
+def _watch_client(fd: int, armed: threading.Event) -> None:
+    """The client keeps stdin open until it has read the result, so EOF means it is gone or gave up: unwind and clean up."""
+    try:
+        while os.read(fd, 65536):
+            pass
+    except OSError:
+        pass
+    if armed.is_set():
+        os.kill(os.getpid(), signal.SIGTERM)
+
+
+def _emit(result: dict) -> None:
+    try:
+        sys.stdout.write(json.dumps(result, separators=(",", ":")))
+        sys.stdout.flush()
+    except (BrokenPipeError, OSError):
+        pass  # the client is gone; the workspace is already removed and Git Plus records the loss
+
+
+def _admin(command: str) -> int:
+    try:
+        cfg = _runtime_config()
+        report = {"check": check, "gc": gc}[command](cfg)
+    except SetupError as exc:
+        report = {"ok": False, "error": {"stage": exc.stage, "message": exc.message}}
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report.get("ok", "error" not in report) else 1
+
+
 def main() -> int:
+    if sys.argv[1:]:
+        if sys.argv[1:] not in (["check"], ["gc"]):
+            sys.stderr.write("usage: git-plus-runner [check|gc]   (no arguments: serve one job on stdin)\n")
+            return 2
+        return _admin(sys.argv[1])
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, _handler)
     job_dir: Path | None = None
     lock_fd = None
+    armed = threading.Event()
     try:
         try:
-            cfg = RunnerConfig.load()
+            cfg = _runtime_config()
             (cfg.root / "jobs").mkdir(parents=True, exist_ok=True, mode=0o700)
             job_dir = cfg.root / "jobs" / f"job-{os.getpid()}-{os.urandom(4).hex()}"
             job_dir.mkdir(mode=0o755)
@@ -350,17 +530,21 @@ def main() -> int:
             lock_fd = os.open(job_dir / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
             fcntl.flock(lock_fd, fcntl.LOCK_EX)  # a live job holds this; crash recovery sweeps unlocked workspaces
             source = job_dir / "source.tar"
-            job = validate_header(cfg, read_job(sys.stdin.buffer, cfg, source))
-            result = execute(cfg, job, source, job_dir)
+            job = validate_header(cfg, read_job(FdReader(0, cfg.frame_timeout), cfg, source))
+            armed.set()
+            threading.Thread(target=_watch_client, args=(0, armed), daemon=True).start()
+            with _single_flight(cfg, job["job_id"]):
+                result = execute(cfg, job, source, job_dir)
         except SetupError as exc:
             result = {"schema": SCHEMA, "setup_error": {"stage": exc.stage, "message": exc.message, "detail": exc.detail}}
+        armed.clear()
         result["cleanup"] = remove_workspace(job_dir) if job_dir else {}
-        sys.stdout.write(json.dumps(result, separators=(",", ":")))
-        sys.stdout.flush()
+        _emit(result)
         return 0
     except Interrupted:
         return 143
     finally:
+        armed.clear()
         if job_dir is not None:
             shutil.rmtree(job_dir, ignore_errors=True)
         if lock_fd is not None:

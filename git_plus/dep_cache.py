@@ -18,6 +18,7 @@ from typing import Callable, Iterator
 
 READY = ".gp-ready"
 PREP_LOCK_WAIT = 1200.0
+LOCK_GRACE = 15.0
 
 
 @dataclass(frozen=True)
@@ -226,9 +227,14 @@ def sweep_debris(root: Path, *, now: float, grace: float = 300.0) -> int:
                 removed += 1
     jobs = root / "jobs"
     for entry in list(jobs.iterdir()) if jobs.is_dir() else ():
-        if not entry.is_dir() or now - entry.stat().st_mtime < grace:
+        if not entry.is_dir():
             continue
-        fd = _try_lock(entry / ".lock", exclusive=True) if (entry / ".lock").exists() else -1
+        # A workspace whose lock file exists belongs to a runner that got far enough to lock it: once the lock is
+        # free that runner is dead, so only a short grace covers the instant between creating and locking it.
+        locked_once = (entry / ".lock").exists()
+        if now - entry.stat().st_mtime < (LOCK_GRACE if locked_once else grace):
+            continue
+        fd = _try_lock(entry / ".lock", exclusive=True) if locked_once else -1
         if fd is not None:  # no lock file, or nobody holds it: the owner is gone
             shutil.rmtree(entry, ignore_errors=True)
             removed += 1
