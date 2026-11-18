@@ -29,8 +29,8 @@ A separate, older terminal application called Odytor is installed and running. I
 
 * **Settings.** `ODYTOR_X` is canonical and `GIT_PLUS_X` is still read for every setting (server, test runner and runner
   host). If both are set with different values, startup fails with a message naming both; nothing is guessed, so a stale old
-  value can never silently widen a repository allowlist. Equal values are accepted. A start-up note on stderr lists any
-  old-prefix settings still in use. The old `GIT_PLUS_ODYSSEUS_PAT*` aliases for the server-held PAT also remain, as before.
+  value can never silently widen a repository allowlist. Equal values are accepted. A local (stdio) start prints a note on stderr listing
+  any old-prefix settings still in use; the hosted server does not. The old `GIT_PLUS_ODYSSEUS_PAT*` aliases for the server-held PAT also remain, as before.
 * **Commands.** `git-plus` and `git-plus-runner` are entry-point aliases of the same functions (no second implementation).
   An installation made before the rename also keeps its old console scripts until it is reinstalled.
 * **State.** Default state directories still resolve to existing data: `~/.local/state/git-plus/tests` and
