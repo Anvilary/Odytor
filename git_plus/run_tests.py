@@ -15,6 +15,7 @@ from git_plus.errors import APIError, GitPlusError, RevisionMismatchError, Secur
 from git_plus.git_workspace import GitWorkspace, pr_context, verify_context
 from git_plus.github import GitHubClient, validate_repo, validate_sha
 from git_plus.jobs import TERMINAL, JobService, QueuedJob, new_run_id
+from git_plus.overlay import apply_overlay, validate_overlay
 from git_plus.pr_conflicts import inspect_merge
 from git_plus.profile import (PROFILE_NAME, PROFILES, ProfileError, RepoPolicy, validate_selectors)
 
@@ -64,8 +65,9 @@ def submit_test_run(client: GitHubClient, repo: str, number: int, expected_head:
                     expected_base: str | None = None, test_overlay: str | None = None) -> dict[str, Any]:
     policy = policies.get(repo.strip().casefold())
     profile, selected = _validate_request(repo, number, expected_head, profile, selectors, mode, expected_base, policy)
+    summary = None
     if test_overlay is not None:
-        raise ValidationError("Test overlays are not supported by this build.")
+        summary = validate_overlay(test_overlay, policy.test_dirs, max_bytes=cfg.max_overlay_bytes)
     expected_head = validate_sha(expected_head)
     expected_base = validate_sha(expected_base) if expected_base else None
     _require_pull_access(client, repo)
@@ -98,7 +100,8 @@ def submit_test_run(client: GitHubClient, repo: str, number: int, expected_head:
                 conflict = merge if merge["conflicting"] else None
                 if not conflict:
                     trees["merge_tree"] = merge["merge_tree_sha"]
-            overlay = {"supplied": False, "applied": False, "sha256": None, "paths": [], "patch_status": "none"}
+            overlay = {"supplied": False, "applied": False, "sha256": None, "paths": [], "patch_status": "none",
+                       "committed": False, "pushed": False}
             now = service.clock()
             record: dict[str, Any] = {
                 "schema": SCHEMA, "run_id": run_id, "owner": owner, "repo": repo, "pr": number, "mode": mode,
@@ -120,11 +123,19 @@ def submit_test_run(client: GitHubClient, repo: str, number: int, expected_head:
                 service.store.save(record)
                 return public_view(record)
             effective = trees.get("merge_tree") or trees["pr_tree"]
+            if summary:
+                effective = apply_overlay(work, effective, summary, test_overlay)
+                overlay.update(supplied=True, applied=True, sha256=summary.sha256, bytes=summary.patch_bytes,
+                               paths=list(summary.files), new_paths=list(summary.new_files),
+                               test_paths=list(summary.test_files), added_lines=summary.added_lines,
+                               removed_lines=summary.removed_lines, patch_status="applied_cleanly",
+                               base_tree=trees.get("merge_tree") or trees["pr_tree"])
             trees["effective_tree"] = effective
             record["artifact"] = work.export_tree(effective, spool / "source.tar", max_bytes=cfg.max_source_bytes)
             verify_context(client, repo, number, context)
         header = {"schema": 1, "job_id": run_id, "repo": repo, "profile": profile, "profile_version": PROFILES[profile],
                   "test_dirs": list(policy.test_dirs), "selectors": list(selected),
+                  "overlay_paths": list(summary.test_files) if summary else [],
                   "requirements": policy.requirements, "timeout_seconds": cfg.default_timeout}
         service.enqueue(record, QueuedJob(run_id, spool, header, cfg.default_timeout))
         reserved = False
@@ -168,8 +179,8 @@ def public_view(record: dict[str, Any], currency: dict[str, Any] | None = None) 
     }
     if status in TERMINAL:
         view.update({k: result.get(k) for k in ("failure", "counts", "tests", "tests_total", "tests_truncated",
-                                                  "selector_coverage", "log", "execution", "runner", "environment",
-                                                  "reports", "conflict", "storage") if k in result})
+                                                  "selector_coverage", "overlay_coverage", "log", "execution", "runner",
+                                                  "environment", "reports", "conflict", "storage") if k in result})
         view["green"] = status == "passed"
         view["evidence_complete"] = status in {"passed", "failed", "no_tests_executed", "no_tests_collected"} and bool(result.get("counts") is not None)
     else:

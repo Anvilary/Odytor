@@ -96,7 +96,7 @@ def test_default_selectors_are_the_policy_test_dirs(stack):
     (dict(selectors=['/etc/passwd']), ValidationError), (dict(selectors=['src/a.py']), ValidationError),
     (dict(selectors=[]), ValidationError), (dict(expected_base='a' * 40), ValidationError),
     (dict(mode='prospective_merge'), ValidationError), (dict(mode='prospective_merge', expected_base='nope'), ValidationError),
-    (dict(test_overlay='x'), ValidationError)])
+    (dict(test_overlay="x"), ValidationError)])
 def test_invalid_requests_are_rejected_before_any_job_exists(stack, kwargs, error):
     with pytest.raises(error):
         submit(stack, **kwargs)

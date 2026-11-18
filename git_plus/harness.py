@@ -216,6 +216,7 @@ def _run_tests(spec):
         "pytest_exit": proc.returncode, "timed_out": timed_out, "finished_event": finish,
         "duration_seconds": round(time.monotonic() - started, 3), "counts": counts,
         "selector_coverage": _coverage(spec["selectors"], collected, tests),
+        "overlay_coverage": _coverage(spec.get("overlay_paths", []), collected, tests),
         "ids_truncated": bool(collected and collected["count"] > len(collected["ids"])),
         "collect_errors": collect_errors[:20],
         "tests": ranked[:MAX_TESTS], "tests_total": len(tests), "tests_truncated": len(tests) > MAX_TESTS,

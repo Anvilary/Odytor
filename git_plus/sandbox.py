@@ -22,7 +22,7 @@ from git_plus import dep_cache
 from git_plus.procs import run_bounded
 from git_plus.profile import (ENV_DIR, INPUT_DIR, PROFILE_NAME, PROFILE_VERSION, WORK_DIR, ProfileError,
                               build_argv, is_job_id, is_repo, requirements_digest, validate_requirements,
-                              validate_selectors)
+                              validate_selector, validate_selectors)
 
 SCHEMA = 1
 MARK = "GIT_PLUS_HARNESS_RESULT:"
@@ -255,13 +255,17 @@ def validate_header(cfg: RunnerConfig, header: object) -> dict:
             raise ProfileError("Invalid test directories.")
         selectors = validate_selectors(header.get("selectors"), tuple(dirs))
         requirements = validate_requirements(header.get("requirements"))
+        overlay = header.get("overlay_paths", [])
+        if not isinstance(overlay, list) or len(overlay) > 20:
+            raise ProfileError("Invalid overlay path list.")
+        overlay_paths = tuple(validate_selector(p, tuple(dirs)) for p in overlay)
         timeout = header.get("timeout_seconds")
         if type(timeout) is not int or not 1 <= timeout <= cfg.max_timeout:
             raise ProfileError("Timeout is outside the runner limit.")
     except ProfileError as exc:
         raise SetupError("validation", str(exc)) from exc
     return {"job_id": header["job_id"], "repo": header["repo"], "selectors": selectors,
-            "requirements": requirements, "timeout": timeout}
+            "requirements": requirements, "timeout": timeout, "overlay_paths": overlay_paths}
 
 
 def _run_job(cfg: RunnerConfig, job: dict, image: ImageInfo, env: dep_cache.EnvHandle, source: Path,
@@ -272,7 +276,8 @@ def _run_job(cfg: RunnerConfig, job: dict, image: ImageInfo, env: dep_cache.EnvH
     os.replace(source, run / "source.tar")
     os.chmod(run / "source.tar", 0o644)
     argv = build_argv(job["selectors"])
-    _write(run / "job.json", json.dumps({"argv": argv, "selectors": list(job["selectors"]), "timeout": job["timeout"],
+    _write(run / "job.json", json.dumps({"argv": argv, "selectors": list(job["selectors"]), "overlay_paths": list(job["overlay_paths"]),
+                                         "timeout": job["timeout"],
                                          "limits": {"files": 200000, "bytes": cfg.work_mib * _MIB}}))
     for name in ("harness.py", "pytest_report.py"):
         _write(run / name, Path(__file__).with_name(name).read_bytes())

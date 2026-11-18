@@ -193,7 +193,8 @@ _COUNT_KEYS = ("collected", "reported", "passed", "failed", "errors", "skipped",
                "incomplete", "executed", "not_run")
 
 
-def classify(payload: dict[str, Any], selectors: tuple[str, ...], expected_spec_sha: str) -> dict[str, Any]:
+def classify(payload: dict[str, Any], selectors: tuple[str, ...], expected_spec_sha: str,
+             overlay_paths: tuple[str, ...] = ()) -> dict[str, Any]:
     """Map untrusted runner evidence to a status; success needs affirmative proof of executed passes."""
     outcome: dict[str, Any] = {"runner": _sanitize_runner(payload.get("runner")),
                                "environment": _sanitize_environment(payload.get("environment")),
@@ -250,6 +251,9 @@ def classify(payload: dict[str, Any], selectors: tuple[str, ...], expected_spec_
             coverage.append({"selector": _str(item.get("selector"), 512), "collected": _int(item.get("collected")),
                              "executed": _int(item.get("executed"))})
     outcome["selector_coverage"] = coverage
+    outcome["overlay_coverage"] = [{"path": _str(i.get("selector"), 300), "collected": _int(i.get("collected")),
+                                    "executed": _int(i.get("executed"))}
+                                   for i in report.get("overlay_coverage", []) if isinstance(i, dict)][:20]
     if report.get("timed_out"):
         return end("timeout", "timeout", "pytest exceeded the execution deadline.")
     code, finished = outcome["execution"]["pytest_exit_code"], report.get("finished_event")
@@ -288,6 +292,12 @@ def classify(payload: dict[str, Any], selectors: tuple[str, ...], expected_spec_
             return end("no_tests_executed", "selector_not_executed", f"Selector executed no tests: {item['selector']}")
     if {c["selector"] for c in coverage} != set(selectors):
         return end("setup_error", "missing_report", "Selector coverage evidence is incomplete.")
+    if overlay_paths:
+        seen = {c["path"]: c["executed"] for c in outcome["overlay_coverage"]}
+        missing = [p for p in overlay_paths if not seen.get(p)]
+        if missing:
+            return end("no_tests_executed", "overlay_not_executed",
+                       "The reviewer overlay's test files did not execute: " + ", ".join(missing[:5]))
     return end("passed")
 
 
@@ -452,7 +462,8 @@ class JobService:
         if payload.get("canceled") or cancel.is_set():
             outcome = {"status": "canceled", "failure": {"kind": "canceled", "message": "Canceled while running."}}
         else:
-            outcome = classify(payload, tuple(record["selectors"]), record["requirements_sha256"])
+            outcome = classify(payload, tuple(record["selectors"]), record["requirements_sha256"],
+                               tuple((record.get("overlay") or {}).get("test_paths", [])))
         self._finish(self.store.load(job.run_id) or record, outcome)
 
     # --- retention -------------------------------------------------------------------------

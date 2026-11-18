@@ -45,18 +45,19 @@ def make_tar(files):
     return buffer.getvalue()
 
 
-def execute(root, tmp_path, files=None, *, selectors=('tests',), timeout=60, requirements=REQ, raw_tar=None, env=None):
+def execute(root, tmp_path, files=None, *, selectors=('tests',), timeout=60, requirements=REQ, raw_tar=None, env=None, overlay_paths=()):
     run_id = new_run_id()
     spool = tmp_path / run_id
     spool.mkdir()
     (spool / 'source.tar').write_bytes(raw_tar if raw_tar is not None else make_tar(files))
     header = {'schema': 1, 'job_id': run_id, 'repo': 'owner/repo', 'profile': 'python-pytest', 'profile_version': '1',
-              'test_dirs': ['tests'], 'selectors': list(selectors), 'requirements': requirements, 'timeout_seconds': timeout}
+              'test_dirs': ['tests'], 'selectors': list(selectors), 'requirements': requirements, 'timeout_seconds': timeout,
+              'overlay_paths': list(overlay_paths)}
     overrides = {'GIT_PLUS_RUNNER_IMAGE': IMAGE, 'GIT_PLUS_RUNNER_ROOT': str(root), 'GIT_PLUS_RUNNER_MAX_TIMEOUT': '600',
                  **(env or {})}
     with mock.patch.dict(os.environ, overrides):
         payload = make_subprocess_runner((sys.executable, '-m', 'git_plus.sandbox'))(QueuedJob(run_id, spool, header, timeout), threading.Event())
-    return payload, classify(payload, selectors, requirements_digest(requirements))
+    return payload, classify(payload, selectors, requirements_digest(requirements), tuple(overlay_paths))
 
 
 def containers():
@@ -351,3 +352,16 @@ def test_concurrent_runners_share_one_environment_preparation(tmp_path_factory, 
     statuses = sorted(r['environment']['cache_status'] for r in results.values())
     assert all(r['status'] == 'passed' for r in results.values()) and statuses.count('miss') == 1
     assert len(env_dirs(root)) == 1 and results['a']['environment']['cache_key'] == results['b']['environment']['cache_key']
+
+
+def test_overlay_test_executes_against_real_production_code_path(root, tmp_path):
+    files = {'app/guard.py': 'def is_admin(user): return user == "admin"\n',
+             'tests/test_existing.py': 'def test_old(): pass\n',
+             'tests/test_overlay.py': 'from app.guard import is_admin\ndef test_reviewer_regression():\n    assert not is_admin("owner")\n'}
+    _, out = execute(root, tmp_path, files, overlay_paths=('tests/test_overlay.py',))
+    assert out['status'] == 'passed' and out['overlay_coverage'] == [{'path': 'tests/test_overlay.py', 'collected': 1, 'executed': 1}]
+    _, unselected = execute(root, tmp_path, files, selectors=('tests/test_existing.py',), overlay_paths=('tests/test_overlay.py',))
+    assert unselected['status'] == 'no_tests_executed' and unselected['failure']['kind'] == 'overlay_not_executed'
+    files['tests/test_overlay.py'] = files['tests/test_overlay.py'].replace('not is_admin("owner")', 'is_admin("owner")')
+    _, failing = execute(root, tmp_path, files, overlay_paths=('tests/test_overlay.py',))
+    assert failing['status'] == 'failed' and any(t['id'].endswith('test_reviewer_regression') and t['outcome'] == 'failed' for t in failing['tests'])
