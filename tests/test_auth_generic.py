@@ -77,7 +77,6 @@ def test_legacy_odysseus_variables_map_to_the_same_mechanism():
 @pytest.mark.parametrize("changes", [
     {"odysseus_pat": "ghp_other"},                       # both generations configured
     {"server_pat_login": None},                          # token without an owner
-    {"server_pat_repository": None},                     # token without a repository
     {"server_pat": None},                                # owner without a token
 ])
 def test_ambiguous_or_incomplete_server_pat_configuration_is_refused(changes):
@@ -185,3 +184,35 @@ def test_credentials_are_redacted_even_when_github_echoes_them():
     with pytest.raises(APIError) as raised:
         client.request("GET", "repos/acme/widgets")
     assert CLASSIC not in str(raised.value.to_dict())
+
+
+# --- one PAT for every allowlisted repository (no repository configured) ---------------------------------------
+
+def test_unset_repository_means_every_allowlisted_repository_for_the_owner_only():
+    all_repos = settings(server_pat_repository=None)
+    assert all_repos.server_pat_credential().repository is None
+    create_auth(all_repos, remote=True)
+    for repo in (REPO, "other/project", "Other/Project"):
+        with oauth("maintainer", "user-oauth"), patch("git_plus.auth.GitHubClient", return_value=MagicMock()) as factory:
+            with github_client(all_repos, remote=True, repo=repo):
+                pass
+            factory.assert_called_once_with(token=PAT, base_url="https://api.github.com", restricted_repo=repo.casefold(), principal="maintainer")
+    with oauth("maintainer", "user-oauth"), patch("git_plus.auth.GitHubClient", return_value=MagicMock()) as factory:
+        with github_client(all_repos, remote=True, repo="not/allowed"):
+            pass
+        assert factory.call_args.kwargs["token"] == "user-oauth"       # the PAT never serves a repository off the allowlist
+    with oauth("bob", "bob-oauth"), patch("git_plus.auth.GitHubClient", return_value=MagicMock()) as factory:
+        with github_client(all_repos, remote=True, repo=REPO):
+            pass
+        assert factory.call_args.kwargs["token"] == "bob-oauth"        # nor another login
+
+
+def test_all_repository_pat_still_needs_an_allowlist_and_scopes_each_client_to_one_repository():
+    with pytest.raises(SecurityError):
+        create_auth(settings(server_pat_repository="*", allowed_repositories=()), remote=True)
+    assert settings(server_pat_repository="*").server_pat_credential().repository is None
+    client, session = client_with(PAT, response(200))
+    client.restricted_repo = REPO
+    with pytest.raises(SecurityError):
+        client.request("GET", "repos/other/project/pulls/1")           # a client built for one repository cannot touch another
+    session.request.assert_not_called()

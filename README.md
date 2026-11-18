@@ -75,9 +75,13 @@ allowlist:
 GIT_PLUS_ALLOWED_GITHUB_USERS=alteixeira20
 GIT_PLUS_ALLOWED_REPOSITORIES=owner/repo,Anvilary/git-plus
 GIT_PLUS_SERVER_PAT_LOGIN=alteixeira20
-GIT_PLUS_SERVER_PAT_REPOSITORY=owner/repo
 GIT_PLUS_SERVER_PAT=YOUR_PRIVATE_PAT
+# optional: serve only one repository; leave unset (or `*`) to serve every repository on the allowlist
+# GIT_PLUS_SERVER_PAT_REPOSITORY=owner/repo
 ```
+
+With no repository set, the PAT is used for that one login on every allowlisted repository (and never for a
+repository outside the allowlist); each request's client is still limited to the single repository it targets.
 
 The earlier `GIT_PLUS_ODYSSEUS_PAT` / `GIT_PLUS_ODYSSEUS_PAT_LOGIN` variables remain supported as an
 alias for `GIT_PLUS_SERVER_PAT*` with the repository fixed to `odysseus-dev/odysseus`; configuring both

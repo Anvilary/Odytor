@@ -71,11 +71,15 @@ LEGACY_PAT_REPOSITORY = "odysseus-dev/odysseus"
 
 @dataclass(frozen=True)
 class ServerPat:
-    """One server-held PAT, usable only by one exact OAuth login and only for one repository."""
+    """One server-held PAT, usable only by one exact OAuth login.
+
+    `repository` names the single repository it may serve; None means every repository on the allowlist.
+    Either way each request's client is scoped to the one repository that request targets.
+    """
 
     token: str = field(repr=False)
     login: str
-    repository: str
+    repository: str | None
 
 
 @dataclass(frozen=True)
@@ -117,9 +121,10 @@ class Settings:
             token, login, repository = self.server_pat, self.server_pat_login, self.server_pat_repository
         else:
             token, login, repository = self.odysseus_pat, self.odysseus_pat_login, LEGACY_PAT_REPOSITORY
-        if not token or not (login or "").strip() or not (repository or "").strip():
-            raise SecurityError("A server-side PAT needs the token, the exact GitHub login allowed to use it and one repository.")
-        return ServerPat(token, login.strip(), repository.strip().casefold())
+        if not token or not (login or "").strip():
+            raise SecurityError("A server-side PAT needs the token and the exact GitHub login allowed to use it.")
+        repository = (repository or "").strip()
+        return ServerPat(token, login.strip(), None if repository in {"", "*"} else repository.casefold())
 
     @classmethod
     def load(cls) -> Settings:

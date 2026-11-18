@@ -26,9 +26,10 @@ def create_auth(settings: Settings, remote: bool = False):
     if pat:
         if (not all(oauth_values) or settings.auth_token
                 or pat.login.casefold() not in {u.casefold() for u in settings.allowed_github_users}
-                or pat.repository not in settings.allowed_repositories):
+                or not settings.allowed_repositories
+                or (pat.repository is not None and pat.repository not in settings.allowed_repositories)):
             raise SecurityError(
-                "A server-side PAT requires OAuth, an explicitly allowed repository "
+                "A server-side PAT requires OAuth, an explicit repository allowlist "
                 "and a separately configured PAT owner in the authenticated user allowlist."
             )
 
@@ -89,9 +90,11 @@ def github_client(settings: Settings, remote: bool = False, *, repo: str | None 
             if pat:
                 if not repo:
                     raise SecurityError("Repository context is required for server-side PAT selection.")
-                if repo.strip().casefold() == pat.repository and login.casefold() == pat.login.casefold():
+                target = repo.strip().casefold()
+                serves = target == pat.repository if pat.repository else settings.is_repo_allowed(target) and bool(settings.allowed_repositories)
+                if serves and login.casefold() == pat.login.casefold():
                     token = pat.token
-                    restricted_repo = pat.repository
+                    restricted_repo = target
         elif settings.auth_token and settings.allowed_repositories:
             if access_token.client_id != "git-plus-service" or not hmac.compare_digest(access_token.token, settings.auth_token):
                 raise SecurityError("Invalid service credentials.")
