@@ -325,7 +325,7 @@ def test_runner_process_killed_with_sigkill_leaves_no_orphan_after_housekeeping(
     proc.stdin.write(raw_frame(header_for(run_id, timeout=120), artifact))
     proc.stdin.flush()
     assert wait_until(lambda: any(n.startswith('gp-run-') for n in containers()), 60)
-    vm('sudo pkill -9 -u gp-runner -f "bin/git-plus-runner$"')  # the runner itself dies; nothing can clean up
+    vm('sudo pkill -9 -u gp-runner -f "bin/(odytor|git-plus)-runner$"')  # the runner itself dies; nothing can clean up
     survivors = containers()
     assert survivors, 'expected the orphan to outlive the SIGKILLed runner (the defect this test documents)'
     report = json.loads(vm('cd /; sudo -u gp-runner /usr/local/libexec/git-plus-runner-entry gc'))
