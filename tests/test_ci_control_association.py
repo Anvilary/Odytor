@@ -13,9 +13,9 @@ from unittest.mock import MagicMock
 import pytest
 import requests
 
-from git_plus.ci_control import control_ci
-from git_plus.errors import RevisionMismatchError, SecurityError, ValidationError
-from git_plus.github import GitHubClient
+from odytor.ci_control import control_ci
+from odytor.errors import RevisionMismatchError, SecurityError, ValidationError
+from odytor.github import GitHubClient
 
 REPO, NUMBER, RUN, JOB = "alteixeira20/Anvilary-Website", 1, 44350223757, 99
 REPO_ID = 1297682797

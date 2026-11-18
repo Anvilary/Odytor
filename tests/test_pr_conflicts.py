@@ -1,6 +1,6 @@
 from test_git_workspace import client_for, run, repository, local_fetch
-from git_plus.pr_conflicts import get_pr_conflicts
-from git_plus.errors import GitOperationError, RevisionMismatchError
+from odytor.pr_conflicts import get_pr_conflicts
+from odytor.errors import GitOperationError, RevisionMismatchError
 import pytest
 
 

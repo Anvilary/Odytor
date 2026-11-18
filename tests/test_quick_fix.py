@@ -4,7 +4,7 @@ import hashlib
 import io
 import textwrap
 import pytest
-from git_plus.quick_fix import (
+from odytor.quick_fix import (
     PatchSummary,
     _validate_path,
     validate_patch,
@@ -12,7 +12,7 @@ from git_plus.quick_fix import (
     DEFAULT_MAX_CHANGED_LINES,
     DEFAULT_MAX_BYTES,
 )
-from git_plus.errors import SecurityError, ValidationError
+from odytor.errors import SecurityError, ValidationError
 
 
 # ---------------------------------------------------------------------------
@@ -184,8 +184,8 @@ def test_validate_patch_too_many_lines() -> None:
         validate_patch(patch)
 
 from unittest.mock import Mock
-from git_plus.quick_fix import apply_quick_fix
-from git_plus.errors import APIError, GitOperationError, RevisionMismatchError
+from odytor.quick_fix import apply_quick_fix
+from odytor.errors import APIError, GitOperationError, RevisionMismatchError
 from test_git_workspace import client_for, run, repository, local_fetch
 
 

@@ -3,8 +3,8 @@
 from unittest.mock import MagicMock
 import pytest
 import requests
-from git_plus.errors import APIError, SecurityError, ValidationError
-from git_plus.github import GitHubClient, validate_repo, validate_sha
+from odytor.errors import APIError, SecurityError, ValidationError
+from odytor.github import GitHubClient, validate_repo, validate_sha
 
 
 def test_validate_repo_valid() -> None:

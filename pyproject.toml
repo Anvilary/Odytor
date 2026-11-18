@@ -3,12 +3,12 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "git-plus"
+name = "odytor"
 dynamic = ["version"]
-description = "Minimalist, secure, highly efficient GitHub MCP companion optimized for web-based AI agents."
+description = "Odytor: GitHub operations, optimized for AI agents. A lightweight MCP companion for pull request investigation, CI diagnosis, conflict inspection, precise fixes and isolated test execution."
 readme = "README.md"
 requires-python = ">=3.11"
-authors = [{ name = "Anvilary" }]
+authors = [{ name = "Anvilary Tools" }]
 dependencies = [
     "fastmcp>=4.2,<5",
     "requests>=2.31.0",
@@ -20,14 +20,17 @@ dev = [
 ]
 
 [project.scripts]
-git-plus = "git_plus.cli:main"
-git-plus-runner = "git_plus.sandbox:main"
+odytor = "odytor.cli:main"
+odytor-runner = "odytor.sandbox:main"
+# Temporary aliases for existing installations and the runner host's forced command; removed before the first release.
+git-plus = "odytor.cli:main"
+git-plus-runner = "odytor.sandbox:main"
 
 [tool.setuptools.dynamic]
-version = { attr = "git_plus.__version__" }
+version = { attr = "odytor.__version__" }
 
 [tool.setuptools.packages.find]
-include = ["git_plus*"]
+include = ["odytor*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

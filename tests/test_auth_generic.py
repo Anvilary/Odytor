@@ -8,10 +8,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from git_plus.auth import create_auth, github_client
-from git_plus.config import Settings
-from git_plus.errors import APIError, SecurityError
-from git_plus.github import GitHubClient
+from odytor.auth import create_auth, github_client
+from odytor.config import Settings
+from odytor.errors import APIError, SecurityError
+from odytor.github import GitHubClient
 
 REPO = "acme/widgets"
 PAT = "github_pat_11AAAA_server_secret_that_must_not_leak"
@@ -55,11 +55,11 @@ def client_with(token, resp):
 # --- configuration ---------------------------------------------------------------------------------------------
 
 def test_generic_environment_loading_and_no_secret_in_repr(monkeypatch):
-    for key in ("GIT_PLUS_ODYSSEUS_PAT", "GIT_PLUS_ODYSSEUS_PAT_LOGIN"):
+    for key in ("ODYTOR_ODYSSEUS_PAT", "ODYTOR_ODYSSEUS_PAT_LOGIN"):
         monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("GIT_PLUS_SERVER_PAT", PAT)
-    monkeypatch.setenv("GIT_PLUS_SERVER_PAT_LOGIN", "Maintainer")
-    monkeypatch.setenv("GIT_PLUS_SERVER_PAT_REPOSITORY", "Acme/Widgets")
+    monkeypatch.setenv("ODYTOR_SERVER_PAT", PAT)
+    monkeypatch.setenv("ODYTOR_SERVER_PAT_LOGIN", "Maintainer")
+    monkeypatch.setenv("ODYTOR_SERVER_PAT_REPOSITORY", "Acme/Widgets")
     loaded = Settings.load()
     credential = loaded.server_pat_credential()
     assert (credential.login, credential.repository, credential.token) == ("Maintainer", REPO, PAT)
@@ -98,12 +98,12 @@ def test_server_pat_requires_oauth_owner_and_repository_allowlist(changes):
 # --- credential selection --------------------------------------------------------------------------------------
 
 def test_server_pat_is_used_only_for_its_owner_and_its_repository():
-    with oauth("maintainer", "user-oauth"), patch("git_plus.auth.GitHubClient", return_value=MagicMock()) as factory:
+    with oauth("maintainer", "user-oauth"), patch("odytor.auth.GitHubClient", return_value=MagicMock()) as factory:
         with github_client(settings(), remote=True, repo="Acme/Widgets"):
             pass
         factory.assert_called_once_with(token=PAT, base_url="https://api.github.com", timeout=120.0, restricted_repo=REPO, principal="maintainer")
     for login, repo in (("bob", REPO), ("maintainer", "other/project")):
-        with oauth(login, "user-oauth"), patch("git_plus.auth.GitHubClient", return_value=MagicMock()) as factory:
+        with oauth(login, "user-oauth"), patch("odytor.auth.GitHubClient", return_value=MagicMock()) as factory:
             with github_client(settings(), remote=True, repo=repo):
                 pass
             factory.assert_called_once_with(token="user-oauth", base_url="https://api.github.com", timeout=120.0, principal=login)
@@ -193,15 +193,15 @@ def test_unset_repository_means_every_allowlisted_repository_for_the_owner_only(
     assert all_repos.server_pat_credential().repository is None
     create_auth(all_repos, remote=True)
     for repo in (REPO, "other/project", "Other/Project"):
-        with oauth("maintainer", "user-oauth"), patch("git_plus.auth.GitHubClient", return_value=MagicMock()) as factory:
+        with oauth("maintainer", "user-oauth"), patch("odytor.auth.GitHubClient", return_value=MagicMock()) as factory:
             with github_client(all_repos, remote=True, repo=repo):
                 pass
             factory.assert_called_once_with(token=PAT, base_url="https://api.github.com", timeout=120.0, restricted_repo=repo.casefold(), principal="maintainer")
-    with oauth("maintainer", "user-oauth"), patch("git_plus.auth.GitHubClient", return_value=MagicMock()) as factory:
+    with oauth("maintainer", "user-oauth"), patch("odytor.auth.GitHubClient", return_value=MagicMock()) as factory:
         with github_client(all_repos, remote=True, repo="not/allowed"):
             pass
         assert factory.call_args.kwargs["token"] == "user-oauth"       # the PAT never serves a repository off the allowlist
-    with oauth("bob", "bob-oauth"), patch("git_plus.auth.GitHubClient", return_value=MagicMock()) as factory:
+    with oauth("bob", "bob-oauth"), patch("odytor.auth.GitHubClient", return_value=MagicMock()) as factory:
         with github_client(all_repos, remote=True, repo=REPO):
             pass
         assert factory.call_args.kwargs["token"] == "bob-oauth"        # nor another login

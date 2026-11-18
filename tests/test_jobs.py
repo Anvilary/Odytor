@@ -5,9 +5,9 @@ import time
 
 import pytest
 
-from git_plus.config import RunSettings
-from git_plus.errors import ValidationError
-from git_plus.jobs import JobService, QueueFullError, QueuedJob, RunStore, classify, new_run_id, runner_environment
+from odytor.config import RunSettings
+from odytor.errors import ValidationError
+from odytor.jobs import JobService, QueueFullError, QueuedJob, RunStore, classify, new_run_id, runner_environment
 
 SPEC = 'a' * 64
 
@@ -96,10 +96,10 @@ def test_log_and_test_truncation_metadata():
 
 def test_runner_never_inherits_service_credentials(monkeypatch):
     monkeypatch.setenv('GITHUB_TOKEN', 'ghp_secret')
-    monkeypatch.setenv('GIT_PLUS_OAUTH_SIGNING_KEY', 'k' * 40)
-    monkeypatch.setenv('GIT_PLUS_RUNNER_IMAGE', 'sha256:' + 'a' * 64)
+    monkeypatch.setenv('ODYTOR_OAUTH_SIGNING_KEY', 'k' * 40)
+    monkeypatch.setenv('ODYTOR_RUNNER_IMAGE', 'sha256:' + 'a' * 64)
     env = runner_environment()
-    assert 'GITHUB_TOKEN' not in env and 'GIT_PLUS_OAUTH_SIGNING_KEY' not in env and env['GIT_PLUS_RUNNER_IMAGE']
+    assert 'GITHUB_TOKEN' not in env and 'ODYTOR_OAUTH_SIGNING_KEY' not in env and env['ODYTOR_RUNNER_IMAGE']
 
 
 # --- service ---------------------------------------------------------------------------------
@@ -288,7 +288,7 @@ def test_run_ids_are_validated_before_touching_the_filesystem(tmp_path):
     ('kill -9 $$', 'runner'), ('echo not-json', 'protocol'), ('echo "[1]"', 'protocol'), ('echo boom >&2; exit 3', 'runner'),
     ('head -c 5000000 /dev/zero', 'runner'), ('sleep 30', 'runner')])
 def test_runner_transport_failures_are_setup_errors(tmp_path, script, stage):
-    from git_plus.jobs import make_subprocess_runner
+    from odytor.jobs import make_subprocess_runner
     spool = tmp_path / 'spool'
     spool.mkdir()
     (spool / 'source.tar').write_bytes(b'x' * 100)
@@ -300,7 +300,7 @@ def test_runner_transport_failures_are_setup_errors(tmp_path, script, stage):
 
 
 def test_transport_cancellation_kills_the_runner(tmp_path):
-    from git_plus.jobs import make_subprocess_runner
+    from odytor.jobs import make_subprocess_runner
     spool = tmp_path / 'spool'
     spool.mkdir()
     (spool / 'source.tar').write_bytes(b'x')

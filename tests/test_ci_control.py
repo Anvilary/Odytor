@@ -2,9 +2,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from git_plus.ci_control import control_ci
-from git_plus.errors import APIError, RevisionMismatchError, SecurityError, ValidationError
-from git_plus.github import GitHubClient
+from odytor.ci_control import control_ci
+from odytor.errors import APIError, RevisionMismatchError, SecurityError, ValidationError
+from odytor.github import GitHubClient
 
 SHA = "a" * 40
 FORK_SHA = "b" * 40

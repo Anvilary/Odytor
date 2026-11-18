@@ -5,9 +5,9 @@ from unittest.mock import Mock
 
 import pytest
 
-from git_plus.errors import RevisionMismatchError, SecurityError, ValidationError
-from git_plus.git_workspace import GitWorkspace, pr_context, validate_ref
-from git_plus.github import GitHubClient
+from odytor.errors import RevisionMismatchError, SecurityError, ValidationError
+from odytor.git_workspace import GitWorkspace, pr_context, validate_ref
+from odytor.github import GitHubClient
 
 
 def run(path, *args, input=None):
@@ -34,8 +34,8 @@ def local_fetch(monkeypatch, repository):
     repo, sha = repository
     def fetch(self, target, ref, expected, label, **kwargs):
         # Only the fixture transport allows file access. Production stays HTTPS-only.
-        run(self.path, '-c', 'protocol.file.allow=always', 'fetch', '-q', str(repo), f'{ref}:refs/git-plus/{label}')
-        actual = self.git('rev-parse', f'refs/git-plus/{label}').decode().strip()
+        run(self.path, '-c', 'protocol.file.allow=always', 'fetch', '-q', str(repo), f'{ref}:refs/odytor/{label}')
+        actual = self.git('rev-parse', f'refs/odytor/{label}').decode().strip()
         return self.verify_fetched_revision(label, expected, actual,
                                             allow_base_ancestor=kwargs.get('allow_base_ancestor', False))
     monkeypatch.setattr(GitWorkspace, 'fetch', fetch)
@@ -93,7 +93,7 @@ def test_workspace_cleanup_failure_never_replaces_the_operation_result(monkeypat
         real(path, ignore_errors=True)
         if not ignore_errors:
             raise OSError(16, 'Device or resource busy')  # what an unguarded cleanup would hit
-    monkeypatch.setattr('git_plus.git_workspace.shutil.rmtree', strict_rmtree)
+    monkeypatch.setattr('odytor.git_workspace.shutil.rmtree', strict_rmtree)
     with GitWorkspace(Mock(token=None)) as work:
         assert work.path.is_dir()
         result = {'applied': True, 'remote_verified': True}

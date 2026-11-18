@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
-from git_plus import cli
+from odytor import cli
 
 
 def test_http_transport_uses_remote_server_and_streamable_http():

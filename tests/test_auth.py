@@ -4,9 +4,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from git_plus.auth import create_auth, github_client
-from git_plus.config import Settings
-from git_plus.errors import SecurityError
+from odytor.auth import create_auth, github_client
+from odytor.config import Settings
+from odytor.errors import SecurityError
 
 
 def settings(**overrides):
@@ -20,11 +20,11 @@ def settings(**overrides):
 
 
 def test_settings_loads_remote_auth_environment(monkeypatch):
-    monkeypatch.setenv("GIT_PLUS_GITHUB_CLIENT_ID", "client")
-    monkeypatch.setenv("GIT_PLUS_GITHUB_CLIENT_SECRET", "secret")
-    monkeypatch.setenv("GIT_PLUS_PUBLIC_URL", "https://mcp.example")
-    monkeypatch.setenv("GIT_PLUS_ALLOWED_GITHUB_USERS", "Alice, bob")
-    monkeypatch.setenv("GIT_PLUS_OAUTH_SIGNING_KEY", "x" * 32)
+    monkeypatch.setenv("ODYTOR_GITHUB_CLIENT_ID", "client")
+    monkeypatch.setenv("ODYTOR_GITHUB_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("ODYTOR_PUBLIC_URL", "https://mcp.example")
+    monkeypatch.setenv("ODYTOR_ALLOWED_GITHUB_USERS", "Alice, bob")
+    monkeypatch.setenv("ODYTOR_OAUTH_SIGNING_KEY", "x" * 32)
     loaded = Settings.load()
     assert loaded.oauth_client_id == "client"
     assert loaded.allowed_github_users == ("alice", "bob")
@@ -46,7 +46,7 @@ def test_remote_oauth_requires_nonempty_user_allowlist():
 
 def test_github_client_closes_its_per_call_session():
     client = MagicMock()
-    with patch("git_plus.auth.GitHubClient", return_value=client) as factory:
+    with patch("odytor.auth.GitHubClient", return_value=client) as factory:
         with github_client(settings()) as result:
             assert result is client
         factory.assert_called_once_with(token="local-token", base_url="https://api.github.com", timeout=120.0)
@@ -70,7 +70,7 @@ def test_oauth_clients_use_each_request_identity_without_fallback():
     def factory(**kwargs):
         created.append(kwargs['token'])
         return MagicMock()
-    with patch('fastmcp.server.dependencies.get_access_token', side_effect=[alice, bob]), patch('git_plus.auth.GitHubClient', side_effect=factory):
+    with patch('fastmcp.server.dependencies.get_access_token', side_effect=[alice, bob]), patch('odytor.auth.GitHubClient', side_effect=factory):
         # Keep both contexts open to prove identity is not shared across calls.
         with github_client(oauth_settings(), remote=True) as a, github_client(oauth_settings(), remote=True) as b:
             assert a is not b
@@ -82,7 +82,7 @@ def test_oauth_rejects_absent_or_unapproved_identity(token):
     from fastmcp.server.auth import AccessToken
     access = None if token is None else AccessToken(token='' if token == 'missing-upstream' else 'upstream',
                 client_id='3', scopes=['repo'], claims={'login': 'mallory' if token == 'unauthorized' else 'alice'})
-    with patch('fastmcp.server.dependencies.get_access_token', return_value=access), patch('git_plus.auth.GitHubClient') as factory:
+    with patch('fastmcp.server.dependencies.get_access_token', return_value=access), patch('odytor.auth.GitHubClient') as factory:
         with pytest.raises(SecurityError):
             with github_client(oauth_settings(), remote=True):
                 pass
@@ -90,7 +90,7 @@ def test_oauth_rejects_absent_or_unapproved_identity(token):
 
 
 def test_oauth_discovery_and_unauthenticated_http_rejection(tmp_path, monkeypatch):
-    from git_plus.server import create_server
+    from odytor.server import create_server
     from starlette.testclient import TestClient
     monkeypatch.setenv('FASTMCP_HOME', str(tmp_path))
     server = create_server(oauth_settings(), remote=True)
@@ -104,7 +104,7 @@ def test_oauth_discovery_and_unauthenticated_http_rejection(tmp_path, monkeypatc
 
 
 def test_authenticated_streamable_http_tool_discovery():
-    from git_plus.server import create_server
+    from odytor.server import create_server
     from starlette.testclient import TestClient
     configured = settings(auth_token='test-service-token', allowed_repositories=('owner/repo',))
     server = create_server(configured, remote=True)
@@ -135,7 +135,7 @@ def test_static_auth_cannot_fall_back_without_request_credentials():
 
 
 def test_streamable_http_rejects_untrusted_origin():
-    from git_plus.server import create_server
+    from odytor.server import create_server
     from starlette.testclient import TestClient
     server = create_server(settings(auth_token='test-service-token', allowed_repositories=('owner/repo',)), remote=True)
     app = server.http_app(stateless_http=True, host_origin_protection=True,
@@ -148,7 +148,7 @@ def test_streamable_http_rejects_untrusted_origin():
 
 def test_http_calls_keep_oauth_identities_separate_and_enforce_user_allowlist(tmp_path, monkeypatch):
     from fastmcp.server.auth import AccessToken
-    from git_plus.server import create_server
+    from odytor.server import create_server
     from starlette.testclient import TestClient
     from unittest.mock import AsyncMock
     monkeypatch.setenv('FASTMCP_HOME', str(tmp_path))
@@ -163,7 +163,7 @@ def test_http_calls_keep_oauth_identities_separate_and_enforce_user_allowlist(tm
     def evidence(client, repo, number, **kwargs):
         observed.append(client.token)
         return {'repo': repo, 'number': number}
-    with patch('git_plus.server.get_pr_evidence', side_effect=evidence):
+    with patch('odytor.server.get_pr_evidence', side_effect=evidence):
         with TestClient(server.http_app(stateless_http=True, json_response=True)) as client:
             for identity in identities:
                 response = client.post('/mcp', headers={'Authorization': f'Bearer {identity}',
@@ -183,19 +183,19 @@ def test_conflicting_authentication_configuration_rejected():
 
 def test_quick_fix_limits_default_to_practical_bounded_values(monkeypatch):
     for name in ("MAX_FILES", "MAX_CHANGED_LINES", "MAX_PATCH_BYTES"):
-        monkeypatch.delenv(f"GIT_PLUS_QUICK_FIX_{name}", raising=False)
+        monkeypatch.delenv(f"ODYTOR_QUICK_FIX_{name}", raising=False)
     loaded = Settings.load()
     assert (loaded.quick_fix_max_files, loaded.quick_fix_max_changed_lines,
             loaded.quick_fix_max_patch_bytes) == (10, 1000, 262144)
 
 
 def test_quick_fix_limits_are_configurable_within_ceilings(monkeypatch):
-    from git_plus.errors import ValidationError
-    monkeypatch.setenv("GIT_PLUS_QUICK_FIX_MAX_FILES", "20")
+    from odytor.errors import ValidationError
+    monkeypatch.setenv("ODYTOR_QUICK_FIX_MAX_FILES", "20")
     assert Settings.load().quick_fix_max_files == 20
     for name, bad in (("MAX_FILES", "51"), ("MAX_FILES", "0"), ("MAX_CHANGED_LINES", "5001"),
                       ("MAX_PATCH_BYTES", "1048577"), ("MAX_PATCH_BYTES", "abc")):
-        monkeypatch.setenv(f"GIT_PLUS_QUICK_FIX_{name}", bad)
+        monkeypatch.setenv(f"ODYTOR_QUICK_FIX_{name}", bad)
         with pytest.raises(ValidationError):
             Settings.load()
-        monkeypatch.delenv(f"GIT_PLUS_QUICK_FIX_{name}")
+        monkeypatch.delenv(f"ODYTOR_QUICK_FIX_{name}")

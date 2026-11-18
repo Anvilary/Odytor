@@ -2,7 +2,7 @@
 
 import os
 import pytest
-from git_plus.diagnostics import (
+from odytor.diagnostics import (
     TRUNCATION_MARKER,
     redact_text,
     safe_payload,
@@ -94,7 +94,7 @@ def test_nested_region_truncation_clears_completeness():
 
 def test_default_response_budget_is_larger_and_configurable():
     import json
-    from git_plus import diagnostics
+    from odytor import diagnostics
     assert diagnostics.DEFAULT_PAYLOAD_LIMIT == 262144
     payload = {'diff': '+ a diff line with ordinary content\n' * 9000, 'diff_complete': True, 'evidence_complete': True}
     try:

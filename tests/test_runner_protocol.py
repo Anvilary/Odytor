@@ -6,8 +6,8 @@ import time
 
 import pytest
 
-from git_plus import dep_cache, sandbox
-from git_plus.procs import run_bounded
+from odytor import dep_cache, sandbox
+from odytor.procs import run_bounded
 
 
 def pipe_reader(deadline):
@@ -42,7 +42,7 @@ def test_frame_reader_reassembles_split_writes_and_detects_truncation():
 
 def test_config_file_must_be_root_owned_and_only_runner_keys(tmp_path):
     path = tmp_path / 'runner.env'
-    path.write_text('GIT_PLUS_RUNNER_IMAGE=docker.io/library/python@sha256:' + 'a' * 64 + '\n')
+    path.write_text('ODYTOR_RUNNER_IMAGE=docker.io/library/python@sha256:' + 'a' * 64 + '\n')
     if os.getuid() != 0:  # the test account is not root: the trust check must refuse the file
         with pytest.raises(sandbox.SetupError, match='owned by root'):
             sandbox.load_config_file(str(path))
@@ -50,13 +50,13 @@ def test_config_file_must_be_root_owned_and_only_runner_keys(tmp_path):
 
 def test_config_file_parsing_rejects_foreign_keys(tmp_path, monkeypatch):
     path = tmp_path / 'runner.env'
-    path.write_text('# comment\nGIT_PLUS_RUNNER_CPUS="1"\nPATH=/evil\n')
+    path.write_text('# comment\nODYTOR_RUNNER_CPUS="1"\nPATH=/evil\n')
     real_stat = os.stat
     monkeypatch.setattr(sandbox.os, 'stat', lambda p: type('S', (), {'st_uid': 0, 'st_mode': 0o100644})() if str(p) == str(path) else real_stat(p))
     with pytest.raises(sandbox.SetupError, match='Invalid runner configuration line 3'):
         sandbox.load_config_file(str(path))
-    path.write_text('GIT_PLUS_RUNNER_CPUS="1"\n  GIT_PLUS_RUNNER_PIDS = 64\n')
-    assert sandbox.load_config_file(str(path)) == {'GIT_PLUS_RUNNER_CPUS': '1', 'GIT_PLUS_RUNNER_PIDS': '64'}
+    path.write_text('ODYTOR_RUNNER_CPUS="1"\n  ODYTOR_RUNNER_PIDS = 64\n')
+    assert sandbox.load_config_file(str(path)) == {'ODYTOR_RUNNER_CPUS': '1', 'ODYTOR_RUNNER_PIDS': '64'}
 
 
 def test_held_stdin_signals_the_child_only_when_the_parent_is_gone():
@@ -98,7 +98,7 @@ import textwrap
 WORKER = textwrap.dedent('''
     import json, os, sys, time
     from pathlib import Path
-    from git_plus import sandbox
+    from odytor import sandbox
     root, tag, hold, max_queued, wait, log = sys.argv[1], sys.argv[2], float(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5]), sys.argv[6]
     cfg = sandbox.RunnerConfig(image="x", root=Path(root), max_queued=max_queued, queue_wait=wait)
     record = {}

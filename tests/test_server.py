@@ -2,9 +2,9 @@
 
 import asyncio
 import pytest
-from git_plus.config import Settings
-from git_plus.errors import SecurityError
-from git_plus.server import create_server
+from odytor.config import Settings
+from odytor.errors import SecurityError
+from odytor.server import create_server
 
 
 def test_server_registration() -> None:
@@ -17,7 +17,7 @@ def test_server_registration() -> None:
         allowed_repositories=(),
     )
     server = create_server(settings)
-    assert server.name == "Git Plus"
+    assert server.name == "Odytor"
     tool = asyncio.run(server.get_tool("pr_evidence"))
     assert tool is not None
     assert tool.name == "pr_evidence"
@@ -61,7 +61,7 @@ def _local_settings(**overrides) -> Settings:
 
 def test_quick_fix_passes_configured_limits_to_the_applier(monkeypatch) -> None:
     from unittest.mock import MagicMock
-    import git_plus.server as server_module
+    import odytor.server as server_module
     applier = MagicMock(return_value={"applied": True})
     monkeypatch.setattr(server_module, "apply_quick_fix", applier)
     server = create_server(_local_settings(quick_fix_max_files=12, quick_fix_max_changed_lines=1500,

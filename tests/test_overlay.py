@@ -3,10 +3,10 @@ import subprocess
 
 import pytest
 
-from git_plus.errors import SecurityError, ValidationError
-from git_plus.git_workspace import GitWorkspace
-from git_plus.overlay import apply_overlay, validate_overlay
-from git_plus.quick_fix import validate_patch
+from odytor.errors import SecurityError, ValidationError
+from odytor.git_workspace import GitWorkspace
+from odytor.overlay import apply_overlay, validate_overlay
+from odytor.quick_fix import validate_patch
 from test_git_workspace import client_for, local_fetch, repository, run  # noqa: F401
 from test_run_tests import stack, submit, tar_files, REPO  # noqa: F401  (fixtures)
 from test_jobs import wait_for

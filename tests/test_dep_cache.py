@@ -7,8 +7,8 @@ from collections import namedtuple
 
 import pytest
 
-from git_plus import dep_cache
-from git_plus.dep_cache import EnvIdentity, EnvPreparationError, ResourceUnavailable, acquire, collect
+from odytor import dep_cache
+from odytor.dep_cache import EnvIdentity, EnvPreparationError, ResourceUnavailable, acquire, collect
 
 ID = EnvIdentity('Owner/Repo', 'a' * 64, '3.12.1', 'b' * 64, '1', 'linux/amd64')
 

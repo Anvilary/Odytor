@@ -1,7 +1,7 @@
 """Selector, requirement and policy validation for the maintainer-defined pytest profile."""
 import pytest
 
-from git_plus.profile import (ProfileError, build_argv, load_policies, selector_matches, validate_requirements,
+from odytor.profile import (ProfileError, build_argv, load_policies, selector_matches, validate_requirements,
                               validate_selector, validate_selectors)
 
 DIRS = ('tests', 'backend/tests')
@@ -97,7 +97,7 @@ def test_policy_file(tmp_path):
 
 def test_the_shipped_odysseus_policy_is_valid_hash_complete_and_pins_pytest():
     from pathlib import Path
-    from git_plus.profile import load_policies
+    from odytor.profile import load_policies
     policy = load_policies(Path(__file__).resolve().parents[1] / 'deploy' / 'policies' / 'policy.toml')['odysseus-dev/odysseus']
     lines = [line for line in policy.requirements.splitlines() if line]
     assert len(lines) > 50 and all('==' in line and '--hash=sha256:' in line for line in lines)

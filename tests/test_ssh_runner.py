@@ -1,10 +1,10 @@
 """Real SSH transport tests against a provisioned runner host (a VM built by deploy/runner/provision.sh).
 
 Nothing here is mocked: a real OpenSSH client talks to a real sshd whose account is restricted to the forced
-command, which starts a real rootless Podman container. They are skipped unless GIT_PLUS_TEST_SSH_RUNNER_DIR
-names a directory holding `runner` (the Git Plus identity), `admin` (a key for a sudo-capable maintenance
-account named vmadmin) and `known_hosts` (the pinned host key). Optional: GIT_PLUS_TEST_SSH_RUNNER_PORT
-(default 2222) and GIT_PLUS_TEST_SSH_RUNNER_HOST (default 127.0.0.1).
+command, which starts a real rootless Podman container. They are skipped unless ODYTOR_TEST_SSH_RUNNER_DIR
+names a directory holding `runner` (the Odytor identity), `admin` (a key for a sudo-capable maintenance
+account named vmadmin) and `known_hosts` (the pinned host key). Optional: ODYTOR_TEST_SSH_RUNNER_PORT
+(default 2222) and ODYTOR_TEST_SSH_RUNNER_HOST (default 127.0.0.1).
 """
 import io
 import json
@@ -20,14 +20,14 @@ from pathlib import Path
 
 import pytest
 
-from git_plus.config import RunSettings
-from git_plus.jobs import JobService, QueuedJob, classify, make_subprocess_runner, new_run_id
-from git_plus.profile import requirements_digest, validate_requirements
+from odytor.config import RunSettings
+from odytor.jobs import JobService, QueuedJob, classify, make_subprocess_runner, new_run_id
+from odytor.profile import requirements_digest, validate_requirements
 
-KEYS = os.environ.get('GIT_PLUS_TEST_SSH_RUNNER_DIR')
-HOST = os.environ.get('GIT_PLUS_TEST_SSH_RUNNER_HOST', '127.0.0.1')
-PORT = os.environ.get('GIT_PLUS_TEST_SSH_RUNNER_PORT', '2222')
-pytestmark = pytest.mark.skipif(not KEYS, reason='needs GIT_PLUS_TEST_SSH_RUNNER_DIR (a provisioned runner VM)')
+KEYS = os.environ.get('ODYTOR_TEST_SSH_RUNNER_DIR')
+HOST = os.environ.get('ODYTOR_TEST_SSH_RUNNER_HOST', '127.0.0.1')
+PORT = os.environ.get('ODYTOR_TEST_SSH_RUNNER_PORT', '2222')
+pytestmark = pytest.mark.skipif(not KEYS, reason='needs ODYTOR_TEST_SSH_RUNNER_DIR (a provisioned runner VM)')
 REQ = validate_requirements('pytest==8.3.5\n')
 SPEC = requirements_digest(REQ)
 SSH_OPTS = ['-T', '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=10',
@@ -94,7 +94,7 @@ def raw_frame(header, artifact=b'', *, claimed_length=None):
 
 
 def submit(tmp_path, files, *, run_id=None, timeout=60, selectors=('tests',), command=None, requirements=REQ):
-    """Submit through Git Plus's real transport and classifier."""
+    """Submit through Odytor's real transport and classifier."""
     run_id = run_id or new_run_id()
     spool = tmp_path / run_id
     spool.mkdir()
@@ -150,7 +150,7 @@ def test_adversarial_fixture_inside_the_remote_boundary(tmp_path):
         import os, socket, pathlib, pytest
         def test_no_credentials():
             joined = " ".join(f"{k}={v}" for k, v in os.environ.items())
-            assert not any(m in joined for m in ("GIT_PLUS_RUNNER", "SSH_", "TOKEN", "XDG_RUNTIME_DIR", "DBUS", "GITHUB"))
+            assert not any(m in joined for m in ("ODYTOR_RUNNER", "SSH_", "TOKEN", "XDG_RUNTIME_DIR", "DBUS", "GITHUB"))
         def test_unprivileged():
             assert os.getuid() == 65534
         def test_host_files_invisible():
@@ -293,7 +293,7 @@ def test_client_disconnect_mid_run_stops_the_container_and_removes_the_workspace
     proc.stdin.flush()
     assert wait_until(lambda: any(n.startswith('gp-run-') for n in containers()), 60), 'the job never started'
     started = time.monotonic()
-    proc.send_signal(signal.SIGKILL)  # the Git Plus side dies abruptly: no clean SSH shutdown
+    proc.send_signal(signal.SIGKILL)  # the Odytor side dies abruptly: no clean SSH shutdown
     proc.wait()
     assert wait_until(lambda: not containers() and not workspaces(), 30)
     assert time.monotonic() - started < 30  # seconds, not the 180 s hard timeout
@@ -393,7 +393,7 @@ def test_unexpected_server_behavior_fails_closed(tmp_path, behavior):
         listener.close()
 
 
-# --- Git Plus service over the real transport ---------------------------------------------------------
+# --- Odytor service over the real transport ---------------------------------------------------------
 
 def test_result_survives_service_restart_and_client_reconnection(tmp_path):
     cfg = RunSettings(runner_command=tuple(RUNNER), policies_path='x', data_dir=str(tmp_path / 'data'), max_queued=3,
@@ -483,7 +483,7 @@ def test_disk_pressure_evicts_idle_environments_but_never_one_in_use(tmp_path):
     assert wait_until(lambda: any(n.startswith('gp-run-') for n in containers()), 60)  # `held` is now mounted by a live job
     held_keys = set(env_dirs()) - {idle_key}
     assert len(held_keys) == 1
-    vm("sudo sh -c 'echo GIT_PLUS_RUNNER_ENV_BUDGET_MIB=1 >> /etc/git-plus-runner/runner.env'")
+    vm("sudo sh -c 'echo ODYTOR_RUNNER_ENV_BUDGET_MIB=1 >> /etc/git-plus-runner/runner.env'")
     try:  # the housekeeping timer runs exactly this while jobs may be running
         report = json.loads(vm('cd /; sudo -u gp-runner /usr/local/libexec/git-plus-runner-entry gc'))['storage']
     finally:
@@ -521,7 +521,7 @@ def test_runner_account_egress_reaches_the_package_index_but_no_internal_network
     expected = {'public': 'reachable', 'gateway': 'blocked', 'private': 'blocked', 'metadata': 'blocked'}
     assert dict(line.split() for line in as_runner('python3 /tmp/egress.py').splitlines()) == expected
     # The preparation container is the real consumer of this policy: its traffic leaves under the account's uid.
-    image = vm("sudo grep '^GIT_PLUS_RUNNER_IMAGE=' /etc/git-plus-runner/runner.env").strip().split('=', 1)[1]
+    image = vm("sudo grep '^ODYTOR_RUNNER_IMAGE=' /etc/git-plus-runner/runner.env").strip().split('=', 1)[1]
     in_container = as_runner(f'podman run --rm --pull=never -v /tmp/egress.py:/e.py:ro --entrypoint python {image} /e.py')
     assert dict(line.split() for line in in_container.splitlines()) == expected
 

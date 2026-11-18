@@ -7,11 +7,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from git_plus.auth import create_auth, github_client
-from git_plus.config import Settings
-from git_plus.errors import APIError, SecurityError
-from git_plus.git_workspace import GitWorkspace, pr_context
-from git_plus.github import GitHubClient
+from odytor.auth import create_auth, github_client
+from odytor.config import Settings
+from odytor.errors import APIError, SecurityError
+from odytor.git_workspace import GitWorkspace, pr_context
+from odytor.github import GitHubClient
 
 
 TARGET = "odysseus-dev/odysseus"
@@ -64,7 +64,7 @@ def test_pat_used_only_for_exact_authenticated_identity_and_target():
         created.append(kwargs)
         return MagicMock()
     with _with_mocked_oauth_token("alteixeira20", "normal-upstream"), patch(
-        "git_plus.auth.GitHubClient", side_effect=capture
+        "odytor.auth.GitHubClient", side_effect=capture
     ):
         with github_client(settings(), remote=True, repo=TARGET):
             pass
@@ -79,7 +79,7 @@ def test_pat_used_only_for_exact_authenticated_identity_and_target():
 
 def test_pat_never_used_for_another_allowed_identity():
     with _with_mocked_oauth_token("another-user", "their-upstream"), patch(
-        "git_plus.auth.GitHubClient", return_value=MagicMock()
+        "odytor.auth.GitHubClient", return_value=MagicMock()
     ) as factory:
         with pytest.raises(SecurityError):
             with github_client(settings(allowed_github_users=("alteixeira20",)), remote=True, repo=TARGET):
@@ -189,7 +189,7 @@ def test_scoped_api_refuses_same_origin_redirect_to_other_repo():
 
 def test_non_pat_oauth_identity_can_still_use_its_own_token():
     with _with_mocked_oauth_token("bob", "bob-oauth"), patch(
-        "git_plus.auth.GitHubClient", return_value=MagicMock()
+        "odytor.auth.GitHubClient", return_value=MagicMock()
     ) as factory:
         with github_client(settings(allowed_github_users=("alteixeira20", "bob")), remote=True, repo=TARGET):
             pass
@@ -197,8 +197,8 @@ def test_non_pat_oauth_identity_can_still_use_its_own_token():
 
 
 def test_odysseus_pat_environment_loading(monkeypatch):
-    monkeypatch.setenv("GIT_PLUS_ODYSSEUS_PAT", PAT)
-    monkeypatch.setenv("GIT_PLUS_ODYSSEUS_PAT_LOGIN", "alteixeira20")
+    monkeypatch.setenv("ODYTOR_ODYSSEUS_PAT", PAT)
+    monkeypatch.setenv("ODYTOR_ODYSSEUS_PAT_LOGIN", "alteixeira20")
     result = Settings.load()
     assert result.odysseus_pat == PAT
     assert result.odysseus_pat_login == "alteixeira20"

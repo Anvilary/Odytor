@@ -8,13 +8,13 @@ import time
 
 import pytest
 
-from git_plus.config import RunSettings, Settings
-from git_plus.errors import GitPlusError, RevisionMismatchError, SecurityError, ValidationError
-from git_plus.git_workspace import GitWorkspace
-from git_plus.jobs import JobService, QueueFullError
-from git_plus.profile import load_policies
-from git_plus.run_tests import fetch_test_result, submit_test_run
-from git_plus.server import create_server
+from odytor.config import RunSettings, Settings
+from odytor.errors import GitPlusError, RevisionMismatchError, SecurityError, ValidationError
+from odytor.git_workspace import GitWorkspace
+from odytor.jobs import JobService, QueueFullError
+from odytor.profile import load_policies
+from odytor.run_tests import fetch_test_result, submit_test_run
+from odytor.server import create_server
 from test_git_workspace import client_for, local_fetch, repository, run
 from test_jobs import payload, wait_for
 
@@ -229,7 +229,7 @@ def test_result_is_bound_to_the_submitting_principal(stack):
 
 
 def test_result_withheld_when_repository_access_cannot_be_verified(stack):
-    from git_plus.errors import APIError
+    from odytor.errors import APIError
     queued = submit(stack)
     wait_for(stack.service, queued['run_id'], {'passed'})
     stack.client.get_pr.side_effect = APIError('forbidden', 403)
@@ -268,7 +268,7 @@ def test_non_green_results_are_never_green(stack):
 
 # --- MCP layer -------------------------------------------------------------------------------
 def make_server(stack, monkeypatch, *, principal='alice', allowed=()):
-    import git_plus.server as server_module
+    import odytor.server as server_module
     stack.client.principal = principal
 
     @contextlib.contextmanager
@@ -340,8 +340,8 @@ def test_unconfigured_runner_explains_how_to_enable_it_and_that_other_tools_are_
                    tool(plain, 'test_result').fn(run_id='test-' + '1' * 32)):
         assert result['error_type'] == 'ValidationError'
         assert result['diagnostic']['classification'] == 'runner_not_configured'
-        assert result['diagnostic']['enable'] == ['GIT_PLUS_TEST_RUNNER_COMMAND', 'GIT_PLUS_TEST_POLICIES']
-        assert 'GIT_PLUS_TEST_RUNNER_COMMAND' in result['error'] and 'docs/test-runner.md' in result['error']
+        assert result['diagnostic']['enable'] == ['ODYTOR_TEST_RUNNER_COMMAND', 'ODYTOR_TEST_POLICIES']
+        assert 'ODYTOR_TEST_RUNNER_COMMAND' in result['error'] and 'docs/test-runner.md' in result['error']
         assert 'six tools' in result['error']
     names = {t.name for t in asyncio.run(plain.list_tools())}
     assert {'test_run', 'test_result'} <= names and len(names) == 8  # still discoverable; never silently removed

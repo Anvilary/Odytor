@@ -11,9 +11,9 @@ import re
 import pytest
 import requests
 
-from git_plus.diagnostics import safe_payload
-from git_plus.github import GitHubClient
-from git_plus.pr_evidence import get_pr_evidence
+from odytor.diagnostics import safe_payload
+from odytor.github import GitHubClient
+from odytor.pr_evidence import get_pr_evidence
 
 REPO, NUMBER, HEAD, BASE = "owner/big", 9, "a" * 40, "b" * 40
 TOO_MANY_LINES = {"message": "Sorry, the diff exceeded the maximum number of lines (20000)",
@@ -108,7 +108,7 @@ def test_github_file_cap_is_reported_not_hidden():
 
 
 def test_other_diff_errors_are_not_swallowed():
-    from git_plus.errors import APIError
+    from odytor.errors import APIError
     with pytest.raises(APIError):
         evidence(make_files(2), diff_status=500, diff_body={"message": "boom"}, include_files=False)
 

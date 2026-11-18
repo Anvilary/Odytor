@@ -6,11 +6,11 @@ from unittest.mock import MagicMock, Mock
 import pytest
 import requests
 
-from git_plus.errors import (APIError, GitOperationError, RevisionMismatchError, SecurityError,
+from odytor.errors import (APIError, GitOperationError, RevisionMismatchError, SecurityError,
                              ValidationError)
-from git_plus.git_workspace import GitWorkspace, pr_context
-from git_plus.github import ForkWriteGrant, GitHubClient
-from git_plus.quick_fix import apply_quick_fix
+from odytor.git_workspace import GitWorkspace, pr_context
+from odytor.github import ForkWriteGrant, GitHubClient
+from odytor.quick_fix import apply_quick_fix
 from test_git_workspace import client_for, repository, local_fetch, run
 from test_quick_fix import SIMPLE_PATCH
 
@@ -355,7 +355,7 @@ def test_restricted_quick_fix_end_to_end_with_scoped_pat(fork_remote):
 
 def test_restricted_pat_rebase_into_fork_remains_blocked(local_fetch):
     _, sha = local_fetch
-    from git_plus.pr_rebase import rebase_pr
+    from odytor.pr_rebase import rebase_pr
     client = pat_client(pat_routes(sha), [])
     with pytest.raises(SecurityError, match='additive quick fixes'):
         rebase_pr(client, BASE, 1, sha, 'b' * 40, apply=True, allow_history_rewrite=True)

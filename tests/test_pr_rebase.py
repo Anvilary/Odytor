@@ -1,8 +1,8 @@
 import pytest
 
-from git_plus.errors import GitOperationError, RevisionMismatchError, SecurityError, ValidationError
-from git_plus.git_workspace import GitWorkspace
-from git_plus.pr_rebase import rebase_pr
+from odytor.errors import GitOperationError, RevisionMismatchError, SecurityError, ValidationError
+from odytor.git_workspace import GitWorkspace
+from odytor.pr_rebase import rebase_pr
 from test_git_workspace import client_for, run, repository, local_fetch
 from test_pr_conflicts import diverge
 

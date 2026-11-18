@@ -1,7 +1,7 @@
 """Real rootless-container integration tests for the execution boundary.
 
-These run the actual runner (`git_plus.sandbox`) through Git Plus's real subprocess transport and
-classifier. They need podman and a pinned local image; set GIT_PLUS_TEST_RUNNER_IMAGE to its ID or digest
+These run the actual runner (`odytor.sandbox`) through Odytor's real subprocess transport and
+classifier. They need podman and a pinned local image; set ODYTOR_TEST_RUNNER_IMAGE to its ID or digest
 (for example a local python:3.12 image). They are skipped, loudly, otherwise.
 """
 import hashlib
@@ -19,13 +19,13 @@ from unittest import mock
 
 import pytest
 
-from git_plus.jobs import QueuedJob, classify, make_subprocess_runner, new_run_id
-from git_plus.profile import requirements_digest, validate_requirements
+from odytor.jobs import QueuedJob, classify, make_subprocess_runner, new_run_id
+from odytor.profile import requirements_digest, validate_requirements
 
-IMAGE = os.environ.get('GIT_PLUS_TEST_RUNNER_IMAGE')
+IMAGE = os.environ.get('ODYTOR_TEST_RUNNER_IMAGE')
 pytestmark = pytest.mark.skipif(not (shutil.which('podman') and IMAGE),
-                                reason='needs podman and GIT_PLUS_TEST_RUNNER_IMAGE (a pinned local image)')
-PYTEST_PIN = os.environ.get('GIT_PLUS_TEST_PYTEST_PIN', 'pytest==8.3.5')
+                                reason='needs podman and ODYTOR_TEST_RUNNER_IMAGE (a pinned local image)')
+PYTEST_PIN = os.environ.get('ODYTOR_TEST_PYTEST_PIN', 'pytest==8.3.5')
 REQ = validate_requirements(PYTEST_PIN + '\n')
 SPEC = requirements_digest(REQ)
 
@@ -54,10 +54,10 @@ def execute(root, tmp_path, files=None, *, selectors=('tests',), timeout=60, req
     header = {'schema': 1, 'job_id': run_id, 'repo': 'owner/repo', 'profile': 'python-pytest', 'profile_version': '1',
               'test_dirs': ['tests'], 'selectors': list(selectors), 'requirements': requirements, 'timeout_seconds': timeout,
               'overlay_paths': list(overlay_paths)}
-    overrides = {'GIT_PLUS_RUNNER_IMAGE': IMAGE, 'GIT_PLUS_RUNNER_ROOT': str(root), 'GIT_PLUS_RUNNER_MAX_TIMEOUT': '600',
+    overrides = {'ODYTOR_RUNNER_IMAGE': IMAGE, 'ODYTOR_RUNNER_ROOT': str(root), 'ODYTOR_RUNNER_MAX_TIMEOUT': '600',
                  **(env or {})}
     with mock.patch.dict(os.environ, overrides):
-        payload = make_subprocess_runner((sys.executable, '-m', 'git_plus.sandbox'))(QueuedJob(run_id, spool, header, timeout), threading.Event())
+        payload = make_subprocess_runner((sys.executable, '-m', 'odytor.sandbox'))(QueuedJob(run_id, spool, header, timeout), threading.Event())
     return payload, classify(payload, selectors, requirements_digest(requirements), tuple(overlay_paths))
 
 
@@ -162,15 +162,15 @@ def test_dependency_failure_is_a_setup_error_and_leaves_no_environment(root, tmp
 
 def test_sandbox_boundary_from_inside(root, tmp_path, monkeypatch):
     monkeypatch.setenv('GITHUB_TOKEN', 'ghp_SENTINEL_TOKEN')
-    monkeypatch.setenv('GIT_PLUS_OAUTH_SIGNING_KEY', 'SENTINEL_SIGNING_KEY_' + 'x' * 20)
-    monkeypatch.setenv('GIT_PLUS_ODYSSEUS_PAT', 'SENTINEL_PAT')
+    monkeypatch.setenv('ODYTOR_OAUTH_SIGNING_KEY', 'SENTINEL_SIGNING_KEY_' + 'x' * 20)
+    monkeypatch.setenv('ODYTOR_ODYSSEUS_PAT', 'SENTINEL_PAT')
     _, out = execute(root, tmp_path, {'tests/test_boundary.py': f'''
         import os, socket, subprocess, pathlib, pytest
         HOME_USER = {os.path.basename(os.path.expanduser('~'))!r}
 
         def test_no_credentials_in_environment_or_proc():
             blob = repr(dict(os.environ)) + pathlib.Path('/proc/self/environ').read_text(errors='replace')
-            assert 'SENTINEL' not in blob and 'GITHUB' not in blob and 'GIT_PLUS' not in blob.replace('GIT_PLUS_EVENTS', '')
+            assert 'SENTINEL' not in blob and 'GITHUB' not in blob and 'GIT_PLUS' not in blob.replace('ODYTOR_EVENTS', '')
 
         def test_unprivileged_and_no_capabilities():
             assert os.getuid() == 65534
@@ -189,7 +189,7 @@ def test_sandbox_boundary_from_inside(root, tmp_path, monkeypatch):
                 assert not os.path.exists(path), path
             assert HOME_USER not in os.listdir('/home') if os.path.isdir('/home') else True
             mounts = pathlib.Path('/proc/self/mountinfo').read_text()
-            assert 'git-plus-runner' not in mounts and '.local/state' not in mounts and '/.git' not in mounts
+            assert 'odytor-runner' not in mounts and 'git-plus-runner' not in mounts and '.local/state' not in mounts and '/.git' not in mounts
 
         def test_filesystem_is_read_only_except_tmpfs():
             for path in ('/etc/pwned', '/usr/pwned', '/opt/env/pwned', '/in/pwned', '/opt/env/site/pwned'):
@@ -212,7 +212,7 @@ def test_sandbox_boundary_from_inside(root, tmp_path, monkeypatch):
 
 
 def test_resource_limits_are_enforced(root, tmp_path):
-    env = {'GIT_PLUS_RUNNER_MEMORY_MIB': '256', 'GIT_PLUS_RUNNER_PIDS': '64', 'GIT_PLUS_RUNNER_TMP_MIB': '16'}
+    env = {'ODYTOR_RUNNER_MEMORY_MIB': '256', 'ODYTOR_RUNNER_PIDS': '64', 'ODYTOR_RUNNER_TMP_MIB': '16'}
     _, disk = execute(root, tmp_path, {'tests/test_d.py': '''
         import pytest
         def test_disk():
@@ -271,13 +271,13 @@ def test_jobs_cannot_contaminate_each_other_or_the_environment(root, tmp_path):
 
 
 def test_sigterm_removes_the_container_and_workspace(root, tmp_path):
-    from git_plus.jobs import _frame
+    from odytor.jobs import _frame
     run_id = new_run_id()
     (tmp_path / 'source.tar').write_bytes(make_tar({'tests/test_a.py': 'import time\ndef test_a(): time.sleep(100)\n'}))
     header = {'schema': 1, 'job_id': run_id, 'repo': 'owner/repo', 'profile': 'python-pytest', 'profile_version': '1',
               'test_dirs': ['tests'], 'selectors': ['tests'], 'requirements': REQ, 'timeout_seconds': 100}
-    env = {**os.environ, 'GIT_PLUS_RUNNER_IMAGE': IMAGE, 'GIT_PLUS_RUNNER_ROOT': str(root)}
-    proc = subprocess.Popen([sys.executable, '-m', 'git_plus.sandbox'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
+    env = {**os.environ, 'ODYTOR_RUNNER_IMAGE': IMAGE, 'ODYTOR_RUNNER_ROOT': str(root)}
+    proc = subprocess.Popen([sys.executable, '-m', 'odytor.sandbox'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
     for chunk in _frame(header, tmp_path / 'source.tar'):
         proc.stdin.write(chunk)
     proc.stdin.flush()  # stdin stays open: EOF now means the client is gone
@@ -291,13 +291,13 @@ def test_sigterm_removes_the_container_and_workspace(root, tmp_path):
 
 
 def _start_sleeper(root, tmp_path, run_id=None):
-    from git_plus.jobs import _frame
+    from odytor.jobs import _frame
     run_id = run_id or new_run_id()
     (tmp_path / 'source.tar').write_bytes(make_tar({'tests/test_a.py': 'import time\ndef test_a(): time.sleep(100)\n'}))
     header = {'schema': 1, 'job_id': run_id, 'repo': 'owner/repo', 'profile': 'python-pytest', 'profile_version': '1',
               'test_dirs': ['tests'], 'selectors': ['tests'], 'requirements': REQ, 'timeout_seconds': 100}
-    env = {**os.environ, 'GIT_PLUS_RUNNER_IMAGE': IMAGE, 'GIT_PLUS_RUNNER_ROOT': str(root)}
-    proc = subprocess.Popen([sys.executable, '-m', 'git_plus.sandbox'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
+    env = {**os.environ, 'ODYTOR_RUNNER_IMAGE': IMAGE, 'ODYTOR_RUNNER_ROOT': str(root)}
+    proc = subprocess.Popen([sys.executable, '-m', 'odytor.sandbox'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
     for chunk in _frame(header, tmp_path / 'source.tar'):
         proc.stdin.write(chunk)
     proc.stdin.flush()
@@ -320,7 +320,7 @@ def test_sigkilled_runner_orphan_is_reaped_by_housekeeping_and_never_by_a_live_j
     proc.kill()  # nothing can clean up after SIGKILL
     proc.wait()
     assert any(n.startswith('gp-run-') for n in containers())  # the documented residual: it lives until its hard timeout
-    done = subprocess.run([sys.executable, '-m', 'git_plus.sandbox', 'gc'], env=env, capture_output=True, text=True, timeout=120)
+    done = subprocess.run([sys.executable, '-m', 'odytor.sandbox', 'gc'], env=env, capture_output=True, text=True, timeout=120)
     assert done.returncode == 0, done.stderr
     assert json.loads(done.stdout)['orphan_containers_removed']
     assert containers() == []
@@ -330,7 +330,7 @@ def test_sigkilled_runner_orphan_is_reaped_by_housekeeping_and_never_by_a_live_j
 def test_gc_leaves_a_live_jobs_container_alone(root, tmp_path):
     proc, env = _start_sleeper(root, tmp_path)
     try:
-        done = subprocess.run([sys.executable, '-m', 'git_plus.sandbox', 'gc'], env=env, capture_output=True, text=True, timeout=120)
+        done = subprocess.run([sys.executable, '-m', 'odytor.sandbox', 'gc'], env=env, capture_output=True, text=True, timeout=120)
         assert json.loads(done.stdout)['orphan_containers_removed'] == []
         assert any(n.startswith('gp-run-') for n in containers())
     finally:
@@ -343,12 +343,12 @@ def test_duplicate_job_id_is_rejected_without_touching_the_first(root, tmp_path)
     run_id = new_run_id()
     first, env = _start_sleeper(root, tmp_path, run_id)
     try:
-        from git_plus.jobs import _frame
+        from odytor.jobs import _frame
         (tmp_path / 'dup').mkdir()
         (tmp_path / 'dup' / 'source.tar').write_bytes(make_tar({'tests/test_a.py': 'def test_a(): pass\n'}))
         header = {'schema': 1, 'job_id': run_id, 'repo': 'owner/repo', 'profile': 'python-pytest', 'profile_version': '1',
                   'test_dirs': ['tests'], 'selectors': ['tests'], 'requirements': REQ, 'timeout_seconds': 60}
-        second = subprocess.Popen([sys.executable, '-m', 'git_plus.sandbox'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
+        second = subprocess.Popen([sys.executable, '-m', 'odytor.sandbox'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
         for chunk in _frame(header, tmp_path / 'dup' / 'source.tar'):
             second.stdin.write(chunk)
         second.stdin.flush()
@@ -363,8 +363,8 @@ def test_duplicate_job_id_is_rejected_without_touching_the_first(root, tmp_path)
 
 
 def test_stalled_client_is_cut_off_by_the_frame_deadline(root, tmp_path):
-    env = {**os.environ, 'GIT_PLUS_RUNNER_IMAGE': IMAGE, 'GIT_PLUS_RUNNER_ROOT': str(root), 'GIT_PLUS_RUNNER_FRAME_TIMEOUT': '10'}
-    proc = subprocess.Popen([sys.executable, '-m', 'git_plus.sandbox'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
+    env = {**os.environ, 'ODYTOR_RUNNER_IMAGE': IMAGE, 'ODYTOR_RUNNER_ROOT': str(root), 'ODYTOR_RUNNER_FRAME_TIMEOUT': '10'}
+    proc = subprocess.Popen([sys.executable, '-m', 'odytor.sandbox'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
     proc.stdin.write((100).to_bytes(4, 'big') + b'{')  # a header that never completes
     proc.stdin.flush()
     started = time.time()
@@ -398,7 +398,7 @@ def test_changed_dependencies_get_a_new_environment_and_budget_evicts_the_old_on
     _, second = execute(root, tmp_path, files, requirements=changed)
     assert second['environment']['cache_status'] == 'miss' and second['environment']['cache_key'] != first['environment']['cache_key']
     assert len(env_dirs(root)) == 2
-    _, third = execute(root, tmp_path, files, requirements=changed, env={'GIT_PLUS_RUNNER_ENV_BUDGET_MIB': '1'})
+    _, third = execute(root, tmp_path, files, requirements=changed, env={'ODYTOR_RUNNER_ENV_BUDGET_MIB': '1'})
     evicted = {e['key']: e['reason'] for e in third['storage']['evicted']}
     assert evicted == {first['environment']['cache_key']: 'disk_budget'} and third['environment']['cache_status'] == 'hit'
     assert env_dirs(root) == [second['environment']['cache_key']]
@@ -407,7 +407,7 @@ def test_changed_dependencies_get_a_new_environment_and_budget_evicts_the_old_on
 
 def test_insufficient_disk_rejects_the_job_with_a_clear_diagnostic(tmp_path_factory, tmp_path):
     root = tmp_path_factory.mktemp('full')
-    payload, out = execute(root, tmp_path, {'tests/test_a.py': 'def test_a(): pass\n'}, env={'GIT_PLUS_RUNNER_MIN_FREE_MIB': '4000000'})
+    payload, out = execute(root, tmp_path, {'tests/test_a.py': 'def test_a(): pass\n'}, env={'ODYTOR_RUNNER_MIN_FREE_MIB': '4000000'})
     assert out['status'] == 'setup_error' and out['failure']['kind'] == 'resources'
     assert 'Insufficient free disk space' in out['failure']['message'] and not env_dirs(root) and not list((root / 'jobs').iterdir())
 
@@ -490,7 +490,7 @@ def test_concurrent_jobs_from_independent_clients_run_one_at_a_time(tmp_path_fac
 def test_full_queue_is_refused_not_run_and_never_green(tmp_path_factory, tmp_path):
     root = tmp_path_factory.mktemp('admission-full')
     execute(root, tmp_path, {'tests/test_a.py': 'def test_a(): pass\n'})
-    env = {'GIT_PLUS_RUNNER_MAX_QUEUED': '0'}
+    env = {'ODYTOR_RUNNER_MAX_QUEUED': '0'}
     sub = tmp_path / 'holder'
     sub.mkdir()
     holder = threading.Thread(target=lambda: execute(root, sub, SLOW, env=env))

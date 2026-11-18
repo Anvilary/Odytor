@@ -4,14 +4,14 @@ import io
 import zipfile
 from unittest.mock import MagicMock
 import pytest
-from git_plus.ci_diagnose import (
+from odytor.ci_diagnose import (
     archive_logs,
     classify_diagnostic,
     diagnose_ci,
     extract_failure_excerpts,
 )
-from git_plus.errors import APIError, RevisionMismatchError, ValidationError
-from git_plus.github import GitHubClient
+from odytor.errors import APIError, RevisionMismatchError, ValidationError
+from odytor.github import GitHubClient
 
 
 def test_classify_diagnostic() -> None:

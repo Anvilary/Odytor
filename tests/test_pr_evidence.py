@@ -2,9 +2,9 @@
 
 from unittest.mock import MagicMock
 import pytest
-from git_plus.errors import APIError, RevisionMismatchError, ValidationError
-from git_plus.github import GitHubClient
-from git_plus.pr_evidence import get_pr_evidence
+from odytor.errors import APIError, RevisionMismatchError, ValidationError
+from odytor.github import GitHubClient
+from odytor.pr_evidence import get_pr_evidence
 
 
 @pytest.fixture
