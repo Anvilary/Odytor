@@ -113,7 +113,7 @@ def test_authenticated_streamable_http_tool_discovery():
         response = client.post('/mcp', headers=headers, json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'})
         assert response.status_code == 200
         tools = response.json()['result']['tools']
-        assert {t['name'] for t in tools} == {'pr_evidence', 'ci_diagnose', 'quick_fix', 'pr_conflicts', 'pr_rebase', 'ci_control'}
+        assert {t['name'] for t in tools} == {'pr_evidence', 'ci_diagnose', 'quick_fix', 'pr_conflicts', 'pr_rebase', 'ci_control', 'test_run', 'test_result'}
         rejected = client.post('/mcp', headers={**headers, 'Authorization': 'Bearer wrong'},
                                json={'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list'})
         assert rejected.status_code == 401

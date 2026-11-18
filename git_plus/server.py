@@ -15,6 +15,10 @@ from git_plus.pr_conflicts import get_pr_conflicts
 from git_plus.pr_evidence import get_pr_evidence
 from git_plus.pr_rebase import rebase_pr
 from git_plus.quick_fix import apply_quick_fix
+from git_plus.errors import ValidationError
+from git_plus.jobs import JobService
+from git_plus.profile import PROFILE_NAME, load_policies
+from git_plus.run_tests import fetch_test_result, submit_test_run
 
 Number = Annotated[int, Field(ge=1)]
 SHA = Annotated[str, Field(pattern=r"^[0-9a-fA-F]{40}$")]
@@ -91,5 +95,41 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                       workflow_id=workflow_id, ref=ref, inputs=inputs,
                       authorize_dispatch_semantics=authorize_dispatch_semantics,
                       user_authorized_fork_approval=user_authorized_fork_approval)
+
+    runs = cfg.testing
+    policies = load_policies(runs.policies_path) if runs else {}
+    service = JobService(runs) if runs else None
+    mcp.test_service = service  # lets operators and tests shut the worker down deterministically
+
+    def invoke_runs(repo, operation, *args, **kwargs):
+        """Like invoke, with the caller's identity bound to the run so run IDs are never bearer tokens."""
+        if service is None:
+            return safe_payload(ValidationError("Test execution is not configured on this server.").to_dict())
+        if not cfg.is_repo_allowed(repo):
+            raise SecurityError(f"Repository '{repo}' is not permitted by Git Plus configuration.")
+        try:
+            with github_client(cfg, remote, repo=repo) as client:
+                owner = getattr(client, "principal", None) or ("service" if remote else "local")
+                return safe_payload(operation(client, repo, *args, service=service, owner=owner, **kwargs))
+        except GitPlusError as err:
+            return safe_payload(err.to_dict())
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+              description="Queue an isolated pytest run against an exact PR head (mode=head) or a disposable merge with an exact target-branch tip (mode=prospective_merge, requires expected_base). Optional test_overlay is a bounded test-only unified diff applied to a disposable tree; nothing is committed, pushed or posted. Profile and selectors are validated; no arbitrary commands or pytest flags. Poll test_result with the returned run_id.")
+    def test_run(repo: str, number: Number, expected_head: SHA, profile: str = PROFILE_NAME,
+                 selectors: list[str] | None = None, mode: str = "head", expected_base: SHA | None = None,
+                 test_overlay: str | None = None) -> dict[str, Any]:
+        return invoke_runs(repo, submit_test_run, number, expected_head, cfg=runs, policies=policies, profile=profile,
+                           selectors=selectors, mode=mode, expected_base=expected_base, test_overlay=test_overlay)
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True},
+              description="Retrieve status and evidence for a test_run: verified revisions, tested tree, overlay digest, runner image, dependency cache status, exact pytest invocation, per-test outcomes and bounded logs. Only the submitting user can read a run. A green result requires executed, passing tests; zero collected, skipped-only, missing-report and setup failures are never green.")
+    def test_result(run_id: str) -> dict[str, Any]:
+        if service is None:
+            return safe_payload(ValidationError("Test execution is not configured on this server.").to_dict())
+        record = service.get(run_id) if isinstance(run_id, str) else None
+        if record is None:
+            return safe_payload(ValidationError("Unknown run_id.").to_dict())
+        return invoke_runs(record["repo"], fetch_test_result, run_id)
 
     return mcp

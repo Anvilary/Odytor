@@ -21,6 +21,7 @@ dev = [
 
 [project.scripts]
 git-plus = "git_plus.cli:main"
+git-plus-runner = "git_plus.sandbox:main"
 
 [tool.setuptools.packages.find]
 include = ["git_plus*"]

@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import base64
+import io
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 from typing import Any
 from urllib.parse import urlsplit
@@ -64,7 +66,7 @@ def pr_context(client: GitHubClient, repo: str, number: int, expected_head: str,
             _authorize_fork_write(client, repo, number, pr, head_repo, head_ref, actual, operation)
     return {'head_repo': head_repo, 'head_ref': head_ref, 'head_sha': actual,
             'base_repo': base_repo, 'base_ref': base_ref, 'base_sha': validate_sha(base.get('sha', '')),
-            'is_fork': is_fork}
+            'is_fork': is_fork, 'state': pr.get('state'), 'merged': bool(pr.get('merged'))}
 
 
 def _authorize_fork_write(client: GitHubClient, repo: str, number: int, pr: dict[str, Any],
@@ -171,6 +173,13 @@ class GitWorkspace:
         validate_repo(repo)
         return f'{self.origin()}/{repo}.git'
 
+    @staticmethod
+    def command(*args: str) -> list[str]:
+        return ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.attributesFile=/dev/null',
+                '-c', 'credential.helper=', '-c', 'protocol.allow=never', '-c', 'protocol.https.allow=always',
+                '-c', 'http.followRedirects=false', '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false',
+                '-c', 'core.autocrlf=false', '-c', 'core.fsmonitor=false', *args]
+
     def git(self, *args: str, input: bytes | None = None, network: bool = False,
             credential_repo: str | None = None, allowed: tuple[int, ...] = (0,),
             write: bool = False) -> bytes:
@@ -180,10 +189,7 @@ class GitWorkspace:
             if (not credential_repo or
                     [a for a in args if a.startswith(self.origin() + '/')] != [self.url(credential_repo)]):
                 raise SecurityError("Scoped Git operation must identify exactly its authorized repository URL.")
-        command = ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.attributesFile=/dev/null',
-                   '-c', 'credential.helper=', '-c', 'protocol.allow=never', '-c', 'protocol.https.allow=always',
-                   '-c', 'http.followRedirects=false', '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false',
-                   '-c', 'core.autocrlf=false', '-c', 'core.fsmonitor=false', *args]
+        command = self.command(*args)
         try:
             result = subprocess.run(command, cwd=self.path,
                                     env=self.environment(network=network, credential_repo=credential_repo, write=write),
@@ -259,3 +265,54 @@ class GitWorkspace:
                                     {**diagnostic, 'outcome': 'rejected' if rejected else 'unknown',
                                      'detail': safe_text(' '.join(rejected), 512)})
         return 'applied'
+
+    def export_tree(self, tree: str, destination: Path, *, max_bytes: int, max_files: int = 200000) -> dict[str, Any]:
+        """Write exactly the objects of a tree to a tar file, without a checkout.
+
+        Unlike `git archive` this ignores .gitattributes (export-ignore would silently change
+        the tested tree). Submodule entries are skipped and reported; nothing is executed.
+        """
+        tree = validate_sha(tree)
+        listing = self.git('ls-tree', '-r', '-l', '-z', '--full-tree', tree).split(b'\0')
+        entries = []
+        for raw in filter(None, listing):
+            meta, _, path_bytes = raw.partition(b'\t')
+            mode, kind, oid, size = meta.decode().split()
+            entries.append((mode, kind, oid, 0 if size == '-' else int(size), path_bytes.decode('utf-8', errors='strict')))
+        regular = [e for e in entries if e[1] == 'blob']
+        skipped = [e[4] for e in entries if e[1] == 'commit']
+        if len(regular) > max_files or sum(e[3] for e in regular) > max_bytes:
+            raise ValidationError("Repository tree exceeds the configured test artifact limits.")
+        proc = subprocess.Popen(self.command('cat-file', '--batch'), cwd=self.path, env=self.environment(),
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        total = 0
+        try:
+            with tarfile.open(destination, 'w', format=tarfile.PAX_FORMAT) as archive:
+                for mode, _kind, oid, _size, path in regular:
+                    if (not path or path.startswith('/') or '\0' in path
+                            or any(part in ('', '.', '..') for part in path.split('/'))):
+                        raise SecurityError("Repository tree contains an unsafe path.")
+                    proc.stdin.write(oid.encode() + b'\n')
+                    proc.stdin.flush()
+                    header = proc.stdout.readline().split()
+                    if len(header) != 3 or header[1] != b'blob':
+                        raise GitOperationError("Unexpected git object while exporting the tree.")
+                    data = proc.stdout.read(int(header[2]))
+                    proc.stdout.read(1)
+                    info = tarfile.TarInfo(path)
+                    info.mtime = 0
+                    if mode == '120000':
+                        info.type, info.linkname, info.mode = tarfile.SYMTYPE, data.decode('utf-8', errors='strict'), 0o777
+                        archive.addfile(info)
+                    else:
+                        info.size, info.mode = len(data), 0o755 if mode == '100755' else 0o644
+                        archive.addfile(info, io.BytesIO(data))
+                    total += len(data)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ValidationError("Repository tree contains unsupported path or link encoding.") from exc
+        finally:
+            proc.stdin.close()
+            proc.stdout.close()
+            proc.wait()
+        return {'files': len(regular), 'bytes': total, 'skipped_submodules': skipped[:20],
+                'skipped_submodule_count': len(skipped)}
