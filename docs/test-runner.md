@@ -196,6 +196,15 @@ policy, never from a contributor branch. It runs as container root, which is the
 through the user namespace, so the environment files belong to the runner account and are mounted read-only
 into test jobs. Prefer hash-pinned requirements and a package mirror (`GIT_PLUS_RUNNER_PIP_INDEX_URL`) in production.
 
+### Sizing and re-provisioning
+
+Each Git Plus process admits up to five queued runs and runs one at a time, but the runner has no host-wide job
+limit: with several local agents (or several Git Plus hosts) sharing one runner, jobs run concurrently, each with
+up to `GIT_PLUS_RUNNER_CPUS` / `MEMORY_MIB`. Size the VM for the number of agents (for example 2 CPUs and
+4 GiB per concurrent job plus the environment cache), or keep to one agent per runner. `provision.sh` restarts
+the account's user manager (needed for cgroup delegation), which stops Podman and any job in flight: drain the
+runner (no running jobs) before re-provisioning an in-use host.
+
 ### Residual risk
 
 Container isolation does not protect against kernel or container-runtime vulnerabilities. The VM boundary is the

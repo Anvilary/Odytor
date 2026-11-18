@@ -519,8 +519,12 @@ def test_runner_account_egress_reaches_the_package_index_but_no_internal_network
     subprocess.run(['scp', '-q', '-i', f'{KEYS}/admin', '-o', 'IdentitiesOnly=yes', '-o', f'UserKnownHostsFile={KEYS}/known_hosts', '-P', PORT,
                     str(local), f'vmadmin@{HOST}:/tmp/egress.py'], check=True)
     vm('chmod 644 /tmp/egress.py')
-    seen = dict(line.split() for line in as_runner('python3 /tmp/egress.py').splitlines())
-    assert seen == {'public': 'reachable', 'gateway': 'blocked', 'private': 'blocked', 'metadata': 'blocked'}
+    expected = {'public': 'reachable', 'gateway': 'blocked', 'private': 'blocked', 'metadata': 'blocked'}
+    assert dict(line.split() for line in as_runner('python3 /tmp/egress.py').splitlines()) == expected
+    # The preparation container is the real consumer of this policy: its traffic leaves under the account's uid.
+    image = vm("sudo grep '^GIT_PLUS_RUNNER_IMAGE=' /etc/git-plus-runner/runner.env").strip().split('=', 1)[1]
+    in_container = as_runner(f'podman run --rm --pull=never -v /tmp/egress.py:/e.py:ro --entrypoint python {image} /e.py')
+    assert dict(line.split() for line in in_container.splitlines()) == expected
 
 
 def test_silent_network_partition_is_detected_by_the_server_and_cleaned_up():
