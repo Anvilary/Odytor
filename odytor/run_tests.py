@@ -55,7 +55,10 @@ def _validate_request(repo: str, number: int, expected_head: str, profile: str, 
 
 
 def _require_pull_access(client: GitHubClient, repo: str) -> None:
-    permissions = client.request("GET", f"repos/{repo}").json().get("permissions") or {}
+    data = client.request("GET", f"repos/{repo}").json()
+    if data.get("private") is False:
+        return
+    permissions = data.get("permissions") or {}
     if not any(permissions.get(level) is True for level in ("pull", "triage", "push", "maintain", "admin")):
         raise SecurityError("The authenticated GitHub user lacks read access to this repository.")
 
