@@ -110,3 +110,67 @@ def test_structural_conflict_has_explicit_region_limit(local_fetch):
     assert result['paths_complete'] and result['conflicting']
     assert not result['regions_complete']
     assert result['conflicts'][0]['regions_unavailable_reason'] == 'structural_or_binary_conflict'
+
+
+def _advance_target_with_conflict(repo, head):
+    """Target branch moves past the PR API's snapshot and introduces a conflict only the live tip has."""
+    run(repo, 'checkout', '-q', 'main')
+    (repo / 'src/foo.py').write_text('later target change\n')
+    run(repo, 'commit', '-qam', 'advance base into conflict')
+    tip = run(repo, 'rev-parse', 'HEAD').decode().strip()
+    run(repo, 'checkout', '-q', 'feature')
+    return tip
+
+
+def test_live_tip_sees_a_conflict_the_stale_snapshot_cannot(local_fetch):
+    repo, _ = local_fetch
+    base, head = diverge(repo, conflict=False)
+    tip = _advance_target_with_conflict(repo, head)
+    client = client_for(head)
+    client.get_pr.return_value['base']['sha'] = base
+    snapshot = get_pr_conflicts(client, 'owner/repo', 1, head)
+    assert snapshot['conflicting'] is False and snapshot['merge_scope'] == 'captured_pr_base_sha'
+    assert snapshot['merged_base_sha'] == base and snapshot['current_base_conflicts_checked'] is False
+    live = get_pr_conflicts(client, 'owner/repo', 1, head, merge_target='live_tip')
+    assert live['conflicting'] is True and live['conflicts'][0]['path'] == 'src/foo.py'
+    assert live['merge_scope'] == 'live_target_branch_tip' and live['merge_target'] == 'live_tip'
+    assert live['merged_base_sha'] == tip == live['base_branch_tip_sha']
+    assert live['base_sha'] == base and live['base_snapshot_is_current'] is False  # the PR API snapshot is still reported, honestly
+    assert live['current_base_conflicts_checked'] is True and live['live_tip_unchanged_after_inspection'] is True
+
+
+def test_live_tip_expected_base_must_equal_the_tip_not_the_snapshot(local_fetch):
+    repo, _ = local_fetch
+    base, head = diverge(repo, conflict=False)
+    tip = _advance_target_with_conflict(repo, head)
+    client = client_for(head)
+    client.get_pr.return_value['base']['sha'] = base
+    with pytest.raises(RevisionMismatchError) as exc:
+        get_pr_conflicts(client, 'owner/repo', 1, head, base, merge_target='live_tip')
+    assert exc.value.diagnostic['expected_base'] == base and exc.value.diagnostic['actual_base'] == tip
+    assert get_pr_conflicts(client, 'owner/repo', 1, head, tip, merge_target='live_tip')['merged_base_sha'] == tip
+
+
+def test_live_tip_works_when_the_snapshot_is_not_an_ancestor(local_fetch):
+    """A rewritten target branch cannot be inspected as a snapshot but can still be inspected at its live tip."""
+    repo, _ = local_fetch
+    base, head = diverge(repo, conflict=False)
+    run(repo, 'checkout', '-q', 'main')
+    run(repo, 'reset', '-q', '--hard', 'HEAD~1')
+    (repo / 'rewritten.py').write_text('x\n')
+    run(repo, 'add', '.')
+    run(repo, 'commit', '-qm', 'rewritten base')
+    tip = run(repo, 'rev-parse', 'HEAD').decode().strip()
+    run(repo, 'checkout', '-q', 'feature')
+    client = client_for(head)
+    client.get_pr.return_value['base']['sha'] = base
+    with pytest.raises(RevisionMismatchError):
+        get_pr_conflicts(client, 'owner/repo', 1, head)
+    assert get_pr_conflicts(client, 'owner/repo', 1, head, merge_target='live_tip')['merged_base_sha'] == tip
+
+
+def test_unknown_merge_target_is_rejected(local_fetch):
+    _, head = local_fetch
+    from odytor.errors import ValidationError
+    with pytest.raises(ValidationError):
+        get_pr_conflicts(client_for(head), 'owner/repo', 1, head, merge_target='current')

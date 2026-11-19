@@ -1,7 +1,7 @@
 """One MCP server with request-scoped GitHub credentials."""
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from fastmcp import FastMCP
 from pydantic import Field
 
@@ -90,10 +90,11 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                       max_bytes=cfg.quick_fix_max_patch_bytes)
 
     @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True},
-              description="Inspect an exact head/base merge using isolated Git. Returns conflicting paths, stages and text regions with completeness metadata. Executes no repository code.")
+              description="Inspect an exact head/base merge using isolated Git. Returns conflicting paths, stages and text regions with completeness metadata. Executes no repository code. By default the merge uses the base SHA the PR API reports (merge_scope=captured_pr_base_sha), which can lag the branch; set merge_target=live_tip to merge against the live target-branch tip instead (expected_base, if given, must then equal that tip). The result always states which base was merged (merged_base_sha) and whether it is the current tip.")
     def pr_conflicts(repo: str, number: Number, expected_head: SHA, expected_base: SHA | None = None,
-                     max_paths: Annotated[int, Field(ge=1, le=100)] = 100) -> dict[str, Any]:
-        return invoke(repo, get_pr_conflicts, number, expected_head, expected_base, max_paths)
+                     max_paths: Annotated[int, Field(ge=1, le=100)] = 100,
+                     merge_target: Literal["pr_base_snapshot", "live_tip"] = "pr_base_snapshot") -> dict[str, Any]:
+        return invoke(repo, get_pr_conflicts, number, expected_head, expected_base, max_paths, merge_target)
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
               description="Preview a genuine linear PR rebase onto an exact base. Applying rewrites history and requires apply=true plus allow_history_rewrite=true. Uses an exact branch lease. Merge histories are rejected; repository tests are not run.")

@@ -60,25 +60,54 @@ def inspect_merge(work: GitWorkspace, base: str, head: str, *, max_paths: int = 
             'merge_tree_sha': tree, 'merge_result_committed': False}
 
 
+MERGE_TARGETS = ("pr_base_snapshot", "live_tip")
+
+
 def get_pr_conflicts(client: GitHubClient, repo: str, number: int, expected_head: str,
-                     expected_base: str | None = None, max_paths: int = 100) -> dict[str, Any]:
+                     expected_base: str | None = None, max_paths: int = 100,
+                     merge_target: str = "pr_base_snapshot") -> dict[str, Any]:
+    """Inspect an exact head against either the PR API's base snapshot (default) or the live target-branch tip.
+
+    `merge_target="pr_base_snapshot"` keeps the historical behavior: the merge uses the base SHA GitHub reports
+    for the PR, which can lag the branch, and the result says whether that snapshot is still the tip.
+    `merge_target="live_tip"` merges against the tip actually fetched from the target branch; when `expected_base`
+    is given it must equal that tip (the same contract as test_run's prospective_merge). Either way the result
+    names the revision that was really merged (`merged_base_sha`) and why it was chosen (`merge_scope`).
+    """
     if type(max_paths) is not int or not 1 <= max_paths <= 100:
         raise ValidationError('max_paths must be between 1 and 100.')
+    if merge_target not in MERGE_TARGETS:
+        raise ValidationError(f"merge_target must be one of: {', '.join(MERGE_TARGETS)}.")
     context = pr_context(client, repo, number, expected_head)
-    if expected_base is not None and validate_sha(expected_base) != context['base_sha']:
+    live = merge_target == "live_tip"
+    if expected_base is not None and not live and validate_sha(expected_base) != context['base_sha']:
         raise RevisionMismatchError(expected_base, context['base_sha'], revision='base')
     with GitWorkspace(client) as work:
         work.fetch(context['head_repo'], context['head_ref'], context['head_sha'], 'head')
-        # The PR API's base SHA can lag the live branch tip. Preserve the caller's
-        # immutable snapshot when that SHA is still an ancestor of the fetched tip.
-        # The result must explicitly disclose that it is not a current-tip check.
-        observed_base = work.fetch(context['base_repo'], context['base_ref'], context['base_sha'],
-                                   'base', allow_base_ancestor=True)
-        result = inspect_merge(work, context['base_sha'], context['head_sha'], max_paths=max_paths)
-        verify_context(client, repo, number, context, base=True)
-    base_is_current = observed_base == context['base_sha']
+        tip_stable: bool | None = None
+        if live:
+            observed_base = work.fetch_tip(context['base_repo'], context['base_ref'], 'base')
+            if expected_base is not None and validate_sha(expected_base) != observed_base:
+                raise RevisionMismatchError(expected_base, observed_base, revision='base')
+            merged_base = observed_base
+        else:
+            # The PR API's base SHA can lag the live branch tip. Preserve the caller's immutable snapshot when it
+            # is still an ancestor of the fetched tip; the result discloses that it is not a current-tip check.
+            observed_base = work.fetch(context['base_repo'], context['base_ref'], context['base_sha'],
+                                       'base', allow_base_ancestor=True)
+            merged_base = context['base_sha']
+        result = inspect_merge(work, merged_base, context['head_sha'], max_paths=max_paths)
+        verify_context(client, repo, number, context, base=not live)
+        if live:
+            # The tip may legitimately advance while we work; say so instead of asserting it still holds.
+            tip_stable = work.fetch_tip(context['base_repo'], context['base_ref'], 'base') == observed_base
+    base_is_current = merged_base == observed_base and (tip_stable is not False)
     return safe_payload({'repo': repo, 'number': number, 'head_sha': context['head_sha'],
-                         'base_sha': context['base_sha'], 'base_branch_tip_sha': observed_base,
-                         'base_snapshot_is_current': base_is_current,
+                         'base_sha': context['base_sha'], 'merged_base_sha': merged_base,
+                         'base_branch_tip_sha': observed_base,
+                         'base_snapshot_is_current': context['base_sha'] == observed_base,
                          'current_base_conflicts_checked': base_is_current,
-                         'merge_scope': 'captured_pr_base_sha', **result})
+                         'merge_scope': 'live_target_branch_tip' if live else 'captured_pr_base_sha',
+                         'merge_target': merge_target,
+                         **({'live_tip_unchanged_after_inspection': tip_stable} if live else {}),
+                         **result})

@@ -221,12 +221,19 @@ class GitWorkspace:
         expected = validate_sha(expected)
         if label not in {'head', 'base'}:
             raise ValidationError("Invalid internal fetch label.")
+        actual = self.fetch_tip(repo, ref, label, depth=depth)
+        return self.verify_fetched_revision(label, expected, actual,
+                                            allow_base_ancestor=allow_base_ancestor)
+
+    def fetch_tip(self, repo: str, ref: str, label: str, *, depth: int | None = None) -> str:
+        """Fetch a branch and return the revision actually received, without asserting what it should be."""
+        validate_ref(ref)
+        if label not in {'head', 'base'}:
+            raise ValidationError("Invalid internal fetch label.")
         options = ['--depth', str(depth)] if depth else []
         self.git('fetch', '--quiet', '--no-tags', *options, '--', self.url(repo),
                  f'refs/heads/{ref}:refs/odytor/{label}', network=True, credential_repo=repo)
-        actual = self.git('rev-parse', f'refs/odytor/{label}').decode().strip()
-        return self.verify_fetched_revision(label, expected, actual,
-                                            allow_base_ancestor=allow_base_ancestor)
+        return self.git('rev-parse', f'refs/odytor/{label}').decode().strip()
 
     def verify_fetched_revision(self, label: str, expected: str, actual: str,
                                 *, allow_base_ancestor: bool = False) -> str:

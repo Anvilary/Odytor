@@ -34,12 +34,16 @@ def repository(tmp_path):
 @pytest.fixture
 def local_fetch(monkeypatch, repository):
     repo, sha = repository
-    def fetch(self, target, ref, expected, label, **kwargs):
+    def fetch_tip(self, target, ref, label, **kwargs):
         # Only the fixture transport allows file access. Production stays HTTPS-only.
         run(self.path, '-c', 'protocol.file.allow=always', 'fetch', '-q', str(repo), f'{ref}:refs/odytor/{label}')
-        actual = self.git('rev-parse', f'refs/odytor/{label}').decode().strip()
+        return self.git('rev-parse', f'refs/odytor/{label}').decode().strip()
+
+    def fetch(self, target, ref, expected, label, **kwargs):
+        actual = fetch_tip(self, target, ref, label)
         return self.verify_fetched_revision(label, expected, actual,
                                             allow_base_ancestor=kwargs.get('allow_base_ancestor', False))
+    monkeypatch.setattr(GitWorkspace, 'fetch_tip', fetch_tip)
     monkeypatch.setattr(GitWorkspace, 'fetch', fetch)
     return repo, sha
 
