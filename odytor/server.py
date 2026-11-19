@@ -426,6 +426,10 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
     def publish_apply(plan_id: Annotated[str, Field(pattern=r"^pp-[0-9a-f]{32}$")], confirm: str, user_authorized: bool = False) -> dict[str, Any]:
         if workspaces is None or plans is None:
             return safe_payload(ValidationError("Workspaces are disabled on this server.").to_dict())
+        if not getattr(cfg.workspaces, "allow_publish_apply", False):
+            return safe_payload(SecurityError(
+                "Publication apply is disabled on this server deployment. Direct GitHub commits from remote agent sessions require ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY=true on the host. Inspection and publication planning remain available via publish_plan."
+            ).to_dict())
         try:
             owner = caller_principal(cfg, remote)
             plan = plans.get(plan_id, owner)

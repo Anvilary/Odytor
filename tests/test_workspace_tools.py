@@ -130,3 +130,10 @@ def test_disabled_workspaces_say_so(tmp_path):
     report = data(server, 'odytor_capabilities')
     workspaces = next(c for c in report['capabilities'] if c['name'] == 'workspaces')
     assert workspaces['configured'] is False and workspaces['available'] is False
+
+
+def test_publish_apply_refuses_when_disabled_by_server_config(stack):
+    server, _ = stack
+    result = data(server, 'publish_apply', plan_id='pp-' + '0' * 32, confirm='any', user_authorized=True)
+    assert result['error_type'] == 'SecurityError'
+    assert 'Publication apply is disabled on this server deployment' in result['error']

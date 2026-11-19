@@ -95,6 +95,7 @@ class WorkspaceSettings:
     max_checkpoints: int = 20
     max_runs: int = 40
     min_free_bytes: int = 1024 * _MIB
+    allow_publish_apply: bool = False
 
     @classmethod
     def load(cls) -> WorkspaceSettings | None:
@@ -115,6 +116,7 @@ class WorkspaceSettings:
 
         state = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
         max_ttl = number("MAX_TTL_HOURS", 72.0, 0.1, 720.0, float)
+        allow_publish_apply = (_env("WORKSPACE_ALLOW_PUBLISH_APPLY") or "off").strip().lower() in {"on", "1", "true", "yes"}
         return cls(
             data_dir=_env("WORKSPACE_DIR") or os.path.join(state, "odytor", "workspaces"),
             ttl_hours=number("TTL_HOURS", 24.0, 0.1, max_ttl, float), max_ttl_hours=max_ttl,
@@ -125,7 +127,8 @@ class WorkspaceSettings:
             max_changed_files=number("MAX_CHANGED_FILES", 300, 1, 5000),
             max_checkpoints=number("MAX_CHECKPOINTS", 20, 1, 100),
             max_runs=number("MAX_RUNS", 40, 1, 1000),
-            min_free_bytes=number("MIN_FREE_MIB", 1024, 64, 1048576) * _MIB)
+            min_free_bytes=number("MIN_FREE_MIB", 1024, 64, 1048576) * _MIB,
+            allow_publish_apply=allow_publish_apply)
 
 
 @dataclass(frozen=True)

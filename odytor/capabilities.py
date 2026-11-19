@@ -117,12 +117,14 @@ def describe(cfg: Settings, *, policies: dict[str, RepoPolicy], service: Any | N
         limits={"max_new_steps": browser_spec.MAX_STEPS, "max_session_steps": browser_spec.MAX_SESSION_STEPS,
                 "max_screenshots_per_run": browser_spec.MAX_SCREENSHOTS, "max_mocks": browser_spec.MAX_MOCKS},
         not_implemented=["unrestricted JavaScript evaluation", "video", "file upload and download", "external origins"])
+    pub_apply_enabled = workspaces_enabled and bool(getattr(getattr(cfg, "workspaces", None), "allow_publish_apply", False))
     publication = _capability(
-        "publication", installed=True, configured=workspaces_enabled, operational=None,
+        "publication", installed=True, configured=pub_apply_enabled, operational=None,
         authorized=(None if repo is None else bool(repo_allowed)),
         reason=("Workspaces are disabled on this server." if not workspaces_enabled else
+                "Publication apply is disabled on this server deployment (publish_plan is available for review)." if not pub_apply_enabled else
                 f"Repository '{repo}' is not permitted by this server." if repo_allowed is False else None),
-        writes_to_github=True, requires=["a pr_head workspace with the 'publish' operation in its scope", "publish_plan, then explicit user "
+        writes_to_github=pub_apply_enabled, requires=["a pr_head workspace with the 'publish' operation in its scope", "publish_plan, then explicit user "
                                            "authorization, then publish_apply"],
         guarantees=["one additive commit on the PR head", "no force push, merge, approval or comment", "plan bound to exact tree, patch digest "
                     "and expected head", "an uncertain outcome is reconciled against the remote before any retry"])
