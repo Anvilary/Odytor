@@ -4,13 +4,34 @@
 # - The repository allowlist is fixed here: Odytor treats an empty allowlist as unrestricted, so it is never left to chance.
 # - stdout stays clean for the MCP protocol; diagnostics go to stderr. exec keeps signals and exit status intact.
 #
-# Install by copying to ~/.local/bin/odytor-mcp (see docs/migration-from-git-plus.md). The checkout lives at
-# ~/Projects/Anvilary-Tools/odytor; set ODYTOR_HOME to use another location.
+# Install by symlinking or copying to ~/.local/bin/anvi-odytor-mcp (or ~/.local/bin/odytor-mcp).
+# The checkout location can be configured via ODYTOR_HOME; otherwise the launcher automatically
+# checks the script's repository location and common project paths.
 set -euo pipefail
 export PATH="$PATH:/usr/local/bin:/usr/bin:/bin"   # agent hosts may start us with a sparse PATH
 
-REAL_HOME="$(getent passwd "$(id -u)" | cut -d: -f6)"   # agent profiles run with their own HOME
-CHECKOUT="${ODYTOR_HOME:-$REAL_HOME/Projects/Anvilary-Tools/odytor}"
+REAL_HOME="$(getent passwd "$(id -u)" | cut -d: -f6 2>/dev/null || echo "${HOME:-}")"   # agent profiles run with their own HOME
+CHECKOUT="${ODYTOR_HOME:-}"
+if [ -z "$CHECKOUT" ]; then
+  # If the script is run from or symlinked to a checkout, resolve that directory.
+  SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+  CANDIDATE="$(cd "$(dirname "$SCRIPT_PATH")/../.." 2>/dev/null && pwd -P || true)"
+  if [ -n "$CANDIDATE" ] && { [ -x "$CANDIDATE/.venv/bin/odytor" ] || [ -x "$CANDIDATE/.venv/bin/git-plus" ]; }; then
+    CHECKOUT="$CANDIDATE"
+  fi
+fi
+if [ -z "$CHECKOUT" ]; then
+  for candidate in \
+    "$REAL_HOME/Projects/Anvilary-Tools/odytor" \
+    "$REAL_HOME/Projects/Odytor" \
+    "$REAL_HOME/Projects/odytor"; do
+    if [ -x "$candidate/.venv/bin/odytor" ] || [ -x "$candidate/.venv/bin/git-plus" ]; then
+      CHECKOUT="$candidate"
+      break
+    fi
+  done
+fi
+CHECKOUT="${CHECKOUT:-$REAL_HOME/Projects/Anvilary-Tools/odytor}"
 ALLOWED_REPOSITORIES="odysseus-dev/odysseus,Anvilary/git-plus"
 
 fail() { echo "odytor-mcp: $*" >&2; exit 1; }
@@ -18,7 +39,7 @@ fail() { echo "odytor-mcp: $*" >&2; exit 1; }
 # The canonical command; an installation that has not been reinstalled yet still provides the old name.
 EXE="$CHECKOUT/.venv/bin/odytor"
 [ -x "$EXE" ] || EXE="$CHECKOUT/.venv/bin/git-plus"
-[ -x "$EXE" ] || fail "Odytor executable not found in $CHECKOUT/.venv/bin"
+[ -x "$EXE" ] || fail "Odytor executable not found in $CHECKOUT/.venv/bin (set ODYTOR_HOME to your checkout directory)"
 GH="$(command -v gh || true)"; [ -n "$GH" ] || fail "GitHub CLI (gh) not found"
 
 # Non-interactive, profile-independent GitHub CLI authentication.
