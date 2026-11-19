@@ -13,7 +13,7 @@ Cloudflare tunnel -> app (container "git-plus", edge + gp-runner-net)  -- SSH, f
 
 | Piece | Where |
 | --- | --- |
-| Application | container `git-plus` (legacy name; Nginx and the tunnel address it), image `odytor:<commit>` (older images are `git-plus:<commit>`), `~/services/git-plus/compose.yaml`, `.env` (OAuth, allowlists, PAT: unchanged) |
+| Application | container `git-plus` (legacy Compose container name; Nginx and the tunnel address it), image `odytor:<commit>` (current: `odytor:cb446ef`), `~/services/git-plus/compose.yaml`, `.env` (canonical URL `https://odytor.alexandreteixeira.dev`) |
 | Runner key and pinned host key | `~/services/git-plus/runner-ssh/` (`runner_key` 0640 for the container's group, `known_hosts`) |
 | Approved dependency policy | `~/services/git-plus/policies/` (read-only mount); source of truth `deploy/policies/` |
 | Results and spool | named volume `git_plus_test_data` (separate from the OAuth volume `git_plus_data`) |
@@ -52,7 +52,7 @@ Retained results: 48 h, expiring 6 h after a PR is seen closed or merged.
 1. `git archive` the tested commit, transfer, `docker build -f deploy/app/Dockerfile` to `odytor:<commit>`.
 2. Copy `compose.yaml` to `compose.yaml.before-<commit>`, change only the `image:` tag.
 3. `docker compose up -d --no-deps git-plus` (never `down -v`; the tunnel and Nginx are not touched), wait for `healthy`.
-4. Check `https://git-plus.alexandreteixeira.dev/.well-known/oauth-authorization-server` (200) and an unauthenticated
+4. Check `https://odytor.alexandreteixeira.dev/.well-known/oauth-authorization-server` (200) and an unauthenticated
    `POST /mcp` (401 with `WWW-Authenticate`).
 
 Updating the runner software: build the wheel, `GP_RUNNER_IMAGE=... GP_WHEEL=... ./runner-vm.sh provision`. It is

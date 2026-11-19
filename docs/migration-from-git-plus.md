@@ -74,17 +74,16 @@ the older one aside yourself):
 
 ## Hosted deployment
 
-Ready now: image `odytor:<commit>` from `deploy/app/Dockerfile` (entrypoint `odytor`), and `deploy/app/compose.yaml.template`
-(new `ODYTOR_TEST_*` names, container and project names unchanged). The current production `.env` and Compose file work with
-the new image unchanged because the old settings are read. To migrate the settings, rename the keys in `.env`
-(`GIT_PLUS_` to `ODYTOR_`, values untouched) in the same change as the image; do not leave both spellings with
-different values.
+Production cutover has completed: image `odytor:cb446ef` is active, the canonical hostname is
+`https://odytor.alexandreteixeira.dev/mcp`, Cloudflare DNS and ingress point to `git-plus-tunnel`, Nginx forwards
+`odytor.alexandreteixeira.dev` to the application, and the environment settings use the canonical `ODYTOR_*` keys.
 
-The existing endpoint stays. A second hostname for the same application is not a routing change only: the OAuth issuer and
-resource URL come from the single configured public URL, so ChatGPT connections created for the old hostname are bound to
-it. Activating `odytor.alexandreteixeira.dev` therefore needs separate authorization and these steps: a Cloudflare ingress
-rule and DNS record, an Nginx `server_name`, the GitHub OAuth App callback for the new host, a new connector in each client,
-and a decision on which host is the OAuth issuer. Nothing of this is configured.
+Legacy Odytor services (`odytor-mcp`, `odytor-operator`, `odytor-worker`) have been decommissioned and their persistent data
+archived.
+
+The old hostname `git-plus.alexandreteixeira.dev` is retired as an active endpoint because the OAuth issuer and resource
+metadata are bound to `https://odytor.alexandreteixeira.dev`. Existing clients (e.g. ChatGPT, Perplexity) connect to
+`https://odytor.alexandreteixeira.dev/mcp`.
 
 ## After the GitHub repository is renamed to `Anvilary/odytor`
 

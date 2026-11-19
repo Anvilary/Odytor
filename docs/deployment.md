@@ -81,14 +81,14 @@ Hosted deployment exposes the Model Context Protocol over HTTP using the Streama
 
 ### GitHub OAuth Setup for ChatGPT
 
-1. Register a new GitHub OAuth App in your GitHub organization or account:
+1. Register or update your GitHub OAuth App:
    - **Application Name:** Odytor MCP Server
-   - **Homepage URL:** `https://your-domain.example.com`
-   - **Authorization callback URL:** `https://your-domain.example.com/auth/callback`
+   - **Homepage URL:** `https://odytor.alexandreteixeira.dev`
+   - **Authorization callback URL:** `https://odytor.alexandreteixeira.dev/auth/callback`
 
 2. Configure environment variables in `.env`:
    ```dotenv
-   ODYTOR_PUBLIC_URL=https://your-domain.example.com
+   ODYTOR_PUBLIC_URL=https://odytor.alexandreteixeira.dev
    ODYTOR_GITHUB_CLIENT_ID=your_github_client_id
    ODYTOR_GITHUB_CLIENT_SECRET=your_github_client_secret
    ODYTOR_OAUTH_SIGNING_KEY=generate_random_secret_at_least_32_bytes
@@ -96,18 +96,20 @@ Hosted deployment exposes the Model Context Protocol over HTTP using the Streama
    ODYTOR_ALLOWED_REPOSITORIES=owner/repo1,owner/repo2
    ```
 
-3. Run Odytor under a dedicated, unprivileged system user:
+3. Run Odytor under a dedicated, unprivileged system user or container:
    ```bash
    .venv/bin/odytor --transport streamable-http --host 127.0.0.1 --port 8000
    ```
 
 4. Configure your reverse proxy (Nginx or Cloudflare Tunnel) to forward:
-   - `/mcp` (must preserve streaming responses and disable buffering)
+   - `/mcp` (must preserve streaming responses and disable buffering: `proxy_buffering off`)
    - `/auth/*` (OAuth flow routes)
    - `/.well-known/*` (OAuth discovery endpoints)
 
 5. In ChatGPT:
    - Go to Settings -> Connected apps or Custom MCP servers.
+   - Enter `https://odytor.alexandreteixeira.dev/mcp`.
+   - Select OAuth authentication and complete consent.
    - Enter `https://your-domain.example.com/mcp`.
    - Select OAuth authentication and complete consent.
 
