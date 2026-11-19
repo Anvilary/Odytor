@@ -6,7 +6,7 @@ import textwrap
 
 import pytest
 
-from odytor.capabilities import CORE_TOOLS, RUNNER_TOOLS, describe
+from odytor.capabilities import RUNNER_TOOLS, WORKSPACE_TOOLS, describe
 from odytor.config import RunSettings, Settings
 from odytor.jobs import JobService
 from odytor.profile import RepoPolicy, requirements_digest
@@ -47,15 +47,15 @@ def test_catalogue_matches_registered_tools(tmp_path):
     server = create_server(cfg)
     registered = {t.name for t in asyncio.run(server.list_tools())}
     report = server and asyncio.run(server.call_tool('odytor_capabilities', {})).structured_content
-    assert set(report['operations']) | {'odytor_capabilities'} == registered
-    assert set(CORE_TOOLS) | set(RUNNER_TOOLS) <= registered
+    assert set(report['operations']) == registered  # derived from registration, so it cannot drift
+    assert set(RUNNER_TOOLS) | set(WORKSPACE_TOOLS) <= registered
 
 
 def test_unconfigured_runner_is_reported_as_unavailable_never_operational():
     report = asyncio.run(create_server(settings()).call_tool('odytor_capabilities', {'repo': 'owner/repo'})).structured_content
     run = report['capabilities'][0]
     assert run['configured'] is False and run['operational'] is None and run['available'] is False and 'not configured' in run['reason']
-    assert {'test_run', 'test_result'}.isdisjoint(report['operations'])
+    assert {'test_run', 'test_result', 'workspace_run', 'test_cancel'} <= {u['name'] for u in report['operations_unavailable']}
     assert report['caller'] == {'principal': 'local', 'repository': 'owner/repo', 'repository_permitted': True, 'test_policy_present': False}
 
 

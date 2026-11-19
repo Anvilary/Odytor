@@ -77,6 +77,55 @@ class RunSettings:
             min_free_bytes=number("MIN_FREE_MIB", 1024, 64, 1048576) * _MIB)
 
 
+@dataclass(frozen=True)
+class WorkspaceSettings:
+    """Disposable engineering workspaces: git objects and a version counter, never a checked-out tree.
+
+    Every limit is a hard cap enforced by the workspace service; there is no unbounded mode.
+    """
+
+    data_dir: str
+    ttl_hours: float = 24.0
+    max_ttl_hours: float = 72.0
+    max_per_owner: int = 5
+    max_workspace_bytes: int = 512 * _MIB
+    max_total_bytes: int = 4096 * _MIB
+    max_file_bytes: int = 1 * _MIB
+    max_changed_files: int = 300
+    max_checkpoints: int = 20
+    min_free_bytes: int = 1024 * _MIB
+
+    @classmethod
+    def load(cls) -> WorkspaceSettings | None:
+        from odytor.errors import ValidationError
+
+        if (_env("WORKSPACES") or "on").strip().lower() in {"off", "0", "false", "no"}:
+            return None
+
+        def number(name: str, default, low, high, cast=int):
+            text = (_env(f"WORKSPACE_{name}") or "").strip()
+            try:
+                value = cast(text) if text else default
+            except ValueError:
+                value = None
+            if value is None or not low <= value <= high:
+                raise ValidationError(f"ODYTOR_WORKSPACE_{name} must be between {low} and {high}.")
+            return value
+
+        state = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+        max_ttl = number("MAX_TTL_HOURS", 72.0, 0.1, 720.0, float)
+        return cls(
+            data_dir=_env("WORKSPACE_DIR") or os.path.join(state, "odytor", "workspaces"),
+            ttl_hours=number("TTL_HOURS", 24.0, 0.1, max_ttl, float), max_ttl_hours=max_ttl,
+            max_per_owner=number("MAX_PER_OWNER", 5, 1, 50),
+            max_workspace_bytes=number("MAX_MIB", 512, 8, 16384) * _MIB,
+            max_total_bytes=number("MAX_TOTAL_MIB", 4096, 8, 1048576) * _MIB,
+            max_file_bytes=number("MAX_FILE_BYTES", 1048576, 1024, 8 * _MIB),
+            max_changed_files=number("MAX_CHANGED_FILES", 300, 1, 5000),
+            max_checkpoints=number("MAX_CHECKPOINTS", 20, 1, 100),
+            min_free_bytes=number("MIN_FREE_MIB", 1024, 64, 1048576) * _MIB)
+
+
 LEGACY_PAT_REPOSITORY = "odysseus-dev/odysseus"
 
 
@@ -114,6 +163,7 @@ class Settings:
     quick_fix_max_changed_lines: int = 1000
     quick_fix_max_patch_bytes: int = 262144
     testing: RunSettings | None = None
+    workspaces: WorkspaceSettings | None = None
     github_timeout: float = 120.0
     max_response_bytes: int = 262144
     server_pat: str | None = field(default=None, repr=False)
@@ -222,6 +272,7 @@ class Settings:
             quick_fix_max_changed_lines=quick_fix_limits[1],
             quick_fix_max_patch_bytes=quick_fix_limits[2],
             testing=RunSettings.load(),
+            workspaces=WorkspaceSettings.load(),
         )
 
     def is_repo_allowed(self, repo: str) -> bool:

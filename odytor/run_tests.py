@@ -147,6 +147,78 @@ def submit_test_run(client: GitHubClient, repo: str, number: int, expected_head:
                 shutil.rmtree(spool, ignore_errors=True)
 
 
+def submit_workspace_run(repo: str, workspace_id: str, expected_version: int, *, workspaces: Any, service: JobService,
+                         policies: dict[str, RepoPolicy], owner: str, cfg: RunSettings, profile: str = PROFILE_NAME,
+                         selectors: Any = None) -> dict[str, Any]:
+    """Queue an isolated pytest run on the exact current tree of a workspace.
+
+    The tree is exported while the workspace lock is held and the job carries only that tar, so a later edit can
+    never change what runs. Nothing is fetched, committed, pushed or posted.
+    """
+    validate_repo(repo)
+    policy = policies.get(repo.strip().casefold())
+    if policy is None:
+        raise SecurityError("This repository has no maintainer test policy and cannot be tested.")
+    if profile not in PROFILES:
+        raise ValidationError(f"Unknown test profile '{profile}'. Available: {', '.join(PROFILES)}.")
+    if policy.profile != profile:
+        raise ValidationError(f"Repository policy requires profile '{policy.profile}'.")
+    try:
+        selected = validate_selectors(selectors, policy.test_dirs)
+    except ProfileError as exc:
+        raise ValidationError(str(exc)) from exc
+    current = workspaces.get(workspace_id, owner, operation="execute")
+    if current["repo"].casefold() != repo.casefold():
+        raise ValidationError("Unknown workspace_id.")
+    service.reserve()
+    run_id = new_run_id()
+    reserved = True
+    spool: Path | None = None
+    try:
+        spool = service.spool_dir(run_id)
+        taken = workspaces.snapshot(workspace_id, owner, expected_version=expected_version, destination=spool / "source.tar",
+                                    max_bytes=cfg.max_source_bytes, attach_run=run_id)
+        ws = taken["record"]
+        now = service.clock()
+        record: dict[str, Any] = {
+            "schema": SCHEMA, "kind": "workspace", "run_id": run_id, "owner": owner, "repo": repo, "pr": ws["pr"], "mode": "workspace",
+            "profile": profile, "profile_version": PROFILES[profile], "status": "queued",
+            "requested": {"head": None, "base": None},
+            "revisions": {"workspace_id": workspace_id, "workspace_version": ws["version"], "source": ws["source"]},
+            "trees": {"source_tree": ws["source_tree"], "effective_tree": ws["tree"]},
+            "overlay": {"supplied": False, "applied": False, "sha256": None, "paths": [], "patch_status": "none",
+                        "committed": False, "pushed": False},
+            "selectors": list(selected), "test_dirs": list(policy.test_dirs), "timeout_seconds": cfg.default_timeout,
+            "requirements_sha256": policy.requirements_sha256, "artifact": taken["artifact"],
+            "timestamps": {"created_at": now, "started_at": None, "finished_at": None},
+            "expires_at": now + cfg.retention_hours * 3600, "result": None}
+        header = {"schema": 1, "job_id": run_id, "repo": repo, "profile": profile, "profile_version": PROFILES[profile],
+                  "test_dirs": list(policy.test_dirs), "selectors": list(selected), "overlay_paths": [],
+                  "requirements": policy.requirements, "timeout_seconds": cfg.default_timeout}
+        service.enqueue(record, QueuedJob(run_id, spool, header, cfg.default_timeout))
+        reserved = False
+        return public_view(record)
+    finally:
+        if reserved:
+            service.release()
+            if spool is not None:
+                shutil.rmtree(spool, ignore_errors=True)
+
+
+def cancel_test_run(run_id: str, *, service: JobService, owner: str) -> dict[str, Any]:
+    """Cancel queued or running work. A running job's sandbox is torn down by the runner when the connection drops."""
+    record = service.get(run_id)
+    if record is None or record["owner"] != owner:
+        raise ValidationError("Unknown run_id.")
+    if record["status"] in TERMINAL:
+        return {"run_id": run_id, "outcome": "already_finished", "status": record["status"]}
+    outcome = service.cancel(run_id)
+    latest = service.store.load(run_id) or record
+    return {"run_id": run_id, "outcome": outcome, "status": latest["status"],
+            "note": "A running job stops once its sandbox is torn down; poll test_result for status 'canceled'."
+            if outcome == "canceling" else None}
+
+
 def _currency(client: GitHubClient, record: dict[str, Any]) -> dict[str, Any]:
     """Compare the tested head with the PR now; also proves the caller can still read the PR."""
     try:
@@ -159,7 +231,22 @@ def _currency(client: GitHubClient, record: dict[str, Any]) -> dict[str, Any]:
             "tested_head_is_current_pr_head": head == tested, "current_pr_head": head}
 
 
+def _workspace_currency(record: dict[str, Any], workspaces: Any | None) -> dict[str, Any]:
+    """Compare the tested tree with the workspace now; a closed or expired workspace is reported, not guessed."""
+    ref = record["revisions"]
+    out: dict[str, Any] = {"checked": workspaces is not None, "workspace_id": ref["workspace_id"],
+                           "tested_version": ref["workspace_version"], "tested_tree": record["trees"]["effective_tree"]}
+    if workspaces is None:
+        return out
+    live = workspaces.peek(ref["workspace_id"], record["owner"])
+    if live is None:
+        return {**out, "workspace_state": "closed_or_expired", "tested_tree_is_current_workspace_tree": None}
+    return {**out, "workspace_state": "open", "current_version": live["version"], "current_tree": live["tree"],
+            "tested_tree_is_current_workspace_tree": live["tree"] == record["trees"]["effective_tree"]}
+
+
 def public_view(record: dict[str, Any], currency: dict[str, Any] | None = None) -> dict[str, Any]:
+    workspace_run = record.get("kind") == "workspace"
     ts = record["timestamps"]
     result = record.get("result") or {}
     status = record["status"]
@@ -174,9 +261,14 @@ def public_view(record: dict[str, Any], currency: dict[str, Any] | None = None) 
                    "queue_delay_seconds": (round(ts["started_at"] - ts["created_at"], 3) if ts.get("started_at") else None),
                    "result_expires_at": _iso(record.get("expires_at"))},
         "artifact": record.get("artifact"),
-        "tests_ran_against": "reviewer_overlay_applied_to_pr_tree" if record["overlay"].get("applied") else "unmodified_pr_tree",
+        "tests_ran_against": ("workspace_tree" if workspace_run else
+                              "reviewer_overlay_applied_to_pr_tree" if record["overlay"].get("applied") else "unmodified_pr_tree"),
         "github_mutations": "none",
     }
+    if workspace_run:
+        view["kind"] = "workspace"
+        view["workspace"] = {**record["revisions"], "tested_tree": record["trees"]["effective_tree"],
+                             "source_tree": record["trees"]["source_tree"]}
     if status in TERMINAL:
         view.update({k: result.get(k) for k in ("failure", "counts", "tests", "tests_total", "tests_truncated",
                                                   "selector_coverage", "overlay_coverage", "log", "execution", "runner",
@@ -191,11 +283,14 @@ def public_view(record: dict[str, Any], currency: dict[str, Any] | None = None) 
     return view
 
 
-def fetch_test_result(client: GitHubClient, repo: str, run_id: str, *, service: JobService, owner: str) -> dict[str, Any]:
+def fetch_test_result(client: GitHubClient, repo: str, run_id: str, *, service: JobService, owner: str,
+                      workspaces: Any | None = None) -> dict[str, Any]:
     record = service.get(run_id)
     # One indistinguishable error for unknown ids and other callers' runs.
     if record is None or record["owner"] != owner or record["repo"].casefold() != repo.casefold():
         raise ValidationError("Unknown run_id.")
+    if record.get("kind") == "workspace":
+        return public_view(record, _workspace_currency(record, workspaces))
     currency = _currency(client, record)
     if currency["pr_state"] in {"closed", "merged"}:
         grace = service.clock() + service.cfg.closed_grace_hours * 3600

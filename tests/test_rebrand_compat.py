@@ -134,13 +134,15 @@ def test_canonical_commands_and_temporary_aliases_point_at_the_same_functions():
     assert metadata.version("odytor") == __version__ == "0.1.0"
 
 
-def test_mcp_identity_is_odytor_and_exactly_the_same_eight_tools():
+def test_mcp_identity_is_odytor_and_keeps_the_original_eight_tools():
     settings = Settings(github_token="t", github_api_url="https://api.github.com", auth_token=None, default_max_diff_lines=500,
                         default_max_diff_bytes=1048576, allowed_repositories=())
     server = create_server(settings)
     assert server.name == "Odytor"
     tools = {t.name: t.annotations.model_dump(exclude_none=True, by_alias=True) for t in asyncio.run(server.list_tools())}
-    assert set(tools) == {"pr_evidence", "ci_diagnose", "pr_conflicts", "quick_fix", "pr_rebase", "ci_control", "test_run", "test_result"}
+    ORIGINAL = {"pr_evidence", "ci_diagnose", "pr_conflicts", "quick_fix", "pr_rebase", "ci_control", "test_run", "test_result"}
+    assert ORIGINAL <= set(tools)  # the original eight stay, by name
+    assert set(tools) - ORIGINAL == {"odytor_capabilities", "workspace_create", "workspace_read", "workspace_search", "workspace_edit", "workspace_diff", "workspace_run", "workspace_manage", "test_cancel"}
     assert tools["pr_evidence"]["readOnlyHint"] is True and tools["pr_rebase"]["destructiveHint"] is True
     assert tools["quick_fix"]["readOnlyHint"] is False and tools["test_result"]["readOnlyHint"] is True
 

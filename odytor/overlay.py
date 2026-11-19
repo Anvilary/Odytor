@@ -39,6 +39,7 @@ class OverlaySummary:
     sha256: str
     patch_bytes: int
     canonical: str = ""  # the exact text that was validated, hashed and is applied (trailing blank lines stripped)
+    deleted_files: tuple[str, ...] = ()
 
     @property
     def test_files(self) -> tuple[str, ...]:
@@ -101,10 +102,19 @@ def _scan_body(lines: list[str], start: int) -> tuple[int, int, int]:
 
 
 def validate_overlay(patch: Any, test_dirs: tuple[str, ...], *, max_bytes: int) -> OverlaySummary:
+    """Reviewer overlay policy: test directories only, a fixed file-type allowlist, no deletions, mode 100644 only."""
+    return parse_patch(patch, check_path=lambda path: validate_overlay_path(path, test_dirs), max_bytes=max_bytes)
+
+
+def parse_patch(patch: Any, *, check_path, max_bytes: int, allow_delete: bool = False,
+                modes: tuple[str, ...] = ("100644",), max_files: int = MAX_FILES,
+                max_changed_lines: int = MAX_CHANGED_LINES) -> OverlaySummary:
     """Parse strictly: only regular-file additions and modifications, exact hunk counts, no metadata changes.
 
-    Every rejection names its stage and failing line (see `_reject`). The parser accepts exactly what it
-    always accepted; the only normalization is dropping blank lines after the final hunk.
+    The caller supplies the path policy (`check_path` returns the path or raises SecurityError); this parser
+    owns the structure. Every rejection names its stage and failing line (see `_reject`). Deletions are
+    accepted only when `allow_delete` is set and only for whole regular files. The only normalization is
+    dropping blank lines after the final hunk.
     """
     if not isinstance(patch, str) or not patch.strip():
         raise ValidationError("test_overlay must be a non-empty unified diff.", {"stage": "input"})
@@ -124,6 +134,8 @@ def validate_overlay(patch: Any, test_dirs: tuple[str, ...], *, max_bytes: int) 
         raise ValidationError(f"Overlay exceeds the {max_bytes}-byte limit.", {"stage": "input", "bytes": len(encoded), "max_bytes": max_bytes})
     files: list[str] = []
     new_files: list[str] = []
+    deleted: list[str] = []
+    mode_pattern = "|".join(re.escape(m) for m in modes)
     added = removed = 0
     i = 0
     while i < len(lines):
@@ -136,29 +148,35 @@ def validate_overlay(patch: Any, test_dirs: tuple[str, ...], *, max_bytes: int) 
         if match[1] != match[2]:
             _reject(ValidationError, "file_header", "Renames and differing paths are not permitted; a and b paths must be identical.", lines, i)
         try:
-            path = validate_overlay_path(match[1], test_dirs)
+            path = check_path(match[1])
         except SecurityError as exc:
             _reject(SecurityError, "path", exc.message, lines, i)
         if path in files:
             _reject(ValidationError, "file_header", f"Duplicate path in overlay: {path}.", lines, i)
         files.append(path)
-        if len(files) > MAX_FILES:
-            _reject(ValidationError, "limits", f"Overlay touches more than {MAX_FILES} files.", lines, i)
+        if len(files) > max_files:
+            _reject(ValidationError, "limits", f"Patch touches more than {max_files} files.", lines, i)
         i += 1
-        is_new = False
+        is_new = is_del = False
         if i < len(lines) and lines[i].startswith("new file mode "):
             if lines[i] != "new file mode 100644":
                 _reject(SecurityError, "file_mode", "New files must be regular and non-executable (mode 100644).", lines, i)
             is_new = True
             new_files.append(path)
             i += 1
+        elif allow_delete and i < len(lines) and lines[i].startswith("deleted file mode "):
+            if lines[i] not in {f"deleted file mode {m}" for m in modes}:
+                _reject(SecurityError, "file_mode", "Only regular files can be deleted.", lines, i)
+            is_del = True
+            deleted.append(path)
+            i += 1
         if i < len(lines) and lines[i].startswith("index "):
-            if not re.fullmatch(r"index [0-9a-f]{4,64}\.\.[0-9a-f]{4,64}(?: 100644)?", lines[i]):
-                _reject(SecurityError, "file_mode", "Unsupported index header (modes other than 100644 are rejected).", lines, i)
+            if not re.fullmatch(rf"index [0-9a-f]{{4,64}}\.\.[0-9a-f]{{4,64}}(?: (?:{mode_pattern}))?", lines[i]):
+                _reject(SecurityError, "file_mode", f"Unsupported index header (only modes {', '.join(modes)} are accepted).", lines, i)
             i += 1
         if i < len(lines) and re.match(r"(deleted file|old mode|new mode|rename |copy |similarity |dissimilarity |Binary|GIT binary)", lines[i]):
             _reject(SecurityError, "file_mode", "Deletions, renames, copies, mode changes and binary changes are not permitted.", lines, i)
-        expected = ["--- /dev/null" if is_new else f"--- a/{path}", f"+++ b/{path}"]
+        expected = ["--- /dev/null" if is_new else f"--- a/{path}", "+++ /dev/null" if is_del else f"+++ b/{path}"]
         if lines[i:i + 2] != expected:
             _reject(ValidationError, "file_markers", f"Expected the markers {expected[0]!r} then {expected[1]!r}.", lines, i)
         i += 2
@@ -169,6 +187,8 @@ def validate_overlay(patch: Any, test_dirs: tuple[str, ...], *, max_bytes: int) 
                 _reject(ValidationError, "hunk_header", "Malformed hunk header; expected `@@ -a,b +c,d @@`.", lines, i)
             if is_new and (hunks or header[1] != "0" or header[2] != "0" or header[3] != "1"):
                 _reject(ValidationError, "hunk_header", "A new file must be a single hunk of the form @@ -0,0 +1,N @@.", lines, i)
+            if is_del and (hunks or header[1] != "1" or header[3] != "0" or header[4] != "0"):
+                _reject(ValidationError, "hunk_header", "A deleted file must be a single hunk of the form @@ -1,N +0,0 @@.", lines, i)
             old_left, new_left = int(header[2] or 1), int(header[4] or 1)
             declared = (old_left, new_left)
             if old_left + new_left == 0:
@@ -191,7 +211,7 @@ def validate_overlay(patch: Any, test_dirs: tuple[str, ...], *, max_bytes: int) 
                 new_left -= kind in " +"
                 added += kind == "+"
                 removed += kind == "-"
-                if min(old_left, new_left) < 0 or (is_new and kind != "+"):
+                if min(old_left, new_left) < 0 or (is_new and kind != "+") or (is_del and kind != "-"):
                     found_old, found_new, _ = _scan_body(lines, body_start)
                     _reject(ValidationError, "hunk_count", f"The hunk declares {declared[0]} old and {declared[1]} new lines "
                             f"but the body has at least {found_old} old and {found_new} new.", lines, i,
@@ -212,9 +232,10 @@ def validate_overlay(patch: Any, test_dirs: tuple[str, ...], *, max_bytes: int) 
             _reject(ValidationError, "hunk_header", "Missing change hunk.", lines, min(i, len(lines) - 1))
     if not files or added + removed == 0:
         raise ValidationError("Overlay has no changes.", {"stage": "input"})
-    if added + removed > MAX_CHANGED_LINES:
-        raise ValidationError(f"Overlay changes more than {MAX_CHANGED_LINES} lines.", {"stage": "limits"})
-    return OverlaySummary(tuple(files), tuple(new_files), added, removed, hashlib.sha256(encoded).hexdigest(), len(encoded), canonical)
+    if added + removed > max_changed_lines:
+        raise ValidationError(f"Patch changes more than {max_changed_lines} lines.", {"stage": "limits"})
+    return OverlaySummary(tuple(files), tuple(new_files), added, removed, hashlib.sha256(encoded).hexdigest(), len(encoded),
+                          canonical, tuple(deleted))
 
 
 def apply_overlay(work: GitWorkspace, tree: str, summary: OverlaySummary, patch: str) -> str:

@@ -122,7 +122,7 @@ def verify_context(client: GitHubClient, repo: str, number: int, context: dict[s
 class GitWorkspace:
     """Never inherit Git config, hooks, helpers, filters or trace settings."""
 
-    def __init__(self, client: GitHubClient, identity: tuple[str, str] | None = None):
+    def __init__(self, client: GitHubClient | None, identity: tuple[str, str] | None = None):
         self.client = client
         self.identity = identity
         self.root: Path | None = None
@@ -148,7 +148,7 @@ class GitWorkspace:
                     write: bool = False) -> dict[str, str]:
         env = {k: os.environ[k] for k in ('PATH', 'SYSTEMROOT', 'LANG') if k in os.environ}
         env.update(HOME=str(self.root), XDG_CONFIG_HOME=str(self.root),
-                   GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
+                   GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull, GIT_LITERAL_PATHSPECS='1',
                    GIT_TERMINAL_PROMPT='0', GIT_ASKPASS='/bin/false', GIT_ATTR_NOSYSTEM='1',
                    GIT_AUTHOR_NAME='Odytor', GIT_AUTHOR_EMAIL='noreply@odytor.invalid',
                    GIT_COMMITTER_NAME='Odytor', GIT_COMMITTER_EMAIL='noreply@odytor.invalid')
@@ -160,7 +160,7 @@ class GitWorkspace:
             if not credential_repo:
                 raise SecurityError("Scoped Git network operations require an explicit repository.")
             validate_repo(credential_repo)
-        use_token = bool(network and self.client.token)
+        use_token = bool(network and getattr(self.client, 'token', None))
         if use_token and getattr(self.client, 'restricted_repo', None):
             # Contributor forks are anonymous unless this is the one granted push.
             grant = getattr(self.client, 'fork_grant', None)
@@ -190,7 +190,8 @@ class GitWorkspace:
         return ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.attributesFile=/dev/null',
                 '-c', 'credential.helper=', '-c', 'protocol.allow=never', '-c', 'protocol.https.allow=always',
                 '-c', 'http.followRedirects=false', '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false',
-                '-c', 'core.autocrlf=false', '-c', 'core.fsmonitor=false', *args]
+                '-c', 'core.autocrlf=false', '-c', 'core.fsmonitor=false',
+                '-c', 'gc.auto=0', '-c', 'maintenance.auto=false', *args]
 
     def git(self, *args: str, input: bytes | None = None, network: bool = False,
             credential_repo: str | None = None, allowed: tuple[int, ...] = (0,),
@@ -210,8 +211,9 @@ class GitWorkspace:
             raise GitOperationError("Git operation failed or timed out.") from exc
         if result.returncode not in allowed:
             text = result.stderr.decode('utf-8', errors='replace')
-            if self.client.token:
-                text = text.replace(self.client.token, '[REDACTED]')
+            token = getattr(self.client, 'token', None)
+            if token:
+                text = text.replace(token, '[REDACTED]')
             raise GitOperationError(f"Git {args[0]} failed: {safe_text(text, 1024)}")
         return result.stdout
 

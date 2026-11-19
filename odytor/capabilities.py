@@ -21,9 +21,10 @@ from odytor import __version__
 from odytor.config import Settings
 from odytor.profile import PROFILES, RepoPolicy
 
-# Every MCP tool this build registers. tests/test_capabilities.py proves this matches the live catalogue.
-CORE_TOOLS = ("pr_evidence", "ci_diagnose", "quick_fix", "pr_conflicts", "pr_rebase", "ci_control")
-RUNNER_TOOLS = ("test_run", "test_result")
+# Tools that cannot work without a configured runner; the server registers them either way and explains why.
+RUNNER_TOOLS = ("test_run", "test_result", "workspace_run", "test_cancel")
+WORKSPACE_TOOLS = ("workspace_create", "workspace_read", "workspace_search", "workspace_edit", "workspace_diff",
+                   "workspace_run", "workspace_manage")
 RUNNER_PROTOCOL = 1
 
 
@@ -62,8 +63,8 @@ def _capability(name: str, *, installed: bool, configured: bool, operational: bo
 
 
 def describe(cfg: Settings, *, policies: dict[str, RepoPolicy], service: Any | None, remote: bool, principal: str | None,
-             repo: str | None = None, probe: bool = False, extra_tools: tuple[str, ...] = (),
-             runner_facts: dict[str, Any] | None = None) -> dict[str, Any]:
+             repo: str | None = None, probe: bool = False, operations: tuple[str, ...] = (),
+             workspaces_enabled: bool = False, runner_facts: dict[str, Any] | None = None) -> dict[str, Any]:
     """Assemble the report. `runner_facts` (a probe result) is supplied only when the caller asked for a live probe."""
     runs = cfg.testing
     repo_key = repo.strip().casefold() if repo else None
@@ -86,14 +87,24 @@ def describe(cfg: Settings, *, policies: dict[str, RepoPolicy], service: Any | N
                  f"Repository '{repo}' has no maintainer test policy." if repo and policy is None else
                  "The runner did not pass its live probe." if operational is False else None)),
         runner=runner_state)
+    workspace = _capability(
+        "workspaces", installed=True, configured=workspaces_enabled, operational=None,
+        authorized=(None if repo is None else bool(repo_allowed)),
+        reason=("Workspaces are disabled on this server (ODYTOR_WORKSPACES=off)." if not workspaces_enabled else
+                f"Repository '{repo}' is not permitted by this server." if repo_allowed is False else None),
+        executes_code=False, tools=[t for t in WORKSPACE_TOOLS if t in operations and t != "workspace_run"])
+    no_runner = runs is None
+    unavailable = [{"name": n, "reason": "isolated runner not configured"} for n in RUNNER_TOOLS if no_runner and n in operations]
+    unavailable += [{"name": n, "reason": "workspaces are disabled"} for n in WORKSPACE_TOOLS
+                    if not workspaces_enabled and n in operations and n != "workspace_run"]
     return {
         "odytor": {"version": __version__, "license": "PolyForm-Noncommercial-1.0.0", **source_revision()},
         "transport": "remote" if remote else "local_stdio",
         "caller": {"principal": principal, "repository": repo, "repository_permitted": repo_allowed,
                    "test_policy_present": None if repo is None else policy is not None},
-        "operations": sorted({*CORE_TOOLS, *(RUNNER_TOOLS if runs is not None else ()), *extra_tools}),
-        "operations_unavailable": ([{"name": n, "reason": "isolated runner not configured"} for n in RUNNER_TOOLS] if runs is None else []),
-        "capabilities": [execution],
+        "operations": sorted(operations),
+        "operations_unavailable": unavailable,
+        "capabilities": [execution, workspace],
         "execution_profiles": [{"name": name, "version": version} for name, version in sorted(PROFILES.items())],
         "runner_protocol": RUNNER_PROTOCOL,
         "limits": {
@@ -109,5 +120,5 @@ def describe(cfg: Settings, *, policies: dict[str, RepoPolicy], service: Any | N
         "artifact_formats": [],
         "known_unavailable": [
             {"capability": "browser", "reason": "No browser execution profile is installed in this build."},
-            {"capability": "workspaces", "reason": "No workspace tools are registered in this build."}],
+            {"capability": "publication", "reason": "Guarded publication of workspace changes is not installed in this build."}],
     }
