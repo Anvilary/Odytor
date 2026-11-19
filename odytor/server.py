@@ -1,8 +1,13 @@
 """One MCP server with request-scoped GitHub credentials."""
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Annotated, Any, Literal
 from fastmcp import FastMCP
+from fastmcp.tools import ToolResult
+from fastmcp.utilities.types import Image
+from mcp.types import TextContent
 from pydantic import Field
 
 from odytor.auth import caller_principal, create_auth, github_client
@@ -21,6 +26,9 @@ from odytor.github import validate_repo
 from odytor.jobs import JobService
 from odytor.profile import PROFILE_NAME, load_policies
 from odytor.run_tests import cancel_test_run, fetch_test_result, submit_test_run, submit_workspace_run
+from odytor.artifacts import ArtifactLimits, ArtifactStore
+from odytor.browser import SessionStore, submit_browser_run, wait_for_run
+from odytor.publish import PlanStore, apply_publication, plan_publication
 from odytor.workspace import SOURCES, WorkspaceService, open_workspace
 
 RUNNER_NOT_CONFIGURED = (
@@ -130,7 +138,12 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
 
     runs = cfg.testing
     policies = load_policies(runs.policies_path) if runs else {}
-    service = JobService(runs) if runs else None
+    artifact_store = (ArtifactStore(cfg.artifacts.data_dir, ArtifactLimits(
+        max_artifact_bytes=cfg.artifacts.max_artifact_bytes, max_image_delivery_bytes=cfg.artifacts.max_image_delivery_bytes,
+        max_owner_bytes=cfg.artifacts.max_owner_bytes, max_total_bytes=cfg.artifacts.max_total_bytes,
+        retention_hours=cfg.artifacts.retention_hours)) if cfg.artifacts else None)
+    service = JobService(runs, artifacts=artifact_store) if runs else None
+    mcp.artifact_store = artifact_store
     mcp.test_service = service  # lets operators and tests shut the worker down deterministically
 
     def invoke_runs(repo, operation, *args, **kwargs):
@@ -177,7 +190,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
     workspaces = WorkspaceService(cfg.workspaces) if cfg.workspaces else None
     mcp.workspace_service = workspaces
 
-    def invoke_ws(workspace_id, call, *, operation=None):
+    def invoke_ws(workspace_id, call, *, limit=None):
         """Bind a workspace call to the authenticated caller; unknown, foreign and expired ids look identical."""
         if workspaces is None:
             return safe_payload(ValidationError("Workspaces are disabled on this server (ODYTOR_WORKSPACES=off).").to_dict())
@@ -188,12 +201,12 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                 raise ValidationError("Unknown workspace_id.")
             if not cfg.is_repo_allowed(record["repo"]):
                 raise SecurityError("This workspace's repository is no longer permitted by Odytor configuration.")
-            return safe_payload(call(owner))
+            return safe_payload(call(owner), **({"limit": limit} if limit else {}))
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 
     @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
-          description="Create a disposable engineering workspace at an exact revision: source='pr_head' (number + expected_head), 'prospective_merge' (number + expected_head + expected_base, which must be the live target-branch tip) or 'branch' (branch + expected_sha). Nothing is written to GitHub. The result carries workspace_id, version 0, the exact tree and the source revisions; every later workspace call echoes workspace_id, version and tree. Workspaces expire, are bounded in size and count, and belong to the authenticated caller. Optional operations narrows what this workspace may do (read, search, edit, diff, execute, artifacts, manage).")
+          description="Create a disposable engineering workspace at an exact revision: source='pr_head' (number + expected_head), 'prospective_merge' (number + expected_head + expected_base, which must be the live target-branch tip) or 'branch' (branch + expected_sha). Nothing is written to GitHub. The result carries workspace_id, version 0, the exact tree and the source revisions; every later workspace call echoes workspace_id, version and tree. Workspaces expire, are bounded in size and count, and belong to the authenticated caller. Optional operations narrows what this workspace may do (read, search, edit, diff, execute, artifacts, manage, publish). A workspace can never publish to GitHub unless 'publish' is listed here explicitly; it is not part of the default scope.")
     def workspace_create(repo: str, source: Literal["pr_head", "prospective_merge", "branch"] = "pr_head", number: Number | None = None,
                          expected_head: SHA | None = None, expected_base: SHA | None = None, branch: str | None = None,
                          expected_sha: SHA | None = None, operations: list[str] | None = None) -> dict[str, Any]:
@@ -268,10 +281,13 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
           description="Show the workspace's complete effective change against its source revision (against='source') or a checkpoint: per-file status and line counts, the patch in pageable windows (diff_offset via offset, max_lines), and patch_sha256 / patch_bytes covering the whole patch. The result names the base tree and current tree, so the exact change is identified.")
     def workspace_diff(workspace_id: WorkspaceId, against: str = "source", path: str = "",
                        max_lines: Annotated[int, Field(ge=1, le=5000)] = 400, offset: Annotated[int, Field(ge=0)] = 0) -> dict[str, Any]:
-        return invoke_ws(workspace_id, lambda owner: workspaces.diff(workspace_id, owner, against=against, path=path, max_lines=max_lines, offset=offset))
+        # The patch window is bounded by max_lines and the response budget, so it gets a string limit to match
+        # (the default 8 KiB per string would cut it mid-hunk).
+        return invoke_ws(workspace_id, lambda owner: workspaces.diff(workspace_id, owner, against=against, path=path, max_lines=max_lines, offset=offset),
+                         limit=262144)
 
     @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
-          description="Queue an isolated pytest run on the exact current tree of a workspace (expected_version must match, so you test what you last saw). The tree is snapshotted at submission: later edits never change a running test. Same isolation, profile and selector rules as test_run; no arbitrary commands. Poll test_result with the returned run_id; the result names the workspace version and tree that was tested. Requires a configured runner and a maintainer test policy for the repository.")
+          description="Queue an isolated test run on the exact current tree of a workspace (expected_version must match, so you test what you last saw). profile is python-pytest (default; selectors are pytest paths or node ids) or node-test (node --test; selectors are .mjs/.cjs/.js files or directories), each only if the maintainer policy enables it. The tree is snapshotted at submission: later edits never change a running test. Same isolation as test_run: no network, no arbitrary commands or flags. Browser scenarios use browser_run. Poll test_result with the returned run_id; the result names the workspace version and tree that was tested. Requires a configured runner and a maintainer test policy for the repository.")
     def workspace_run(workspace_id: WorkspaceId, expected_version: Annotated[int, Field(ge=0)], profile: str = PROFILE_NAME,
                       selectors: list[str] | None = None) -> dict[str, Any]:
         if service is None:
@@ -306,6 +322,118 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             return safe_payload(runner_not_configured())
         try:
             return safe_payload(cancel_test_run(run_id, service=service, owner=caller_principal(cfg, remote)))
+        except GitPlusError as err:
+            return safe_payload(err.to_dict())
+
+    sessions = SessionStore(Path(cfg.workspaces.data_dir) / "sessions") if cfg.workspaces else None
+
+    def as_result(payload: dict[str, Any], images: list[tuple[str, bytes]] | None = None, *, limit: int | None = None) -> ToolResult:
+        """Structured evidence plus native MCP image content; images never travel as base64 inside JSON.
+
+        `limit` is the per-string bound; windows such as a 64 KiB text page or a base64 chunk must not be clipped
+        by the default 8 KiB, which would hand the caller silently corrupted data.
+        """
+        payload = safe_payload(payload, **({"limit": limit} if limit else {}))
+        content: list[Any] = [TextContent(type="text", text=json.dumps(payload, separators=(",", ":")))]
+        for mime, data in images or []:
+            content.append(Image(data=data, format=mime.split("/", 1)[1]).to_image_content())
+        return ToolResult(content=content, structured_content=payload)
+
+    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+          description="Drive Chromium against the application in a workspace, inside the isolated sandbox with no network. The exact current workspace tree is served (expected_version must match); steps are typed and bounded: goto (a path like /index.html), click, fill, type, press, select, check, uncheck, hover, wait_for, wait_ms, screenshot (name), snapshot (accessibility tree and text), assert_visible, assert_hidden, assert_text, assert_count, assert_requests (count requests to an exact path), reset_network_counts. There is no arbitrary JavaScript and no external navigation. mocks fake API responses ({path, json|body, status}). The first call opens a session (session_id in the result); pass session_id to continue: earlier accepted steps are replayed in a fresh sandbox and only steps that succeed join the history. Returns step results, console and page errors, network summary (requests per path), snapshots and screenshots as native image content. Status 'passed' needs every step ok and at least one assertion; 'completed' means exploration without assertions and is not a validation result. Requires a configured runner whose image has Chromium and a maintainer policy enabling browser-playwright for the repository.")
+    def browser_run(workspace_id: WorkspaceId, expected_version: Annotated[int, Field(ge=0)], steps: list[dict[str, Any]],
+                    session_id: Annotated[str | None, Field(pattern=r"^bs-[0-9a-f]{32}$")] = None,
+                    mocks: list[dict[str, Any]] | None = None, viewport: dict[str, int] | None = None, locale: str | None = None,
+                    timezone: str | None = None, color_scheme: Literal["light", "dark"] | None = None, trace: bool | None = None,
+                    wait_seconds: Annotated[int, Field(ge=0, le=300)] = 90,
+                    include_images: Annotated[int, Field(ge=0, le=4)] = 2) -> ToolResult:
+        if service is None:
+            return as_result(runner_not_configured())
+        if workspaces is None or sessions is None:
+            return as_result(ValidationError("Workspaces are disabled on this server.").to_dict())
+        try:
+            owner = caller_principal(cfg, remote)
+            record = workspaces.peek(workspace_id, owner)
+            if record is None:
+                raise ValidationError("Unknown workspace_id.")
+            if not cfg.is_repo_allowed(record["repo"]):
+                raise SecurityError("This workspace's repository is no longer permitted by Odytor configuration.")
+            submitted = submit_browser_run(record["repo"], workspace_id, expected_version, steps, workspaces=workspaces, sessions=sessions,
+                                           service=service, policies=policies, owner=owner, cfg=runs, session_id=session_id, mocks=mocks,
+                                           viewport=viewport, locale=locale, timezone=timezone, color_scheme=color_scheme, trace=trace)
+            final = wait_for_run(service, submitted["run_id"], wait_seconds)
+            if final is None:
+                return as_result({**submitted, "note": "Still running. Poll test_result with run_id; artifacts appear when it finishes."})
+            view = fetch_test_result(None, record["repo"], submitted["run_id"], service=service, owner=owner, workspaces=workspaces)
+            # reading the session commits the accepted steps into its history
+            session = sessions.public(sessions.get(submitted["session"]["session_id"], owner, service=service))
+            images = []
+            for meta in [a for a in (view.get("artifacts") or []) if a.get("kind") == "screenshot" and "artifact_id" in a][-include_images:] if include_images else []:
+                delivered = artifact_store.content(meta["artifact_id"], owner) if artifact_store else {}
+                if "image" in delivered:
+                    images.append(delivered["image"])
+            return as_result({**view, "session": session}, images, limit=16000)
+        except GitPlusError as err:
+            return as_result(err.to_dict())
+
+    @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
+          description="Close a browser session and discard its step history. Browser runs hold no process or container between calls, so closing only releases the session record.")
+    def browser_close(session_id: Annotated[str, Field(pattern=r"^bs-[0-9a-f]{32}$")]) -> dict[str, Any]:
+        if sessions is None:
+            return safe_payload(ValidationError("Workspaces are disabled on this server.").to_dict())
+        try:
+            return safe_payload(sessions.close(session_id, caller_principal(cfg, remote)))
+        except GitPlusError as err:
+            return safe_payload(err.to_dict())
+
+    @tool(annotations={"readOnlyHint": True, "openWorldHint": False},
+          description="Retrieve an evidence artifact you produced (screenshot, log, trace) by artifact_id. mode='auto' delivers images as native image content and text as a window; 'text' pages text (offset, length, up to 64 KiB); 'base64' pages any artifact in bounded chunks (use this if your client cannot show images, or for traces); 'metadata' returns the record only. Active content such as HTML or SVG is returned only as inert, labelled-untrusted text. Artifacts record the run, workspace version and exact tested tree, carry a SHA-256, and expire.")
+    def artifact_get(artifact_id: Annotated[str, Field(pattern=r"^ar-[0-9a-f]{32}$")], mode: Literal["auto", "metadata", "text", "base64"] = "auto",
+                     offset: Annotated[int, Field(ge=0)] = 0, length: Annotated[int | None, Field(ge=1)] = None) -> ToolResult:
+        if artifact_store is None:
+            return as_result(ValidationError("Artifact storage is disabled on this server (ODYTOR_ARTIFACTS=off).").to_dict())
+        try:
+            delivered = artifact_store.content(artifact_id, caller_principal(cfg, remote), mode=mode, offset=offset, length=length)
+        except GitPlusError as err:
+            return as_result(err.to_dict())
+        image = delivered.pop("image", None)
+        return as_result(delivered, [image] if image else None, limit=70000)
+
+    plans = PlanStore(Path(cfg.workspaces.data_dir) / "plans") if cfg.workspaces else None
+
+    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+          description="Prepare, without performing, the publication of a workspace's changes as ONE additive commit on its PR's head branch. Requires a workspace opened with source='pr_head' and the 'publish' operation in its scope. Binds the exact workspace version and tree, the complete patch (patch_sha256, inline when small), the expected remote head, your commit message, the validation runs recorded for that very tree and the known limitations. Changed paths must pass the same write policy as quick_fix (no CI or workflow files, dependency manifests, scripts, key material, sensitive names). Nothing is written to GitHub. Show the plan to the user; apply it only with publish_apply after their explicit approval.")
+    def publish_plan(workspace_id: WorkspaceId, expected_version: Annotated[int, Field(ge=0)], commit_message: str) -> dict[str, Any]:
+        if workspaces is None or plans is None:
+            return safe_payload(ValidationError("Workspaces are disabled on this server.").to_dict())
+        try:
+            owner = caller_principal(cfg, remote)
+            record = workspaces.peek(workspace_id, owner)
+            if record is None:
+                raise ValidationError("Unknown workspace_id.")
+            if not cfg.is_repo_allowed(record["repo"]):
+                raise SecurityError("This workspace's repository is no longer permitted by Odytor configuration.")
+            with github_client(cfg, remote, repo=record["repo"]) as client:
+                return safe_payload(plan_publication(client, record["repo"], workspace_id, expected_version, commit_message, workspaces=workspaces,
+                                                     plans=plans, jobs=service, owner=owner, max_files=cfg.quick_fix_max_files,
+                                                     max_changed_lines=cfg.quick_fix_max_changed_lines, max_patch_bytes=cfg.quick_fix_max_patch_bytes),
+                                    limit=70000)
+        except GitPlusError as err:
+            return safe_payload(err.to_dict())
+
+    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+          description="The only tool that writes workspace changes to GitHub: appends the planned commit to the PR head branch. Needs user_authorized=true (only after the user explicitly approved this exact plan) and confirm equal to the plan's confirmation text, which names the tree and patch digest. Refuses if the workspace changed since planning, the recomputed patch differs, or the PR head moved. Same-repository branches use GitHub's atomic expected-head check; contributor forks use a leased fast-forward push with the authenticated user's attribution and GitHub-confirmed maintainer access. Never force-pushes, merges, approves or comments. A plan applies at most once: repeats return the earlier result, and after an uncertain outcome calling this again reconciles against the real remote before writing anything.")
+    def publish_apply(plan_id: Annotated[str, Field(pattern=r"^pp-[0-9a-f]{32}$")], confirm: str, user_authorized: bool = False) -> dict[str, Any]:
+        if workspaces is None or plans is None:
+            return safe_payload(ValidationError("Workspaces are disabled on this server.").to_dict())
+        try:
+            owner = caller_principal(cfg, remote)
+            plan = plans.get(plan_id, owner)
+            if not cfg.is_repo_allowed(plan["repo"]):
+                raise SecurityError("This plan's repository is no longer permitted by Odytor configuration.")
+            with github_client(cfg, remote, repo=plan["repo"]) as client:
+                return safe_payload(apply_publication(client, plan["repo"], plan_id, confirm, user_authorized, workspaces=workspaces, plans=plans,
+                                                      jobs=service, owner=owner), limit=70000)
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 

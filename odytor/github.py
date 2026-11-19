@@ -41,7 +41,7 @@ def validate_sha(sha: str, name: str = "commit SHA") -> str:
     return cleaned.lower()
 
 
-FORK_WRITE_OPERATIONS = frozenset({"quick_fix"})
+FORK_WRITE_OPERATIONS = frozenset({"quick_fix", "workspace_publish"})
 
 
 @dataclass(frozen=True)

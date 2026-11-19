@@ -39,7 +39,9 @@ SCHEMA = 1
 POLICY_VERSION = 1
 WS_ID = re.compile(r"ws-[0-9a-f]{32}")
 CHECKPOINT_NAME = re.compile(r"[a-z0-9][a-z0-9_.-]{0,39}")
-ALL_OPERATIONS = ("read", "search", "edit", "diff", "execute", "artifacts", "manage")
+ALL_OPERATIONS = ("read", "search", "edit", "diff", "execute", "artifacts", "manage", "publish")
+# "publish" is the only operation that can lead to a GitHub write, so a workspace never has it unless the creator asks for it by name.
+DEFAULT_OPERATIONS = tuple(op for op in ALL_OPERATIONS if op != "publish")
 MAX_HISTORY = 50
 MAX_PATH_BYTES = 400
 READ_MAX_LINES = 400
@@ -214,7 +216,7 @@ class WorkspaceService:
             raise ValidationError("The workspace store is full; retry after workspaces expire or are closed.")
         if shutil.disk_usage(self.root).free < self.cfg.min_free_bytes + self.cfg.max_workspace_bytes:
             raise ValidationError("Insufficient disk space to create a workspace.")
-        scope = tuple(dict.fromkeys(operations or ALL_OPERATIONS))
+        scope = tuple(dict.fromkeys(operations or DEFAULT_OPERATIONS))
         if not set(scope) <= set(ALL_OPERATIONS):
             raise ValidationError(f"operations must be a subset of: {', '.join(ALL_OPERATIONS)}.")
         ws_id = new_workspace_id()

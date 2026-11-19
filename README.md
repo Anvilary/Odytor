@@ -36,7 +36,8 @@ Odytor solves these challenges through eight focused, unbranded MCP tools that e
 
 ## Capabilities
 
-Odytor exposes eight unbranded tools that form the stable MCP contract.
+Odytor exposes eight original tools that form the stable MCP contract, plus tools for disposable engineering workspaces,
+browser evidence, artifacts and guarded publication. The tool names of the original eight are unchanged.
 
 | Tool | Mode | Description |
 | --- | --- | --- |
@@ -49,11 +50,24 @@ Odytor exposes eight unbranded tools that form the stable MCP contract.
 | [`test_run`](docs/tools.md#test_run) | Execution | Queue an isolated pytest run against an exact PR head or merge tree, with optional reviewer test overlays. |
 | [`test_result`](docs/tools.md#test_result) | Read-only | Retrieve per-test evidence, tested tree, overlay digest, and runner cache status. |
 
+**Remote engineering workspace** (additive; see [Workspaces](docs/workspaces.md)):
+
+| Tool | Mode | Description |
+| --- | --- | --- |
+| `odytor_capabilities` | Read-only | What this deployment can actually do: installed, configured, observed-operational and authorized, per capability. |
+| `workspace_create` / `workspace_manage` | Local state | Open a disposable workspace at an exact PR head, prospective merge or branch revision; list, extend, close. |
+| `workspace_read` / `workspace_search` / `workspace_diff` | Read-only | Tree, bounded file ranges, symbols, `git grep` and the complete effective diff. |
+| `workspace_edit` | Scratch only | Versioned `write`, `replace`, `delete`, `rename`, `patch`, `checkpoint`, `reset`; GitHub is never touched. |
+| `workspace_run` / `test_cancel` | Execution | Run `python-pytest` or `node-test` on the exact current tree; cancel queued or running work. |
+| [`browser_run`](docs/browser.md) / `browser_close` | Execution | Chromium against the application in the sandbox; steps, assertions, network evidence, screenshots as native image content. |
+| [`artifact_get`](docs/artifacts.md) | Read-only | Retrieve screenshots, logs and traces with provenance and integrity hashes. |
+| [`publish_plan` / `publish_apply`](docs/publishing.md) | Plan read-only / apply mutating | Prepare, then (after explicit user authorization) append one additive commit built from a workspace. |
+
 For complete parameter schemas, output fields, and windowing behavior, see the [Tool Reference](docs/tools.md).
 
 ### Operational Support by Deployment Mode
 
-All eight tools are registered in every deployment mode so MCP client tool discovery remains stable. Test execution tools require an isolated runner host.
+Every tool is registered in every deployment mode so MCP client tool discovery remains stable. Test execution, `workspace_run` and `browser_run` require an isolated runner host; workspace reading, searching, editing, diffing and capability discovery do not.
 
 | Deployment Mode | Investigation & Fixes (`pr_*`, `ci_*`, `quick_fix`) | Test Execution (`test_run`, `test_result`) |
 | --- | --- | --- |
@@ -174,7 +188,9 @@ For a comprehensive explanation of security boundaries and threat mitigations, s
 
 ## Documentation and Resources
 
-- **[Tool Reference](docs/tools.md)**: Exhaustive documentation for all eight tools, parameters, schemas, and large PR windowing.
+- **[Tool Reference](docs/tools.md)**: Exhaustive documentation for the original eight tools, parameters, schemas, and large PR windowing.
+- **[Workspaces](docs/workspaces.md)**, **[Browser](docs/browser.md)**, **[Artifacts](docs/artifacts.md)**, **[Publishing](docs/publishing.md)**: the remote engineering workspace.
+- **[Capability Matrix](docs/capability-matrix.md)**, **[Security Review](docs/security-review.md)**, **[Client Compatibility](docs/client-compatibility.md)**: what exists, what was verified, and what was not.
 - **[Security Model](docs/security.md)**: Defense in depth, revision guards, branch lease mechanics, and isolation boundaries.
 - **[Deployment and Integration](docs/deployment.md)**: Stdio configuration, Streamable HTTP setup, ChatGPT OAuth integration, and environment variables.
 - **[Test Runner Architecture](docs/test-runner.md)**: Protocol specifications, container sandboxing, SSH forced command, and policy configuration.

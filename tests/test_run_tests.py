@@ -275,7 +275,7 @@ def make_server(stack, monkeypatch, *, principal='alice', allowed=()):
     def fake_client(cfg, remote=False, *, repo=None):
         yield stack.client
     monkeypatch.setattr(server_module, 'github_client', fake_client)
-    monkeypatch.setattr(server_module, 'JobService', lambda cfg: stack.service)
+    monkeypatch.setattr(server_module, 'JobService', lambda cfg, **kw: stack.service)
     settings = Settings(github_token='t', github_api_url='https://api.github.com', auth_token=None, default_max_diff_lines=500,
                         default_max_diff_bytes=1048576, allowed_repositories=allowed, testing=stack.cfg)
     return create_server(settings)
@@ -344,4 +344,4 @@ def test_unconfigured_runner_explains_how_to_enable_it_and_that_other_tools_are_
         assert 'ODYTOR_TEST_RUNNER_COMMAND' in result['error'] and 'docs/test-runner.md' in result['error']
         assert 'do not need a runner' in result['error'] and 'workspace' in result['error']
     names = {t.name for t in asyncio.run(plain.list_tools())}
-    assert {'test_run', 'test_result'} <= names and len(names) == 17  # still discoverable; never silently removed
+    assert {'test_run', 'test_result'} <= names and len(names) == 22  # still discoverable; never silently removed

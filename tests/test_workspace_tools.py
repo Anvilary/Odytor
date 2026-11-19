@@ -10,7 +10,7 @@ from odytor.server import create_server
 from test_git_workspace import client_for, local_fetch, repository, run  # noqa: F401
 
 WORKSPACE_TOOLS = {'workspace_create', 'workspace_read', 'workspace_search', 'workspace_edit', 'workspace_diff',
-                   'workspace_run', 'workspace_manage', 'test_cancel'}
+                   'workspace_run', 'workspace_manage', 'test_cancel', 'browser_run', 'browser_close', 'artifact_get', 'publish_plan', 'publish_apply'}
 ORIGINAL_TOOLS = {'pr_evidence', 'ci_diagnose', 'quick_fix', 'pr_conflicts', 'pr_rebase', 'ci_control', 'test_run', 'test_result'}
 
 
@@ -58,9 +58,9 @@ def test_catalogue_adds_workspace_tools_and_keeps_the_original_eight(stack):
     listed = asyncio.run(tools())
     assert ORIGINAL_TOOLS <= listed.keys() and WORKSPACE_TOOLS <= listed.keys()
     read_only = {n for n, t in listed.items() if (t.annotations and t.annotations.read_only_hint)}
-    assert {'workspace_read', 'workspace_search', 'workspace_diff', 'odytor_capabilities'} <= read_only
+    assert {'workspace_read', 'workspace_search', 'workspace_diff', 'odytor_capabilities', 'artifact_get'} <= read_only
     # operations that change state, consume resources or delete are never presented as read-only
-    assert not ({'workspace_create', 'workspace_edit', 'workspace_run', 'workspace_manage', 'test_cancel'} & read_only)
+    assert not ({'workspace_create', 'workspace_edit', 'workspace_run', 'workspace_manage', 'test_cancel', 'browser_run', 'browser_close', 'publish_plan', 'publish_apply'} & read_only)
     assert listed['workspace_edit'].input_schema['required'] == ['workspace_id', 'expected_version', 'operation']
     assert listed['workspace_edit'].annotations.destructive_hint is False and listed['workspace_manage'].annotations.destructive_hint is True
     assert listed['workspace_create'].annotations.open_world_hint is True and listed['workspace_edit'].annotations.open_world_hint is False

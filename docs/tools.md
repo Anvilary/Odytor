@@ -1,6 +1,8 @@
 # Odytor Tool Reference
 
-Odytor exposes eight unbranded tools through the Model Context Protocol (MCP). The tool names form the stable MCP contract.
+Odytor exposes eight original tools through the Model Context Protocol (MCP); their names form the stable MCP contract. The tools for workspaces, browser runs, artifacts and publication are documented in [workspaces](workspaces.md), [browser](browser.md), [artifacts](artifacts.md) and [publishing](publishing.md); `odytor_capabilities` reports at runtime which of them this deployment can actually use.
+
+`pr_conflicts` accepts `merge_target="live_tip"` to merge against the live target-branch tip instead of the PR API's possibly stale base snapshot; the result always states the merged base (`merged_base_sha`) and `merge_scope`. `test_run` overlay failures now name their stage and line (`diagnostic.stage`, `diagnostic.line`, declared versus found hunk counts).
 
 Each tool is designed specifically for AI agents, featuring bounded memory usage, explicit revision validation, and structured error reporting.
 
