@@ -163,7 +163,8 @@ def _validation_evidence(jobs: Any | None, workspace: dict[str, Any], tree: str)
             other += 1
     return {"runs_on_this_tree": on_tree, "runs_on_other_trees": other,
             "any_green_on_this_tree": any(r["green"] for r in on_tree),
-            "all_finished_runs_green": bool(on_tree) and all(r["green"] for r in on_tree if r["status"] in {"passed", "failed", "setup_error", "timeout"})}
+            "all_finished_runs_green": bool(on_tree) and all(r["green"] for r in on_tree if r["status"] in {"passed", "failed", "setup_error", "timeout"}),
+            "runs_not_green": sum(1 for r in on_tree if r["status"] in {"failed", "setup_error", "timeout", "no_tests_collected", "no_tests_executed"})}
 
 
 def plan_publication(client: Any, repo: str, workspace_id: str, expected_version: int, commit_message: str, *, workspaces: WorkspaceService,
@@ -227,6 +228,9 @@ def plan_publication(client: Any, repo: str, workspace_id: str, expected_version
         limitations.append("No test run exists for this exact tree. Run workspace_run on this version before authorizing, or accept that it is untested.")
     elif not evidence["any_green_on_this_tree"]:
         limitations.append("No run on this exact tree passed.")
+    elif evidence["runs_not_green"]:
+        limitations.append(f"{evidence['runs_not_green']} run(s) on this exact tree did not pass (see validation.runs_on_this_tree); a passing run "
+                           "alongside them is not a clean result, so read those runs before authorizing.")
     if fork:
         limitations.append("The PR head lives in a contributor fork: the push needs GitHub-confirmed maintainer access to that branch and is made "
                            "as a leased fast-forward; the commit will not be GitHub-signed.")

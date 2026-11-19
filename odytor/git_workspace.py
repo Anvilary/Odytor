@@ -85,7 +85,7 @@ def _authorize_fork_write(client: GitHubClient, repo: str, number: int, pr: dict
     scoped = bool(getattr(client, 'restricted_repo', None))
     if scoped:
         if operation not in FORK_WRITE_OPERATIONS:
-            raise SecurityError("Server-side PAT contributor fork writes are limited to additive quick fixes.")
+            raise SecurityError("Server-side PAT contributor fork writes are limited to additive single-commit operations (quick_fix and workspace publication).")
         if (pr.get('head') or {}).get('repo', {}).get('fork') is not True:
             raise SecurityError("PR head repository is not marked as a fork by GitHub.")
         client.authorize_fork_write(ForkWriteGrant(

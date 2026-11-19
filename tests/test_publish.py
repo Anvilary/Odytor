@@ -151,6 +151,26 @@ def test_plan_reports_runs_on_this_exact_tree_only(stack):
     out = plan_publication(client, 'owner/repo', w, v, 'msg', workspaces=service, plans=plans, jobs=Jobs, owner=OWNER, **LIMITS)
     assert [r['run_id'] for r in out['validation']['runs_on_this_tree']] == ['test-' + 'a' * 32] and out['validation']['runs_on_other_trees'] == 1
     assert out['validation']['any_green_on_this_tree'] is True and not any('No test run' in l for l in out['limitations'])
+    assert out['validation']['runs_not_green'] == 0 and not any('did not pass' in l for l in out['limitations'])
+
+
+def test_a_passing_run_does_not_hide_failed_runs_on_the_same_tree(stack):
+    service, plans, client, repo, head, open_ws = stack
+    w, v = edited(stack)
+    tree = service.get(w, OWNER, operation='read')['tree']
+    runs = {'test-' + 'a' * 32: 'passed', 'test-' + 'b' * 32: 'failed', 'test-' + 'c' * 32: 'timeout', 'test-' + 'd' * 32: 'completed'}
+
+    class Jobs:
+        class store:
+            @staticmethod
+            def load(run_id):
+                return {'profile': 'browser-playwright', 'kind': 'browser', 'status': runs[run_id], 'trees': {'effective_tree': tree}, 'revisions': {'workspace_version': 2}}
+    for run_id in runs:
+        service.attach_run(w, run_id)
+    out = plan_publication(client, 'owner/repo', w, v, 'msg', workspaces=service, plans=plans, jobs=Jobs, owner=OWNER, **LIMITS)
+    assert out['validation']['any_green_on_this_tree'] is True and out['validation']['all_finished_runs_green'] is False
+    assert out['validation']['runs_not_green'] == 2  # failed and timeout; an exploration run is neither
+    assert any('2 run(s) on this exact tree did not pass' in l for l in out['limitations'])
 
 
 # --- applying ------------------------------------------------------------------------------------------------------

@@ -357,6 +357,6 @@ def test_restricted_pat_rebase_into_fork_remains_blocked(local_fetch):
     _, sha = local_fetch
     from odytor.pr_rebase import rebase_pr
     client = pat_client(pat_routes(sha), [])
-    with pytest.raises(SecurityError, match='additive quick fixes'):
+    with pytest.raises(SecurityError, match='additive single-commit operations'):
         rebase_pr(client, BASE, 1, sha, 'b' * 40, apply=True, allow_history_rewrite=True)
     assert client.fork_grant is None

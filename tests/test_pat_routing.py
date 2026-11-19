@@ -143,9 +143,9 @@ def test_pat_fork_write_only_for_quick_fix_and_never_for_rebase():
           "head": {"sha": "a" * 40, "ref": "feature", "repo": {"full_name": "contributor/odysseus", "fork": True}},
           "base": {"sha": "b" * 40, "ref": "dev", "repo": {"full_name": TARGET}}}
     with patch.object(client, "get_pr", return_value=pr):
-        with pytest.raises(SecurityError, match="additive quick fixes"):
+        with pytest.raises(SecurityError, match="additive single-commit operations"):
             pr_context(client, TARGET, 42, "a" * 40, write=True)
-        with pytest.raises(SecurityError, match="additive quick fixes"):
+        with pytest.raises(SecurityError, match="additive single-commit operations"):
             pr_context(client, TARGET, 42, "a" * 40, write=True, operation="rebase")
     assert client.fork_grant is None
     client.session.request.assert_not_called()
