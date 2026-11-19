@@ -30,11 +30,16 @@ RUN mkdir -p /home/git-plus/data/.fastmcp /home/git-plus/test-data && \
 USER git-plus
 WORKDIR /home/git-plus
 
+ARG ODYTOR_BUILD_REVISION=""
+ARG ODYTOR_BUILD_ID=""
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
     PATH="/home/git-plus/.local/bin:${PATH}" \
     HOME="/home/git-plus" \
-    FASTMCP_HOME="/home/git-plus/data/.fastmcp"
+    FASTMCP_HOME="/home/git-plus/data/.fastmcp" \
+    ODYTOR_BUILD_REVISION="${ODYTOR_BUILD_REVISION}" \
+    ODYTOR_BUILD_ID="${ODYTOR_BUILD_ID}"
 
 EXPOSE 8000
 

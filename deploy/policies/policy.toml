@@ -3,3 +3,12 @@
 profile = "python-pytest"
 test_dirs = ["tests"]
 requirements = "odysseus-dev-odysseus.requirements.txt"
+
+[repos."odysseus-dev/odysseus".node-test]
+test_dirs = ["tests"]
+
+[repos."odysseus-dev/odysseus".browser-playwright]
+kind = "static"
+root = "static"
+port = 8765
+ready_path = "/index.html"
