@@ -11,7 +11,9 @@ from odytor.github import GitHubClient
 
 
 def run(path, *args, input=None):
-    return subprocess.check_output(['git', '-c', 'core.hooksPath=/dev/null', *args], cwd=path, input=input)
+    return subprocess.check_output(['git', '-c', 'core.hooksPath=/dev/null',
+                                    '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.com',
+                                    *args], cwd=path, input=input)
 
 
 @pytest.fixture
