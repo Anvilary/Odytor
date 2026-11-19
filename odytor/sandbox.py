@@ -24,14 +24,16 @@ from pathlib import Path
 from odytor import dep_cache
 from odytor.envvars import EnvConflictError, default_state_dir, lookup, with_prefix
 from odytor.procs import run_bounded
-from odytor.profile import (ENV_DIR, INPUT_DIR, PROFILE_NAME, PROFILE_VERSION, PROFILES, WORK_DIR, ProfileError,
-                              build_argv, is_job_id, is_repo, requirements_digest, validate_requirements,
-                              validate_selector, validate_selectors)
+from odytor import browser_spec
+from odytor.profile import (BROWSER_PROFILE, ENV_DIR, INPUT_DIR, NODE_PROFILE, PROFILE_NAME, PROFILE_VERSION, PROFILES, REGISTRY,
+                              WORK_DIR, ProfileError, build_argv, build_node_argv, is_job_id, is_repo, requirements_digest,
+                              validate_node_selectors, validate_requirements, validate_selector, validate_selectors)
 
 SCHEMA = 1
 MARK = "ODYTOR_HARNESS_RESULT:"
-MAX_HEADER_BYTES = 262144
+MAX_HEADER_BYTES = 1024 * 1024
 MAX_REPORT_BYTES = 4 * 1024 * 1024
+MAX_ARTIFACT_REPORT_BYTES = 40 * 1024 * 1024  # profiles that return artifacts (base64) in their report
 _PIN_DIGEST = re.compile(r"[^@\s]+@sha256:([0-9a-f]{64})")
 _PIN_ID = re.compile(r"(?:sha256:)?([0-9a-f]{64})")
 _MIB = 1024 * 1024
@@ -236,11 +238,12 @@ def _kill_container(cfg: RunnerConfig, name: str) -> None:
         pass
 
 
-def _run_container(cfg: RunnerConfig, name: str, args: list[str], timeout: float) -> tuple[object, float]:
+def _run_container(cfg: RunnerConfig, name: str, args: list[str], timeout: float, *,
+                   max_stdout: int = MAX_REPORT_BYTES) -> tuple[object, float]:
     started = time.monotonic()
     env = {k: os.environ[k] for k in ("PATH", "HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "LANG") if k in os.environ}
     try:
-        result = run_bounded(args, env=env, timeout=timeout, max_stdout=MAX_REPORT_BYTES)
+        result = run_bounded(args, env=env, timeout=timeout, max_stdout=max_stdout)
     finally:
         _kill_container(cfg, name)
     return result, round(time.monotonic() - started, 3)
@@ -317,29 +320,42 @@ def read_job(stream, cfg: RunnerConfig, source: Path) -> dict:
 
 
 def validate_header(cfg: RunnerConfig, header: object) -> dict:
+    """Re-validate a job from scratch: the runner never trusts that the control plane already did."""
     try:
         if not isinstance(header, dict) or header.get("schema") != SCHEMA:
             raise ProfileError("Unsupported job schema.")
         if not is_job_id(header.get("job_id")) or not is_repo(header.get("repo")):
             raise ProfileError("Invalid job or repository identifier.")
-        if header.get("profile") != PROFILE_NAME or header.get("profile_version") != PROFILE_VERSION:
+        spec = REGISTRY.get(header.get("profile")) if isinstance(header.get("profile"), str) else None
+        if spec is None or header.get("profile_version") != spec.version:
             raise ProfileError("Unsupported profile or profile version.")
+        timeout = header.get("timeout_seconds")
+        if type(timeout) is not int or not 1 <= timeout <= cfg.max_timeout:
+            raise ProfileError("Timeout is outside the runner limit.")
+        job = {"job_id": header["job_id"], "repo": header["repo"], "timeout": timeout, "profile": spec.name, "kind": spec.kind}
+        if spec.kind == "browser":
+            try:
+                job["serve"] = browser_spec.validate_serve(header.get("serve"))
+                job["scenario"] = browser_spec.validate_scenario(header.get("scenario"), max_steps=browser_spec.MAX_SESSION_STEPS)
+            except browser_spec.SpecError as exc:
+                raise ProfileError(str(exc)) from exc
+            return job
         dirs = header.get("test_dirs")
         if not isinstance(dirs, list) or not dirs or not all(isinstance(d, str) for d in dirs):
             raise ProfileError("Invalid test directories.")
+        if spec.kind == "node_test":
+            job["selectors"] = validate_node_selectors(header.get("selectors"), tuple(dirs))
+            job["requirements"], job["overlay_paths"] = "", ()
+            return job
         selectors = validate_selectors(header.get("selectors"), tuple(dirs))
         requirements = validate_requirements(header.get("requirements"))
         overlay = header.get("overlay_paths", [])
         if not isinstance(overlay, list) or len(overlay) > 20:
             raise ProfileError("Invalid overlay path list.")
-        overlay_paths = tuple(validate_selector(p, tuple(dirs)) for p in overlay)
-        timeout = header.get("timeout_seconds")
-        if type(timeout) is not int or not 1 <= timeout <= cfg.max_timeout:
-            raise ProfileError("Timeout is outside the runner limit.")
+        job.update(selectors=selectors, requirements=requirements, overlay_paths=tuple(validate_selector(p, tuple(dirs)) for p in overlay))
     except ProfileError as exc:
         raise SetupError("validation", str(exc)) from exc
-    return {"job_id": header["job_id"], "repo": header["repo"], "selectors": selectors,
-            "requirements": requirements, "timeout": timeout, "overlay_paths": overlay_paths}
+    return job
 
 
 def _run_job(cfg: RunnerConfig, job: dict, image: ImageInfo, env: dep_cache.EnvHandle, source: Path,
@@ -371,10 +387,89 @@ def _run_job(cfg: RunnerConfig, job: dict, image: ImageInfo, env: dep_cache.EnvH
     result["report"] = _parse_report(outcome.stdout)
 
 
+_TOOLS_SCRIPT = (
+    "import glob,json,os,shutil\n"
+    "out={'python':True,'node':bool(shutil.which('node'))}\n"
+    "try:\n import playwright\n out['playwright']=True\n"
+    "except Exception:\n out['playwright']=False\n"
+    "out['chromium']=bool(glob.glob(os.environ.get('PLAYWRIGHT_BROWSERS_PATH','/ms-playwright')+'/chromium-*'))\n"
+    "print(json.dumps(out))\n")
+
+
+def image_tools(cfg: RunnerConfig, image: ImageInfo) -> dict:
+    """What the pinned image can actually run (observed once per image, then cached); never guessed from configuration."""
+    cache = cfg.root / f"image-{image.image_id}-tools.json"
+    try:
+        return json.loads(cache.read_text())
+    except (OSError, ValueError):
+        pass
+    probe_run = _engine(cfg, "run", "--rm", "--pull=never", "--network=none", "--read-only", "--cap-drop=ALL",
+                        "--security-opt=no-new-privileges", "--user", "65534:65534", "--entrypoint", "python", image.image_id,
+                        "-c", _TOOLS_SCRIPT, timeout=60)
+    try:
+        tools = json.loads(probe_run.stdout.decode().strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {"python": True, "node": False, "playwright": False, "chromium": False, "observed": False}
+    tools = {k: bool(v) for k, v in tools.items() if k in {"python", "node", "playwright", "chromium"}}
+    cfg.root.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps(tools))
+    return tools
+
+
+def profile_availability(tools: dict) -> dict:
+    return {name: {"version": spec.version, "kind": spec.kind,
+                   "installed": all(tools.get(t) for t in spec.tools), "missing_tools": [t for t in spec.tools if not tools.get(t)]}
+            for name, spec in REGISTRY.items()}
+
+
+def _run_plain(cfg: RunnerConfig, job: dict, image: ImageInfo, source: Path, job_dir: Path, result: dict) -> None:
+    """Node and browser jobs: no dependency environment, no network, only the validated invocation over the source tar."""
+    run = job_dir / "run"
+    run.mkdir(mode=0o755)
+    os.chmod(run, 0o755)
+    os.replace(source, run / "source.tar")
+    os.chmod(run / "source.tar", 0o644)
+    limits = {"files": 200000, "bytes": cfg.work_mib * _MIB}
+    if job["kind"] == "browser":
+        spec = {"kind": "browser", "timeout": job["timeout"], "limits": limits, "serve": job["serve"], "scenario": job["scenario"]}
+        scripts, command, ceiling = ("harness.py", "browser_driver.py", "browser_spec.py"), [f"{INPUT_DIR}/browser_driver.py"], MAX_ARTIFACT_REPORT_BYTES
+    else:
+        spec = {"kind": "node_test", "argv": build_node_argv(job["selectors"]), "selectors": list(job["selectors"]), "timeout": job["timeout"],
+                "limits": limits}
+        scripts, command, ceiling = ("harness.py",), [f"{INPUT_DIR}/harness.py", "test"], MAX_REPORT_BYTES
+    _write(run / "job.json", json.dumps(spec))
+    for name in scripts:
+        _write(run / name, Path(__file__).with_name(name).read_bytes())
+    name = f"gp-run-{job_dir.name[4:]}"
+    args = _container_args(
+        cfg, name, image, test=True, workspace=job_dir.name, mounts=[f"{run}:{INPUT_DIR}:ro"], timeout=job["timeout"] + 60,
+        memory_mib=cfg.memory_mib, env={}, tmpfs=[f"/tmp:rw,nosuid,nodev,exec,size={cfg.tmp_mib}m",
+                                                  f"{WORK_DIR}:rw,nosuid,nodev,exec,size={cfg.work_mib}m"], command=command)
+    outcome, seconds = _run_container(cfg, name, args, job["timeout"] + 90, max_stdout=ceiling)
+    result["sandbox"] = {
+        "engine_exit_code": outcome.returncode, "timed_out": outcome.timed_out, "output_overflow": outcome.overflowed,
+        "container_seconds": seconds, "engine_stderr_tail": outcome.stderr_tail.decode("utf-8", "replace")[-1024:],
+        "limits": {"cpus": cfg.cpus, "memory_mib": cfg.memory_mib, "pids": cfg.pids, "network": "none",
+                   "work_tmpfs_mib": cfg.work_mib, "tmp_tmpfs_mib": cfg.tmp_mib, "timeout_seconds": job["timeout"],
+                   "user": "65534:65534", "root_filesystem": "read-only", "capabilities": "none"}}
+    result["report"] = _parse_report(outcome.stdout)
+
+
 def execute(cfg: RunnerConfig, job: dict, source: Path, job_dir: Path) -> dict:
     image = resolve_image(cfg)
     reap_orphan_containers(cfg)
     _sweep_active(cfg)
+    if job["kind"] != "pytest":
+        tools = image_tools(cfg, image)
+        needed = REGISTRY[job["profile"]].tools
+        if not all(tools.get(t) for t in needed):
+            raise SetupError("profile_unavailable", f"The runner image lacks the tools profile '{job['profile']}' needs.",
+                             {"missing_tools": [t for t in needed if not tools.get(t)]})
+        result = {"schema": SCHEMA, "job_id": job["job_id"],
+                  "runner": {"image": image.ref, "image_id": image.image_id, "image_digest": image.digest,
+                             "platform": image.platform, "python": image.python, "engine": cfg.engine}}
+        _run_plain(cfg, job, image, source, job_dir, result)
+        return result
     spec_sha = requirements_digest(job["requirements"])
     identity = dep_cache.EnvIdentity(job["repo"], spec_sha, image.python, image.image_id, PROFILE_VERSION, image.platform)
     result: dict = {"schema": SCHEMA, "job_id": job["job_id"],
@@ -505,7 +600,7 @@ def probe(cfg: RunnerConfig) -> dict:
     Everything here is observed, not configured: a missing or mismatched image, a non-rootless engine or
     undelegated cgroup limits show up as such. Host-identifying details (paths, hostnames) are never reported.
     """
-    facts: dict = {"protocol": SCHEMA, "profiles": dict(PROFILES), "engine": cfg.engine}
+    facts: dict = {"protocol": SCHEMA, "profiles": {n: {"version": v} for n, v in PROFILES.items()}, "engine": cfg.engine}
     info = _engine(cfg, "info", "--format", "{{.Host.Security.Rootless}}|{{json .Host.CgroupControllers}}")
     parts = info.stdout.decode().strip().split("|", 1) if info.returncode == 0 else []
     facts["engine_ok"] = len(parts) == 2
@@ -518,6 +613,9 @@ def probe(cfg: RunnerConfig) -> dict:
     try:
         image = resolve_image(cfg)
         facts["image"] = {"ok": True, "id": image.image_id[:12], "platform": image.platform, "python": image.python}
+        tools = image_tools(cfg, image)
+        facts["image"]["tools"] = tools
+        facts["profiles"] = profile_availability(tools)
     except SetupError as exc:
         facts["image"] = {"ok": False, "reason": exc.message}
     try:

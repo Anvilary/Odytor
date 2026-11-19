@@ -19,12 +19,13 @@ from typing import Any
 
 from odytor import __version__
 from odytor.config import Settings
-from odytor.profile import PROFILES, RepoPolicy
+from odytor import browser_spec
+from odytor.profile import BROWSER_PROFILE, REGISTRY, RepoPolicy
 
 # Tools that cannot work without a configured runner; the server registers them either way and explains why.
-RUNNER_TOOLS = ("test_run", "test_result", "workspace_run", "test_cancel")
+RUNNER_TOOLS = ("test_run", "test_result", "workspace_run", "test_cancel", "browser_run")
 WORKSPACE_TOOLS = ("workspace_create", "workspace_read", "workspace_search", "workspace_edit", "workspace_diff",
-                   "workspace_run", "workspace_manage")
+                   "workspace_run", "workspace_manage", "publish_plan", "publish_apply")
 RUNNER_PROTOCOL = 1
 
 
@@ -93,6 +94,38 @@ def describe(cfg: Settings, *, policies: dict[str, RepoPolicy], service: Any | N
         reason=("Workspaces are disabled on this server (ODYTOR_WORKSPACES=off)." if not workspaces_enabled else
                 f"Repository '{repo}' is not permitted by this server." if repo_allowed is False else None),
         executes_code=False, tools=[t for t in WORKSPACE_TOOLS if t in operations and t != "workspace_run"])
+    runner_profiles = facts.get("profiles") if isinstance(facts.get("profiles"), dict) else {}
+    profiles = []
+    for name, spec in sorted(REGISTRY.items()):
+        seen = runner_profiles.get(name) if isinstance(runner_profiles.get(name), dict) else {}
+        row = {"name": name, "version": spec.version, "kind": spec.kind, "runtime": spec.runtime, "summary": spec.summary,
+               "commands": list(spec.commands), "network": "none (the sandbox has no network; only pytest dependency preparation does)"
+               if spec.needs_env else "none", "needs_tools": list(spec.tools),
+               "installed_on_runner": seen.get("installed") if "installed" in seen else None,
+               "missing_tools": seen.get("missing_tools", []) if "installed" in seen else None,
+               "enabled_for_repo": None if policy is None else name in policy.profiles}
+        profiles.append(row)
+    browser_installed = (runner_profiles.get(BROWSER_PROFILE) or {}).get("installed") if runner_profiles else None
+    browser = _capability(
+        "browser", installed=True, configured=runs is not None and (policy is None or BROWSER_PROFILE in policy.profiles),
+        operational=(browser_installed if (runner_facts is not None and runner_state.get("state") == "ok") else None),
+        authorized=(None if repo is None else bool(repo_allowed and policy is not None and BROWSER_PROFILE in policy.profiles)),
+        reason=("The isolated runner is not configured." if runs is None else
+                f"The maintainer policy does not enable browser-playwright for '{repo}'." if policy is not None and BROWSER_PROFILE not in policy.profiles else
+                "The runner image lacks Chromium or Playwright." if browser_installed is False else None),
+        engine="chromium", executes_code=True, isolation="container: no network, read-only root, no capabilities",
+        limits={"max_new_steps": browser_spec.MAX_STEPS, "max_session_steps": browser_spec.MAX_SESSION_STEPS,
+                "max_screenshots_per_run": browser_spec.MAX_SCREENSHOTS, "max_mocks": browser_spec.MAX_MOCKS},
+        not_implemented=["unrestricted JavaScript evaluation", "video", "file upload and download", "external origins"])
+    publication = _capability(
+        "publication", installed=True, configured=workspaces_enabled, operational=None,
+        authorized=(None if repo is None else bool(repo_allowed)),
+        reason=("Workspaces are disabled on this server." if not workspaces_enabled else
+                f"Repository '{repo}' is not permitted by this server." if repo_allowed is False else None),
+        writes_to_github=True, requires=["a pr_head workspace with the 'publish' operation in its scope", "publish_plan, then explicit user "
+                                           "authorization, then publish_apply"],
+        guarantees=["one additive commit on the PR head", "no force push, merge, approval or comment", "plan bound to exact tree, patch digest "
+                    "and expected head", "an uncertain outcome is reconciled against the remote before any retry"])
     no_runner = runs is None
     unavailable = [{"name": n, "reason": "isolated runner not configured"} for n in RUNNER_TOOLS if no_runner and n in operations]
     unavailable += [{"name": n, "reason": "workspaces are disabled"} for n in WORKSPACE_TOOLS
@@ -104,8 +137,8 @@ def describe(cfg: Settings, *, policies: dict[str, RepoPolicy], service: Any | N
                    "test_policy_present": None if repo is None else policy is not None},
         "operations": sorted(operations),
         "operations_unavailable": unavailable,
-        "capabilities": [execution, workspace],
-        "execution_profiles": [{"name": name, "version": version} for name, version in sorted(PROFILES.items())],
+        "capabilities": [execution, workspace, browser, publication],
+        "execution_profiles": profiles,
         "runner_protocol": RUNNER_PROTOCOL,
         "limits": {
             "response_bytes": cfg.max_response_bytes,
@@ -117,8 +150,9 @@ def describe(cfg: Settings, *, policies: dict[str, RepoPolicy], service: Any | N
                          "max_source_mib": runs.max_source_bytes // (1024 * 1024), "max_overlay_bytes": runs.max_overlay_bytes},
                 "runner": facts.get("limits")} if runs is not None else {})},
         "health": ({"queue_depth": service.queue_depth()} if service is not None else {}),
-        "artifact_formats": [],
+        "artifact_formats": {"native_image": ["image/png", "image/jpeg", "image/webp"], "text_window": ["text/plain"],
+                             "base64_chunks": ["application/zip (Playwright traces)", "other binary"],
+                             "never_rendered": ["text/html", "image/svg+xml", "scripts"]},
         "known_unavailable": [
-            {"capability": "browser", "reason": "No browser execution profile is installed in this build."},
-            {"capability": "publication", "reason": "Guarded publication of workspace changes is not installed in this build."}],
+            ],
     }

@@ -4,12 +4,49 @@ from __future__ import annotations
 import hashlib
 import re
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 PROFILE_NAME = "python-pytest"
 PROFILE_VERSION = "1"
-PROFILES = {PROFILE_NAME: PROFILE_VERSION}
+NODE_PROFILE = "node-test"
+BROWSER_PROFILE = "browser-playwright"
+
+
+@dataclass(frozen=True)
+class ProfileSpec:
+    """What a profile is, fixed by the trusted code and never by a repository file.
+
+    `tools` are what the pinned runner image must provide for the profile to be installed on a runner.
+    Every profile runs with no network, a read-only root, no capabilities and an unprivileged user; the
+    only network any profile ever gets is the dependency-preparation container of `needs_env` profiles.
+    """
+    name: str
+    version: str
+    kind: str                 # pytest | node_test | browser
+    runtime: str              # python | node | browser
+    summary: str
+    tools: tuple[str, ...]
+    needs_env: bool = False
+    produces_artifacts: bool = False
+    commands: tuple[str, ...] = ()
+    run_network: str = "none"
+
+
+REGISTRY: dict[str, ProfileSpec] = {
+    PROFILE_NAME: ProfileSpec(
+        PROFILE_NAME, PROFILE_VERSION, "pytest", "python", "pytest on an exact tree with maintainer-approved pinned requirements",
+        ("python",), needs_env=True, commands=("pytest",)),
+    NODE_PROFILE: ProfileSpec(
+        NODE_PROFILE, "1", "node_test", "node", "node --test (TAP) on repository test files, no dependency installation",
+        ("node",), commands=("node --test",)),
+    BROWSER_PROFILE: ProfileSpec(
+        BROWSER_PROFILE, "1", "browser", "browser", "Chromium against an application served inside the sandbox; scripted steps, assertions, screenshots, traces",
+        ("python", "playwright", "chromium"), produces_artifacts=True,
+        commands=("goto", "click", "fill", "type", "press", "select", "check", "uncheck", "hover", "wait_for", "wait_ms", "screenshot",
+                  "snapshot", "assert_visible", "assert_hidden", "assert_text", "assert_count", "assert_requests")),
+}
+PROFILES = {name: spec.version for name, spec in REGISTRY.items()}
 
 MAX_SELECTORS = 20
 MAX_SELECTOR_BYTES = 512
@@ -69,6 +106,52 @@ def validate_selectors(selectors: object, test_dirs: tuple[str, ...]) -> tuple[s
         raise ProfileError(f"At most {MAX_SELECTORS} selectors are allowed.")
     cleaned = tuple(dict.fromkeys(validate_selector(item, test_dirs) for item in selectors))
     return cleaned
+
+
+_NODE_FILE = re.compile(r".+\.(?:mjs|cjs|js)")
+
+
+def validate_node_selector(selector: object, test_dirs: tuple[str, ...]) -> str:
+    """A repository-relative test file or directory below the test roots; node has no node-id syntax here."""
+    if not isinstance(selector, str) or not selector:
+        raise ProfileError("Selectors must be non-empty strings.")
+    if len(selector.encode("utf-8", errors="replace")) > MAX_SELECTOR_BYTES:
+        raise ProfileError("Selector exceeds the length limit.")
+    path = selector[:-1] if selector.endswith("/") else selector
+    if _SELECTOR_PATH.fullmatch(path) is None or any(part in {".", ".."} for part in path.split("/")):
+        raise ProfileError("Selectors must be repository-relative paths without traversal or options.")
+    if "." in path.rsplit("/", 1)[-1] and not _NODE_FILE.fullmatch(path):
+        raise ProfileError("node-test selectors are .mjs, .cjs or .js files, or directories.")
+    if not any(path == root or path.startswith(root + "/") for root in test_dirs):
+        raise ProfileError("Selector is outside the configured test directories.")
+    return selector
+
+
+def validate_node_selectors(selectors: object, test_dirs: tuple[str, ...]) -> tuple[str, ...]:
+    if selectors is None:
+        return tuple(test_dirs)
+    if not isinstance(selectors, (list, tuple)) or not selectors:
+        raise ProfileError("selectors must be a non-empty list or omitted.")
+    if len(selectors) > MAX_SELECTORS:
+        raise ProfileError(f"At most {MAX_SELECTORS} selectors are allowed.")
+    return tuple(dict.fromkeys(validate_node_selector(item, test_dirs) for item in selectors))
+
+
+def build_node_argv(selectors: tuple[str, ...]) -> list[str]:
+    """The only node invocation the profile permits.
+
+    Node 22 treats a positional argument as a module or glob, never as a directory, so a directory selector becomes
+    the three conventional test-file globs below it. Validated selectors contain no glob metacharacters and cannot
+    start with '-', so a selector can neither inject a pattern nor an option.
+    """
+    patterns: list[str] = []
+    for selector in selectors:
+        path = selector.rstrip("/")
+        if _NODE_FILE.fullmatch(path):
+            patterns.append(path)
+        else:
+            patterns += [f"{path}/**/*.test.mjs", f"{path}/**/*.test.js", f"{path}/**/*.test.cjs"]
+    return ["node", "--test", "--test-reporter=tap", *patterns]
 
 
 def selector_matches(selector: str, nodeid: str) -> bool:
@@ -149,6 +232,12 @@ class RepoPolicy:
     test_dirs: tuple[str, ...]
     requirements: str
     requirements_sha256: str
+    extra: dict = field(default_factory=dict)  # operator-defined per-profile settings: {"node-test": {...}, "browser-playwright": {...}}
+
+    @property
+    def profiles(self) -> tuple[str, ...]:
+        """Every profile the maintainer enabled for this repository; nothing else may run."""
+        return (self.profile, *[n for n in self.extra if n != self.profile])
 
 
 def load_policies(path: str | Path) -> dict[str, RepoPolicy]:
@@ -172,11 +261,31 @@ def load_policies(path: str | Path) -> dict[str, RepoPolicy]:
                 raise ProfileError(f"Invalid test directory for {repo}.")
             roots.append(item.rstrip("/"))
         req_name = entry.get("requirements")
-        if not isinstance(req_name, str) or not req_name:
-            raise ProfileError(f"{repo} requires an approved 'requirements' file.")
-        req_path = (file.parent / req_name).resolve()
-        if file.parent.resolve() not in req_path.parents:
-            raise ProfileError("Requirements files must live beside the policy file.")
-        text = validate_requirements(req_path.read_text(encoding="utf-8"))
-        policies[repo.casefold()] = RepoPolicy(repo, profile, tuple(roots), text, requirements_digest(text))
+        if profile == PROFILE_NAME or req_name is not None:
+            if not isinstance(req_name, str) or not req_name:
+                raise ProfileError(f"{repo} requires an approved 'requirements' file.")
+            req_path = (file.parent / req_name).resolve()
+            if file.parent.resolve() not in req_path.parents:
+                raise ProfileError("Requirements files must live beside the policy file.")
+            text = validate_requirements(req_path.read_text(encoding="utf-8"))
+        else:
+            text = ""  # a profile without Python dependencies has nothing to approve
+        extra: dict = {}
+        if NODE_PROFILE in entry:
+            table = entry[NODE_PROFILE]
+            node_dirs = table.get("test_dirs", dirs) if isinstance(table, dict) else None
+            if not isinstance(node_dirs, list) or not node_dirs or any(
+                    not isinstance(d, str) or _SELECTOR_PATH.fullmatch(d.rstrip("/")) is None for d in node_dirs):
+                raise ProfileError(f"Invalid {NODE_PROFILE} settings for {repo}.")
+            extra[NODE_PROFILE] = {"test_dirs": tuple(d.rstrip("/") for d in node_dirs)}
+        if BROWSER_PROFILE in entry:
+            from odytor.browser_spec import SpecError, validate_serve
+            table = entry[BROWSER_PROFILE]
+            try:
+                if not isinstance(table, dict):
+                    raise SpecError("the browser table must be an object.")
+                extra[BROWSER_PROFILE] = {"serve": validate_serve(table)}
+            except SpecError as exc:
+                raise ProfileError(f"Invalid {BROWSER_PROFILE} settings for {repo}: {exc}") from exc
+        policies[repo.casefold()] = RepoPolicy(repo, profile, tuple(roots), text, requirements_digest(text), extra)
     return policies

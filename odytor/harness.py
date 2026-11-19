@@ -8,6 +8,7 @@ import collections
 import json
 import os
 import platform
+import re
 import shutil
 import signal
 import subprocess
@@ -225,6 +226,122 @@ def _run_tests(spec):
     return report
 
 
+TAP_FILE = "/tmp/gp/node.tap"
+MAX_TAP_BYTES = 8 * 1024 * 1024
+_TAP_RESULT = re.compile(r"^(\s*)(not ok|ok) \d+ - (.*?)(?: # (SKIP|TODO)\b.*)?$")
+_TAP_SUMMARY = re.compile(r"^# (tests|suites|pass|fail|cancelled|skipped|todo) (\d+)\s*$")
+
+
+def _parse_tap(path, root=WORK):
+    """Counts from the runner's own summary plus per-test names; `summary_found` is false unless every count arrived.
+
+    Node reports a test *file* that loads and exits cleanly as one passing test named after the file, so a file with
+    no tests in it would otherwise count as a pass. Top-level entries named after a file that exists in the tested
+    tree are file-level: a passing one is excluded from the counts and listed as vacuous; a failing one (the file
+    crashed or did not parse) stays a failure.
+    """
+    counts, tests, errors, malformed, last_failed = {}, [], {}, 0, None
+    vacuous = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read(MAX_TAP_BYTES + 1)
+    except OSError:
+        return {"summary_found": False, "counts": {}, "tests": [], "tests_total": 0, "malformed_lines": 0, "truncated": False,
+                "vacuous_files": []}
+    truncated = len(text) > MAX_TAP_BYTES
+    for line in text.splitlines():
+        summary = _TAP_SUMMARY.match(line)
+        if summary:
+            counts[summary.group(1)] = int(summary.group(2))
+            continue
+        result = _TAP_RESULT.match(line)
+        if result:
+            name = result.group(3)
+            top_level = not result.group(1)
+            state = "failed" if result.group(2) == "not ok" else "passed"
+            if result.group(4) == "SKIP":
+                state = "skipped"
+            elif result.group(4) == "TODO":
+                state = "todo"
+            if top_level and state == "passed" and not name.startswith(("/", "..")) and os.path.isfile(os.path.join(root, name)):
+                vacuous.append(name[:MAX_TEXT])
+                last_failed = None
+                continue
+            tests.append({"id": name[:MAX_TEXT], "outcome": state, "duration": 0.0, "message": ""})
+            last_failed = tests[-1] if state == "failed" else None
+        elif last_failed is not None and line.strip().startswith("error:") and not last_failed["message"]:
+            last_failed["message"] = line.strip()[len("error:"):].strip().strip("'\"")[:MAX_TEXT]
+        elif line.startswith("not ok") or line.startswith("ok "):
+            malformed += 1
+    needed = {"tests", "pass", "fail", "cancelled", "skipped", "todo"}
+    if needed <= set(counts):
+        # the summary counted each vacuous file as one passing test; take them back out
+        counts["tests"] = max(counts["tests"] - len(vacuous), 0)
+        counts["pass"] = max(counts["pass"] - len(vacuous), 0)
+    return {"summary_found": needed <= set(counts), "counts": counts, "tests": tests[:MAX_TESTS], "tests_total": len(tests),
+            "malformed_lines": malformed, "truncated": truncated, "vacuous_files": vacuous[:20]}
+
+
+def _run_node(spec):
+    report = {"harness": 1, "kind": "node_test", "extract": {"ok": False}}
+    os.makedirs(os.path.dirname(TAP_FILE), exist_ok=True)
+    os.makedirs("/tmp/home", exist_ok=True)
+    try:
+        files, size, skipped = _extract(spec["limits"]["files"], spec["limits"]["bytes"])
+        report["extract"] = {"ok": True, "members": files, "bytes": size, "skipped_unsafe_links": skipped[:20],
+                             "skipped_unsafe_link_count": len(skipped)}
+    except Exception as exc:
+        report["error"] = {"stage": "extract", "message": f"{type(exc).__name__}: {exc}"[:400]}
+        return report
+    report["selector_exists"] = []
+    for selector in spec["selectors"]:
+        target = os.path.join(WORK, selector.rstrip("/"))
+        report["selector_exists"].append({"selector": selector, "exists": os.path.exists(target),
+                                          "is_dir": os.path.isdir(target)})
+    env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": "/tmp/home", "TMPDIR": "/tmp",
+           "LANG": "C.UTF-8", "NODE_ENV": "test", "CI": "1", "NO_COLOR": "1"}
+    log, started = _Log(), time.monotonic()
+    report["argv"] = spec["argv"]
+    try:
+        proc = subprocess.Popen(spec["argv"], cwd=WORK, env=env, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    except OSError as exc:
+        report["error"] = {"stage": "spawn", "message": str(exc)[:400]}
+        return report
+
+    def pump():
+        written = 0
+        with open(TAP_FILE, "wb") as sink:
+            for chunk in iter(lambda: proc.stdout.read(8192), b""):
+                log.feed(chunk)
+                if written < MAX_TAP_BYTES + 1:
+                    sink.write(chunk)
+                    written += len(chunk)
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+    timed_out = False
+    try:
+        proc.wait(timeout=spec["timeout"])
+    except subprocess.TimeoutExpired:
+        timed_out = True
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    proc.wait()
+    reader.join(timeout=5)
+    tap = _parse_tap(TAP_FILE)
+    order = {"failed": 0, "skipped": 1, "todo": 2, "passed": 3}
+    report.update({"exit": proc.returncode, "timed_out": timed_out, "duration_seconds": round(time.monotonic() - started, 3),
+                   "tap": {"summary_found": tap["summary_found"], "counts": tap["counts"], "malformed_lines": tap["malformed_lines"],
+                           "truncated": tap["truncated"], "vacuous_files": tap["vacuous_files"]},
+                   "tests": sorted(tap["tests"], key=lambda t: order.get(t["outcome"], 9)), "tests_total": tap["tests_total"],
+                   "log": log.render()})
+    return report
+
+
 def _prep(spec):
     report = {"harness": 1, "kind": "prep", "python": platform.python_version(), "machine": platform.machine()}
     os.makedirs("/tmp/home", exist_ok=True)
@@ -254,7 +371,12 @@ def _prep(spec):
 def main(argv):
     with open(os.path.join(INPUT, "job.json"), "r", encoding="utf-8") as handle:
         spec = json.load(handle)
-    report = _prep(spec) if argv[1:2] == ["prep"] else _run_tests(spec)
+    if argv[1:2] == ["prep"]:
+        report = _prep(spec)
+    elif spec.get("kind") == "node_test":
+        report = _run_node(spec)
+    else:
+        report = _run_tests(spec)
     sys.stdout.write("\n" + MARK + json.dumps(report, separators=(",", ":")) + "\n")
     sys.stdout.flush()
     return 0

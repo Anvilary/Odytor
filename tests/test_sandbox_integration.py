@@ -519,5 +519,6 @@ def test_real_runner_probe_observes_engine_image_and_limits(root):
     assert probe['state'] == ('ok' if facts['operational'] else 'degraded'), probe
     assert facts['operational'] == bool(facts['rootless'] and facts['cgroup_limits_delegated'] and facts['image']['ok'] and facts['storage_ok'])
     assert isinstance(facts['cgroup_limits_delegated'], bool) and facts['rootless'] and facts['image']['ok'] and facts['image']['python'].startswith('3.')
-    assert facts['profiles'] == {'python-pytest': '1'} and facts['limits']['memory_mib'] == 4096
+    assert facts['profiles']['python-pytest'] == {'version': '1', 'kind': 'pytest', 'installed': True, 'missing_tools': []}
+    assert set(facts['profiles']) == {'python-pytest', 'node-test', 'browser-playwright'} and facts['limits']['memory_mib'] == 4096
     assert 'path' not in json.dumps(facts).lower() and not containers()  # no job container was started

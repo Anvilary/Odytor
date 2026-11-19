@@ -126,6 +126,44 @@ class WorkspaceSettings:
             min_free_bytes=number("MIN_FREE_MIB", 1024, 64, 1048576) * _MIB)
 
 
+@dataclass(frozen=True)
+class ArtifactSettings:
+    """Bounded evidence storage (screenshots, logs, traces). Every artifact expires; nothing is served by URL."""
+
+    data_dir: str
+    retention_hours: float = 24.0
+    max_artifact_bytes: int = 16 * _MIB
+    max_image_delivery_bytes: int = 2 * _MIB
+    max_owner_bytes: int = 512 * _MIB
+    max_total_bytes: int = 4096 * _MIB
+
+    @classmethod
+    def load(cls) -> ArtifactSettings | None:
+        from odytor.errors import ValidationError
+
+        if (_env("ARTIFACTS") or "on").strip().lower() in {"off", "0", "false", "no"}:
+            return None
+
+        def number(name: str, default, low, high, cast=int):
+            text = (_env(f"ARTIFACT_{name}") or "").strip()
+            try:
+                value = cast(text) if text else default
+            except ValueError:
+                value = None
+            if value is None or not low <= value <= high:
+                raise ValidationError(f"ODYTOR_ARTIFACT_{name} must be between {low} and {high}.")
+            return value
+
+        state = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+        return cls(
+            data_dir=_env("ARTIFACT_DIR") or os.path.join(state, "odytor", "artifacts"),
+            retention_hours=number("RETENTION_HOURS", 24.0, 0.1, 720.0, float),
+            max_artifact_bytes=number("MAX_MIB", 16, 1, 256) * _MIB,
+            max_image_delivery_bytes=number("MAX_IMAGE_BYTES", 2 * _MIB, 4096, 16 * _MIB),
+            max_owner_bytes=number("MAX_OWNER_MIB", 512, 8, 65536) * _MIB,
+            max_total_bytes=number("MAX_TOTAL_MIB", 4096, 8, 1048576) * _MIB)
+
+
 LEGACY_PAT_REPOSITORY = "odysseus-dev/odysseus"
 
 
@@ -164,6 +202,7 @@ class Settings:
     quick_fix_max_patch_bytes: int = 262144
     testing: RunSettings | None = None
     workspaces: WorkspaceSettings | None = None
+    artifacts: ArtifactSettings | None = None
     github_timeout: float = 120.0
     max_response_bytes: int = 262144
     server_pat: str | None = field(default=None, repr=False)
@@ -273,6 +312,7 @@ class Settings:
             quick_fix_max_patch_bytes=quick_fix_limits[2],
             testing=RunSettings.load(),
             workspaces=WorkspaceSettings.load(),
+            artifacts=ArtifactSettings.load(),
         )
 
     def is_repo_allowed(self, repo: str) -> bool:

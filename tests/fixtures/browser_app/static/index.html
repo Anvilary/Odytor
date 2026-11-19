@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Model fit</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font: 16px system-ui, sans-serif; margin: 24px; color: #1b1f24; background: #f6f8fa; }
+    h1 { font-size: 20px; margin: 0 0 12px; }
+    .bar { display: flex; gap: 8px; margin-bottom: 12px; }
+    ul { list-style: none; padding: 0; margin: 0; max-width: 420px; }
+    li { background: #fff; border: 1px solid #d0d7de; border-radius: 6px; padding: 8px 12px; margin-bottom: 6px; display: flex; justify-content: space-between; }
+    .score { color: #0969da; font-variant-numeric: tabular-nums; }
+    #status { color: #57606a; font-size: 13px; margin-bottom: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Model fit</h1>
+  <div class="bar">
+    <label for="sort">Sort</label>
+    <select id="sort" aria-label="Sort models">
+      <option value="score">Score</option>
+      <option value="name">Name</option>
+    </select>
+    <label for="engine">Engine</label>
+    <select id="engine" aria-label="Engine filter">
+      <option value="all">All engines</option>
+      <option value="llama">llama.cpp</option>
+      <option value="vllm">vLLM</option>
+    </select>
+    <button id="scan">Rescan</button>
+  </div>
+  <div id="status" role="status">Loading</div>
+  <ul id="list" aria-label="Models"></ul>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

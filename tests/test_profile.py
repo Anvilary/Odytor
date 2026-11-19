@@ -102,3 +102,16 @@ def test_the_shipped_odysseus_policy_is_valid_hash_complete_and_pins_pytest():
     lines = [line for line in policy.requirements.splitlines() if line]
     assert len(lines) > 50 and all('==' in line and '--hash=sha256:' in line for line in lines)
     assert policy.test_dirs == ('tests',) and len(policy.requirements_sha256) == 64
+
+
+def test_node_argv_expands_directories_to_globs_and_keeps_files_literal():
+    from odytor.profile import build_node_argv, validate_node_selectors
+    argv = build_node_argv(('tests/unit/a.test.mjs', 'tests/web'))
+    assert argv[:3] == ['node', '--test', '--test-reporter=tap'] and argv[3] == 'tests/unit/a.test.mjs'
+    assert argv[4:] == ['tests/web/**/*.test.mjs', 'tests/web/**/*.test.js', 'tests/web/**/*.test.cjs']
+    for selector in ('tests/*', 'tests/{a,b}', 'tests/a?.mjs', 'tests/[x]', '-e', '--eval', 'tests/a b'):
+        try:
+            validate_node_selectors([selector], ('tests',))
+        except Exception:
+            continue
+        raise AssertionError(f'selector {selector!r} must be rejected so it can never become a glob or an option')

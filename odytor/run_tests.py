@@ -17,7 +17,8 @@ from odytor.github import GitHubClient, validate_repo, validate_sha
 from odytor.jobs import TERMINAL, JobService, QueuedJob, new_run_id
 from odytor.overlay import apply_overlay, validate_overlay
 from odytor.pr_conflicts import inspect_merge
-from odytor.profile import (PROFILE_NAME, PROFILES, ProfileError, RepoPolicy, validate_selectors)
+from odytor.profile import (NODE_PROFILE, PROFILE_NAME, PROFILES, REGISTRY, ProfileError, RepoPolicy, validate_node_selectors,
+                            validate_selectors)
 
 MODES = ("head", "prospective_merge")
 SCHEMA = 1
@@ -161,10 +162,18 @@ def submit_workspace_run(repo: str, workspace_id: str, expected_version: int, *,
         raise SecurityError("This repository has no maintainer test policy and cannot be tested.")
     if profile not in PROFILES:
         raise ValidationError(f"Unknown test profile '{profile}'. Available: {', '.join(PROFILES)}.")
-    if policy.profile != profile:
-        raise ValidationError(f"Repository policy requires profile '{policy.profile}'.")
+    spec = REGISTRY[profile]
+    if spec.kind == "browser":
+        raise ValidationError("Browser scenarios run through browser_run, not workspace_run.")
+    if profile not in policy.profiles:
+        raise ValidationError(f"The maintainer policy for this repository enables: {', '.join(policy.profiles)}.")
     try:
-        selected = validate_selectors(selectors, policy.test_dirs)
+        if spec.kind == "node_test":
+            test_dirs = policy.extra[NODE_PROFILE]["test_dirs"]
+            selected = validate_node_selectors(selectors, test_dirs)
+        else:
+            test_dirs = policy.test_dirs
+            selected = validate_selectors(selectors, test_dirs)
     except ProfileError as exc:
         raise ValidationError(str(exc)) from exc
     current = workspaces.get(workspace_id, owner, operation="execute")
@@ -188,13 +197,13 @@ def submit_workspace_run(repo: str, workspace_id: str, expected_version: int, *,
             "trees": {"source_tree": ws["source_tree"], "effective_tree": ws["tree"]},
             "overlay": {"supplied": False, "applied": False, "sha256": None, "paths": [], "patch_status": "none",
                         "committed": False, "pushed": False},
-            "selectors": list(selected), "test_dirs": list(policy.test_dirs), "timeout_seconds": cfg.default_timeout,
-            "requirements_sha256": policy.requirements_sha256, "artifact": taken["artifact"],
+            "selectors": list(selected), "test_dirs": list(test_dirs), "timeout_seconds": cfg.default_timeout,
+            "requirements_sha256": policy.requirements_sha256 if spec.kind == "pytest" else "", "artifact": taken["artifact"],
             "timestamps": {"created_at": now, "started_at": None, "finished_at": None},
             "expires_at": now + cfg.retention_hours * 3600, "result": None}
         header = {"schema": 1, "job_id": run_id, "repo": repo, "profile": profile, "profile_version": PROFILES[profile],
-                  "test_dirs": list(policy.test_dirs), "selectors": list(selected), "overlay_paths": [],
-                  "requirements": policy.requirements, "timeout_seconds": cfg.default_timeout}
+                  "test_dirs": list(test_dirs), "selectors": list(selected), "overlay_paths": [],
+                  "requirements": policy.requirements if spec.kind == "pytest" else "", "timeout_seconds": cfg.default_timeout}
         service.enqueue(record, QueuedJob(run_id, spool, header, cfg.default_timeout))
         reserved = False
         return public_view(record)
@@ -246,7 +255,7 @@ def _workspace_currency(record: dict[str, Any], workspaces: Any | None) -> dict[
 
 
 def public_view(record: dict[str, Any], currency: dict[str, Any] | None = None) -> dict[str, Any]:
-    workspace_run = record.get("kind") == "workspace"
+    workspace_run = record.get("kind") in {"workspace", "browser"}
     ts = record["timestamps"]
     result = record.get("result") or {}
     status = record["status"]
@@ -261,20 +270,22 @@ def public_view(record: dict[str, Any], currency: dict[str, Any] | None = None) 
                    "queue_delay_seconds": (round(ts["started_at"] - ts["created_at"], 3) if ts.get("started_at") else None),
                    "result_expires_at": _iso(record.get("expires_at"))},
         "artifact": record.get("artifact"),
-        "tests_ran_against": ("workspace_tree" if workspace_run else
+        "tests_ran_against": ("workspace_tree" if workspace_run or record.get("kind") == "browser" else
                               "reviewer_overlay_applied_to_pr_tree" if record["overlay"].get("applied") else "unmodified_pr_tree"),
         "github_mutations": "none",
     }
     if workspace_run:
-        view["kind"] = "workspace"
+        view["kind"] = record["kind"]
         view["workspace"] = {**record["revisions"], "tested_tree": record["trees"]["effective_tree"],
                              "source_tree": record["trees"]["source_tree"]}
     if status in TERMINAL:
         view.update({k: result.get(k) for k in ("failure", "counts", "tests", "tests_total", "tests_truncated",
                                                   "selector_coverage", "overlay_coverage", "log", "execution", "runner",
-                                                  "environment", "reports", "conflict", "storage") if k in result})
+                                                  "environment", "reports", "conflict", "storage", "steps", "steps_total",
+                                                  "replayed_steps", "browser", "serve", "console", "page_errors", "page_errors_total",
+                                                  "network", "snapshots", "events", "artifacts") if k in result})
         view["green"] = status == "passed"
-        view["evidence_complete"] = status in {"passed", "failed", "no_tests_executed", "no_tests_collected"} and bool(result.get("counts") is not None)
+        view["evidence_complete"] = status in {"passed", "failed", "completed", "no_tests_executed", "no_tests_collected"} and bool(result.get("counts") is not None)
     else:
         view["green"] = False
         view["evidence_complete"] = False
@@ -289,7 +300,7 @@ def fetch_test_result(client: GitHubClient, repo: str, run_id: str, *, service: 
     # One indistinguishable error for unknown ids and other callers' runs.
     if record is None or record["owner"] != owner or record["repo"].casefold() != repo.casefold():
         raise ValidationError("Unknown run_id.")
-    if record.get("kind") == "workspace":
+    if record.get("kind") in {"workspace", "browser"}:
         return public_view(record, _workspace_currency(record, workspaces))
     currency = _currency(client, record)
     if currency["pr_state"] in {"closed", "merged"}:

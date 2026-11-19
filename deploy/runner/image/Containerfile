@@ -1,0 +1,20 @@
+# Odytor runner image: Python (harness, pytest profile), Node (node-test profile) and Chromium (browser profile).
+#
+# Build, load on the runner host, then pin the resulting image by digest in ODYTOR_RUNNER_IMAGE:
+#   podman build -t odytor-runner:full -f deploy/runner/image/Containerfile deploy/runner/image
+#   podman image inspect odytor-runner:full --format '{{.Id}}'
+#
+# The base images are pinned by digest. Refresh them deliberately (and re-test) rather than following a moving tag.
+# Nothing in this image holds credentials; test containers run it with no network, a read-only root and no capabilities.
+FROM mcr.microsoft.com/playwright/python:v1.63.0-noble@sha256:72bd171a9ffc2b4b59532aaa6210e21014d07093120dc25528870c0b840da1f0
+
+# The base image carries Chromium, Firefox, WebKit and their system libraries but not the Python client.
+# The version must equal the browsers' build, which is why it is pinned to the tag above.
+RUN pip install --no-cache-dir --break-system-packages "playwright==1.63.0" && \
+    python -c "from importlib.metadata import version; print('playwright', version('playwright'))"
+
+# A real Node for node-test (the Playwright driver's bundled node is an implementation detail and is not used).
+COPY --from=docker.io/library/node:22-bookworm-slim@sha256:47725aca53d3295ec2d3be8f62726599b3033cc262edc2c7e429909b3ac599fc /usr/local/bin/node /usr/local/bin/node
+
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PYTHONDONTWRITEBYTECODE=1
