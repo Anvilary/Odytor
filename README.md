@@ -15,6 +15,7 @@
 <p align="center">
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-3776AB.svg?style=flat&logo=python&logoColor=white" alt="Python 3.11+" /></a>
   <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-compatible-4B5563.svg?style=flat" alt="MCP Compatible" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-PolyForm_Noncommercial_1.0.0-blue.svg?style=flat" alt="License: PolyForm Noncommercial 1.0.0" /></a>
   <a href="https://anvilary.tools"><img src="https://img.shields.io/badge/Anvilary-Tools-000000.svg?style=flat" alt="Anvilary Tools" /></a>
 </p>
 
@@ -230,6 +231,17 @@ Guidelines:
 - Never add AI attribution or Co-Authored-By trailers to commit messages or pull requests.
 - Avoid em dashes in documentation and code comments.
 - Adhere strictly to the established security invariants.
+
+---
+
+## License
+
+Odytor is distributed under the [PolyForm Noncommercial License 1.0.0](LICENSE).
+
+- **Noncommercial purposes permitted:** Free for research, personal study, hobby projects, amateur pursuits, education, and noncommercial organizations.
+- **Commercial use restricted:** Commercial use or deployment requires separate written permission from the rights holder. Odytor is not OSI-approved open source software.
+
+Copyright (c) 2026 Alexandre Teixeira and Anvilary Tools contributors.
 
 ---
 
