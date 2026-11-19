@@ -24,7 +24,7 @@ from pathlib import Path
 from odytor import dep_cache
 from odytor.envvars import EnvConflictError, default_state_dir, lookup, with_prefix
 from odytor.procs import run_bounded
-from odytor.profile import (ENV_DIR, INPUT_DIR, PROFILE_NAME, PROFILE_VERSION, WORK_DIR, ProfileError,
+from odytor.profile import (ENV_DIR, INPUT_DIR, PROFILE_NAME, PROFILE_VERSION, PROFILES, WORK_DIR, ProfileError,
                               build_argv, is_job_id, is_repo, requirements_digest, validate_requirements,
                               validate_selector, validate_selectors)
 
@@ -499,6 +499,40 @@ def _sweep_active(cfg: RunnerConfig) -> None:
             entry.unlink(missing_ok=True)
 
 
+def probe(cfg: RunnerConfig) -> dict:
+    """Read-only facts for capability discovery: executes no repository code and starts no job container.
+
+    Everything here is observed, not configured: a missing or mismatched image, a non-rootless engine or
+    undelegated cgroup limits show up as such. Host-identifying details (paths, hostnames) are never reported.
+    """
+    facts: dict = {"protocol": SCHEMA, "profiles": dict(PROFILES), "engine": cfg.engine}
+    info = _engine(cfg, "info", "--format", "{{.Host.Security.Rootless}}|{{json .Host.CgroupControllers}}")
+    parts = info.stdout.decode().strip().split("|", 1) if info.returncode == 0 else []
+    facts["engine_ok"] = len(parts) == 2
+    facts["rootless"] = len(parts) == 2 and parts[0] == "true"
+    try:
+        controllers = set(json.loads(parts[1] or "[]")) if len(parts) == 2 else set()
+    except ValueError:
+        controllers = set()
+    facts["cgroup_limits_delegated"] = {"cpu", "memory", "pids"} <= controllers
+    try:
+        image = resolve_image(cfg)
+        facts["image"] = {"ok": True, "id": image.image_id[:12], "platform": image.platform, "python": image.python}
+    except SetupError as exc:
+        facts["image"] = {"ok": False, "reason": exc.message}
+    try:
+        cfg.root.mkdir(parents=True, exist_ok=True)
+        facts["storage_ok"] = shutil.disk_usage(cfg.root).free >= cfg.min_free_bytes
+    except OSError:
+        facts["storage_ok"] = False
+    facts["limits"] = {"cpus": cfg.cpus, "memory_mib": cfg.memory_mib, "pids": cfg.pids, "work_mib": cfg.work_mib,
+                       "tmp_mib": cfg.tmp_mib, "max_timeout_seconds": cfg.max_timeout,
+                       "max_source_mib": cfg.max_source_bytes // _MIB, "max_queued": cfg.max_queued}
+    facts["operational"] = bool(facts["engine_ok"] and facts["rootless"] and facts["cgroup_limits_delegated"]
+                                and facts["image"]["ok"] and facts["storage_ok"])
+    return facts
+
+
 def check(cfg: RunnerConfig) -> dict:
     """Deployment self-test: rootless engine, pinned image, cgroup limits, storage and an isolated container."""
     report: dict = {"ok": False, "checks": {}}
@@ -608,7 +642,11 @@ def main() -> int:
             lock_fd = os.open(job_dir / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
             fcntl.flock(lock_fd, fcntl.LOCK_EX)  # a live job holds this; crash recovery sweeps unlocked workspaces
             source = job_dir / "source.tar"
-            job = validate_header(cfg, read_job(FdReader(0, cfg.frame_timeout), cfg, source))
+            header = read_job(FdReader(0, cfg.frame_timeout), cfg, source)
+            if isinstance(header, dict) and header.get("op") == "probe" and header.get("schema") == SCHEMA:
+                _emit({"schema": SCHEMA, "probe": probe(cfg)})
+                return 0
+            job = validate_header(cfg, header)
             armed.set()
             threading.Thread(target=_watch_client, args=(0, armed), daemon=True).start()
             admission: dict = {}

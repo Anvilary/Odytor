@@ -114,6 +114,11 @@ def _frame(header: dict[str, Any], artifact: Path):
             yield chunk
 
 
+def _probe_frame():
+    encoded = json.dumps({"schema": SCHEMA, "op": "probe"}, separators=(",", ":")).encode()
+    yield len(encoded).to_bytes(4, "big") + encoded + (0).to_bytes(8, "big")
+
+
 def runner_environment() -> dict[str, str]:
     """The runner never inherits GitHub, OAuth or service credentials from this process."""
     env = {k: os.environ[k] for k in _RUNNER_PASSTHROUGH if k in os.environ}
@@ -324,6 +329,7 @@ class JobService:
         self._stop = False
         self._last_purge = 0.0
         self._started = False
+        self._probe_cache: tuple[float, dict[str, Any]] | None = None
 
     # --- lifecycle -------------------------------------------------------------------------
     def start(self) -> None:
@@ -504,6 +510,41 @@ class JobService:
             outcome = classify(payload, tuple(record["selectors"]), record["requirements_sha256"],
                                tuple((record.get("overlay") or {}).get("test_paths", [])))
         self._finish(self.store.load(job.run_id) or record, outcome)
+
+    def queue_depth(self) -> dict[str, int]:
+        with self._cv:
+            return {"queued": len(self._queue), "running": len(self._cancels), "max_queued": self.cfg.max_queued}
+
+    # --- discovery -------------------------------------------------------------------------
+    def probe_runner(self, *, max_age: float = 60.0, timeout: float = 45.0) -> dict[str, Any]:
+        """Ask the runner what it can actually do. Cached briefly; never raises; executes no repository code.
+
+        Returns {"state": ...}: ok, degraded (reachable but a check failed), unreachable, or probe_unsupported
+        (an older runner that predates the probe frame). Only an `ok` state means the runner is operational.
+        """
+        now = self.clock()
+        if self._probe_cache and now - self._probe_cache[0] < max_age:
+            return self._probe_cache[1]
+        result = run_bounded(self.cfg.runner_command, env=runner_environment(), timeout=timeout,
+                             max_stdout=MAX_RUNNER_OUTPUT, stdin_chunks=_probe_frame(), hold_stdin=True)
+        if result.timed_out or result.returncode != 0 or result.overflowed:
+            report: dict[str, Any] = {"state": "unreachable", "detail": safe_text(result.stderr_tail.decode("utf-8", "replace"), 200)}
+        else:
+            try:
+                payload = json.loads(result.stdout)
+            except ValueError:
+                payload = None
+            facts = payload.get("probe") if isinstance(payload, dict) else None
+            problem = payload.get("setup_error") if isinstance(payload, dict) else None
+            if isinstance(facts, dict):
+                report = {"state": "ok" if facts.get("operational") is True else "degraded", "facts": facts}
+            elif isinstance(problem, dict):
+                report = {"state": "probe_unsupported" if problem.get("stage") == "validation" else "degraded",
+                          "detail": _str(problem.get("message"), 200)}
+            else:
+                report = {"state": "degraded", "detail": "The runner returned an unrecognized probe response."}
+        self._probe_cache = (now, report)
+        return report
 
     # --- retention -------------------------------------------------------------------------
     def purge(self, *, force: bool = False) -> int:

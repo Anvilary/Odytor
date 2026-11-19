@@ -5,7 +5,8 @@ from typing import Annotated, Any, Literal
 from fastmcp import FastMCP
 from pydantic import Field
 
-from odytor.auth import create_auth, github_client
+from odytor.auth import caller_principal, create_auth, github_client
+from odytor.capabilities import describe as describe_capabilities
 from odytor.ci_control import control_ci, Operation
 from odytor.ci_diagnose import diagnose_ci
 from odytor.config import Settings
@@ -16,6 +17,7 @@ from odytor.pr_evidence import get_pr_evidence
 from odytor.pr_rebase import rebase_pr
 from odytor.quick_fix import apply_quick_fix
 from odytor.errors import ValidationError
+from odytor.github import validate_repo
 from odytor.jobs import JobService
 from odytor.profile import PROFILE_NAME, load_policies
 from odytor.run_tests import fetch_test_result, submit_test_run
@@ -158,6 +160,19 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                 if not cfg.is_repo_allowed(record["repo"]):
                     return safe_payload(SecurityError("This run's repository is no longer permitted by Odytor configuration.").to_dict())
                 return safe_payload(fetch_test_result(client, record["repo"], run_id, service=service, owner=owner))
+        except GitPlusError as err:
+            return safe_payload(err.to_dict())
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False},
+              description="Report what this Odytor deployment can actually do: version and source revision, runner protocol, execution profiles, resource limits and which operations exist. Each capability separates installed, configured, operational (observed) and authorized-for-you; nothing is claimed that was not observed. Pass repo to see whether that repository is permitted and has a test policy. probe_runner=true contacts the runner (executes no repository code) to observe it live; without it operational is null, never assumed.")
+    def odytor_capabilities(repo: str | None = None, probe_runner: bool = False) -> dict[str, Any]:
+        try:
+            principal = caller_principal(cfg, remote)
+            if repo is not None:
+                validate_repo(repo)
+            facts = service.probe_runner() if (probe_runner and service is not None) else None
+            return safe_payload(describe_capabilities(cfg, policies=policies, service=service, remote=remote, principal=principal,
+                                                      repo=repo, probe=probe_runner, runner_facts=facts))
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 

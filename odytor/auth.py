@@ -65,6 +65,32 @@ def create_auth(settings: Settings, remote: bool = False):
     raise SecurityError("Remote mode requires OAuth configuration or an explicit auth token and repository allowlist.")
 
 
+def caller_principal(settings: Settings, remote: bool = False) -> str:
+    """The authenticated caller's identity, applying the same admission rules as github_client, without a GitHub client.
+
+    Used by operations that need an owner for bound state (workspaces, artifacts) or a caller check
+    but no GitHub credential. Local stdio is a single trusted principal.
+    """
+    if not remote:
+        return "local"
+    from fastmcp.server.dependencies import get_access_token
+
+    access_token = get_access_token()
+    if access_token is None:
+        raise SecurityError("Authenticated request credentials are required.")
+    if settings.oauth_client_id and settings.oauth_client_secret:
+        claims = getattr(access_token, "claims", {}) or {}
+        login = claims.get("login") if isinstance(claims, dict) else None
+        if not isinstance(login, str) or login.casefold() not in {u.casefold() for u in settings.allowed_github_users}:
+            raise SecurityError("Authenticated GitHub user is not permitted.")
+        return login
+    if settings.auth_token and settings.allowed_repositories:
+        if access_token.client_id != "odytor-service" or not hmac.compare_digest(access_token.token, settings.auth_token):
+            raise SecurityError("Invalid service credentials.")
+        return "service"
+    raise SecurityError("Remote authentication is not configured.")
+
+
 @contextmanager
 def github_client(settings: Settings, remote: bool = False, *, repo: str | None = None) -> Iterator[GitHubClient]:
     """Create an isolated GitHub client for one call and close its session."""

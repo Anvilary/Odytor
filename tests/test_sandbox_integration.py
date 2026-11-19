@@ -503,3 +503,21 @@ def test_full_queue_is_refused_not_run_and_never_green(tmp_path_factory, tmp_pat
     _, refused = execute(root, other, {'tests/test_a.py': 'def test_a(): pass\n'}, env=env)
     holder.join(120)
     assert refused['status'] == 'setup_error' and refused['failure']['kind'] == 'busy'
+
+
+def test_real_runner_probe_observes_engine_image_and_limits(root):
+    """The probe frame reaches the real runner and reports observed facts without starting a job."""
+    from odytor.config import RunSettings
+    from odytor.jobs import JobService
+    overrides = {'ODYTOR_RUNNER_IMAGE': IMAGE, 'ODYTOR_RUNNER_ROOT': str(root)}
+    with mock.patch.dict(os.environ, overrides):
+        cfg = RunSettings(runner_command=(sys.executable, '-m', 'odytor.sandbox'), policies_path='x', data_dir=str(root / 'svc'))
+        probe = JobService(cfg).probe_runner()
+    facts = probe['facts']
+    # The state must follow the observed facts: a host that does not delegate cpu/memory/pids cgroup
+    # controllers (common on development machines) is honestly "degraded", never "ok".
+    assert probe['state'] == ('ok' if facts['operational'] else 'degraded'), probe
+    assert facts['operational'] == bool(facts['rootless'] and facts['cgroup_limits_delegated'] and facts['image']['ok'] and facts['storage_ok'])
+    assert isinstance(facts['cgroup_limits_delegated'], bool) and facts['rootless'] and facts['image']['ok'] and facts['image']['python'].startswith('3.')
+    assert facts['profiles'] == {'python-pytest': '1'} and facts['limits']['memory_mib'] == 4096
+    assert 'path' not in json.dumps(facts).lower() and not containers()  # no job container was started
