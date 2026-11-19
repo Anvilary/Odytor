@@ -258,3 +258,42 @@ corruption, concurrency and disk pressure. The SSH tests are skipped unless `ODY
 a provisioned runner. Unit and Git-fixture tests cover validation, revisions, overlays, classification, queueing
 and cache logic. Not exercised: Docker as the engine, a production runner VM, the production OAuth flow, and
 sandbox-escape resistance beyond the boundary assertions in those tests.
+
+## Execution profiles, discovery and artifacts (remote engineering workspace)
+
+The runner serves more than pytest. Profiles are defined in trusted code (`odytor/profile.py`, shared by Odytor and the
+runner) and enabled per repository by the maintainer policy; **repository files cannot add or widen a profile**.
+
+| Profile | Runtime | Evidence rule |
+|---|---|---|
+| `python-pytest` | Python 3.12 with maintainer-approved pinned requirements (the only profile whose preparation container has network) | Unchanged: executed passing tests, selector coverage, exit status and report consistency. |
+| `node-test` | `node --test` with the TAP reporter, no dependency installation | Only the runner's own TAP summary counts. A test file that merely loads is **not** a passing test (Node counts it as one; it is excluded), so a run with no real tests is `no_tests_collected`. |
+| `browser-playwright` | Chromium via Playwright against the tree served inside the container | Green needs every step ok, a page loaded and at least one assertion; see [browser](browser.md). |
+
+All profiles run with no network, a read-only root, no capabilities, user `65534`, pinned image, and the configured CPU,
+memory, PID and tmpfs limits. A job header is validated again by the runner against the registry; unknown profiles,
+versions, selectors, scenarios or serve settings are `validation` setup errors.
+
+### Protocol additions (schema stays 1)
+
+* **Probe frame.** A frame whose header is `{"schema":1,"op":"probe"}` and whose artifact length is 0 makes the runner
+  report observed facts (engine, rootless, cgroup controllers, image id and tools, per-profile `installed`, limits,
+  storage) without starting a job container. `odytor_capabilities(probe_runner=true)` uses it. An older runner rejects it
+  as a validation error, which is reported as `probe_unsupported`.
+* **Artifacts.** Profiles that produce them return base64 items in their report; the report ceiling for such jobs is
+  40 MiB (4 MiB otherwise). The control plane re-derives type, size and hash and applies quotas ([artifacts](artifacts.md)).
+* **Image tools.** The runner observes what the image provides (Python, Node, Playwright, Chromium) once per image and
+  caches it; a profile whose tools are missing fails fast as `profile_unavailable`.
+
+### Runner image
+
+`deploy/runner/image/Containerfile` builds a Python + Node 22 + Chromium (Playwright 1.63) image from digest-pinned
+bases. Build it, load it on the runner host and pin the result by digest in `ODYTOR_RUNNER_IMAGE`. The existing
+Python-only image keeps working for `python-pytest`; `node-test` and `browser-playwright` are then reported
+`installed: false`. Refresh the pinned bases deliberately and re-run the integration tests.
+
+### Cancellation
+
+`test_cancel` marks a run canceled. Odytor drops the runner connection; the runner sees EOF on stdin, stops the
+container (and with it every descendant, including Chromium) and removes its job workspace. Verified with real
+containers for both pytest and browser runs.

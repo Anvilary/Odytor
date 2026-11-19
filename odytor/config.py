@@ -93,6 +93,7 @@ class WorkspaceSettings:
     max_file_bytes: int = 1 * _MIB
     max_changed_files: int = 300
     max_checkpoints: int = 20
+    max_runs: int = 40
     min_free_bytes: int = 1024 * _MIB
 
     @classmethod
@@ -123,6 +124,7 @@ class WorkspaceSettings:
             max_file_bytes=number("MAX_FILE_BYTES", 1048576, 1024, 8 * _MIB),
             max_changed_files=number("MAX_CHANGED_FILES", 300, 1, 5000),
             max_checkpoints=number("MAX_CHECKPOINTS", 20, 1, 100),
+            max_runs=number("MAX_RUNS", 40, 1, 1000),
             min_free_bytes=number("MIN_FREE_MIB", 1024, 64, 1048576) * _MIB)
 
 

@@ -44,7 +44,7 @@ REGISTRY: dict[str, ProfileSpec] = {
         BROWSER_PROFILE, "1", "browser", "browser", "Chromium against an application served inside the sandbox; scripted steps, assertions, screenshots, traces",
         ("python", "playwright", "chromium"), produces_artifacts=True,
         commands=("goto", "click", "fill", "type", "press", "select", "check", "uncheck", "hover", "wait_for", "wait_ms", "screenshot",
-                  "snapshot", "assert_visible", "assert_hidden", "assert_text", "assert_count", "assert_requests")),
+                  "snapshot", "assert_visible", "assert_hidden", "assert_text", "assert_count", "assert_requests", "wait_requests")),
 }
 PROFILES = {name: spec.version for name, spec in REGISTRY.items()}
 

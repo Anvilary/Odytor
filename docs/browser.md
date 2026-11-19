@@ -19,7 +19,7 @@ unprivileged user, resource limits, and a source tree that arrives as a credenti
 
 `goto` (a path such as `/index.html`), `click`, `fill`, `type`, `press`, `select`, `check`, `uncheck`, `hover`,
 `wait_for`, `wait_ms`, `screenshot` (name), `snapshot`, `assert_visible`, `assert_hidden`, `assert_text`,
-`assert_count`, `assert_requests` (requests to an exact path since the last `reset_network_counts`),
+`assert_count`, `assert_requests` (requests to an exact path since the last `reset_network_counts`), `wait_requests` (wait until the application has issued N requests to a path; the race-free alternative to sleeping),
 `reset_network_counts`. Selectors are Playwright selectors, at most 300 characters, strict (a selector matching several
 elements is an error).
 
@@ -27,7 +27,7 @@ elements is an error).
 storage editing, request interception by the caller. If any of these is added later it must be treated as arbitrary
 code execution in the sandbox, which is what any page script already is.
 
-`mocks` fake API responses (`path`, `json` or `body`, `status`, `delay_ms`); they are applied inside the browser, not
+`mocks` fake API responses (`path`, `json` or `body`, `status`, `delay_ms` up to 5 s, applied asynchronously so slow responses can be observed racing other actions); they are applied inside the browser, not
 on a network.
 
 ## Sessions (bounded exploratory interaction)
@@ -39,7 +39,7 @@ cleanly. Consequences, all intended:
 
 * no browser process or container exists between calls, so there is nothing to orphan;
 * a session tests exactly one workspace tree (`expected_version` must equal the version it was opened on);
-* each call costs a replay; a session holds at most 150 steps and 5 sessions per caller; `browser_close` ends it;
+* each call costs a replay; a session holds at most 150 steps; a caller keeps at most 5 sessions and the oldest idle one is evicted when a sixth opens (so one-shot runs never lock anyone out); `browser_close` ends one explicitly;
 * an application that behaves differently on replay produces `replay_diverged`, never a silently different state.
 
 ## Results you can trust

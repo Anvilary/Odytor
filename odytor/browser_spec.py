@@ -78,9 +78,10 @@ def validate_step(step: Any, index: int) -> dict[str, Any]:
         "press": ("key",), "select": ("selector", "value"), "check": ("selector",), "uncheck": ("selector",),
         "hover": ("selector",), "wait_for": (), "wait_ms": ("ms",), "screenshot": ("name",), "snapshot": (),
         "assert_visible": ("selector",), "assert_hidden": ("selector",), "assert_text": ("selector", "text"),
-        "assert_count": ("selector", "count"), "assert_requests": ("path", "count"), "reset_network_counts": ()}
+        "assert_count": ("selector", "count"), "assert_requests": ("path", "count"), "reset_network_counts": (),
+        "wait_requests": ("path", "count")}
     optional = {"press": ("selector",), "wait_for": ("selector", "text", "timeout_ms"), "screenshot": ("full_page", "selector", "format"),
-                "snapshot": ("selector",), "assert_count": ("compare",), "assert_requests": ("compare", "method"),
+                "snapshot": ("selector",), "assert_count": ("compare",), "assert_requests": ("compare", "method"), "wait_requests": ("method", "timeout_ms"),
                 "click": ("timeout_ms",), "fill": ("timeout_ms",), "type": ("timeout_ms", "delay_ms"), "select": ("timeout_ms",),
                 "goto": ("wait_until",), "assert_visible": ("timeout_ms",), "assert_hidden": ("timeout_ms",), "assert_text": ("timeout_ms",)}
     if op not in allowed:

@@ -23,19 +23,36 @@ Production was **not** inspected: this checkout has no way to read the deployed 
 | Client approval prompts per tool call | **Client-dependent** | see `docs/client-compatibility.md` |
 | Remote MCP authentication choice | **Client-dependent** (OAuth vs static bearer) | `auth.create_auth` |
 
-## Added on this branch
+## State after this branch (`feat/remote-engineering-workspace`)
 
-See `git log` for the authoritative list; each row is updated when its commit lands.
+PASS means exercised by an automated test; real-sandbox rows used real rootless Podman and, for the browser, real Chromium.
 
-| Capability | State | Verified by |
+| Capability | State | Evidence |
 |---|---|---|
-| Stage-specific overlay diagnostics | Implemented | `tests/test_overlay.py` (real `git diff` output) |
-| `pr_conflicts(merge_target="live_tip")` | Exposed | `tests/test_pr_conflicts.py` |
-| `odytor_capabilities` and runner probe frame | Exposed | `tests/test_capabilities.py`, real runner probe in `tests/test_sandbox_integration.py` |
+| Stage-specific overlay diagnostics (stage, line, excerpt, declared vs found hunk counts) | Exposed | PASS: `tests/test_overlay.py`, using real `git diff` output |
+| `pr_conflicts(merge_target="live_tip")` | Exposed | PASS: `tests/test_pr_conflicts.py` |
+| `odytor_capabilities` + runner probe frame | Exposed | PASS: `tests/test_capabilities.py`, real runner probe |
+| Disposable workspaces: create (head, merge, branch), read, search, symbols, edit, diff, checkpoint, reset, close, expiry, caps | Exposed | PASS: `tests/test_workspace*.py` incl. threaded concurrency |
+| Edit then test in a real container, tested tree named, immutable snapshot | Exposed | PASS: `tests/test_workspace_e2e.py` |
+| `test_cancel` tears down container, descendants and runner job directory | Exposed | PASS: real containers (pytest and browser runs) |
+| Profiles: `python-pytest`, `node-test`, `browser-playwright` | Exposed | PASS: `tests/test_profile*.py`, `tests/test_harness_tap.py`, `tests/test_browser_e2e.py` |
+| Python lint, type check; Node lint, type check, build; npm dependency installation | **Missing** | not implemented |
+| Database migration tests, container-build validation | **Missing** | not implemented |
+| Browser: serve, drive, assert, network and console evidence, a11y snapshots, screenshots, traces, sessions | Exposed | PASS (Chromium 153 in the sandbox) |
+| Browser network restrictions (metadata, internet, other ports, WebSocket, service workers) | Exposed | PASS (page-side attempts blocked and reported) |
+| Browser downloads, popups, dialogs refusal | Implemented | NOT TESTED individually |
+| Unrestricted JavaScript evaluation, video, uploads | **Deliberately absent** | |
+| Artifacts: store, quotas, provenance, native image delivery, chunked fallback | Exposed | PASS: `tests/test_artifacts.py`, real screenshots through a real MCP client |
+| Image display in Claude Code, ChatGPT, Perplexity, Codex | Client-dependent | NOT TESTED (see client-compatibility) |
+| Guarded publication (plan, apply, idempotency, reconciliation, fork lease) | Exposed | PASS against a fake GitHub client and real local git; **no real GitHub write was performed** |
+| Durable records: workspaces, runs, sessions, plans, artifacts survive restart | Implemented | PASS for workspaces; others by construction (atomic JSON) |
+| Per-client approval prompts | Client-dependent | NOT TESTED |
+| Remote MCP auth for ChatGPT / Perplexity | Client-dependent | DOCUMENTED only (see client-compatibility) |
 
 ## Open facts
 
-* **Production revision** is not observable from this checkout. The image has no build stamp today;
-  `ODYTOR_BUILD_REVISION` (a 40-hex commit) is now reported by `odytor_capabilities` once the image is built with it.
-* **Resource enforcement** depends on the runner host delegating the `cpu`, `memory` and `pids` cgroup controllers.
-  The probe reports this honestly; the development machine delegates only `memory` and `pids`.
+* **Production revision** is not observable from this checkout. `ODYTOR_BUILD_REVISION` is reported by
+  `odytor_capabilities` once the image is stamped with it.
+* **CPU limiting** depends on the runner host delegating the `cpu` controller. The development machine delegates only
+  `memory` and `pids`, so CPU limits are **not verified here**; the probe reports the host as `degraded`, which makes
+  `isolated_execution.available` false even though jobs run. That is intentional: "operational" is what was observed.

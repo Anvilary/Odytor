@@ -60,6 +60,7 @@ Every result echoes `workspace_id`, `version` and `tree`, so the exact state an 
 | `ODYTOR_WORKSPACE_MAX_FILE_BYTES` | 1 MiB per edited file |
 | `ODYTOR_WORKSPACE_MAX_CHANGED_FILES` | 300 files differing from the source |
 | `ODYTOR_WORKSPACE_MAX_CHECKPOINTS` | 20 |
+| `ODYTOR_WORKSPACE_MAX_RUNS` | 40 test or browser runs per workspace |
 | `ODYTOR_WORKSPACE_DIR` | `$XDG_STATE_HOME/odytor/workspaces` (put it on a persistent volume in production) |
 | `ODYTOR_WORKSPACES=off` | disables the feature |
 

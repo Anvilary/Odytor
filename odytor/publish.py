@@ -294,7 +294,7 @@ def apply_publication(client: Any, repo: str, plan_id: str, confirm: str, user_a
     if plan["state"] == "applied":
         return {**public_plan(plan), "idempotent_replay": True, "note": "This plan was already applied; nothing was written again."}
     if user_authorized is not True:
-        raise SecurityError("Publishing writes to GitHub and needs explicit user authorization: pass user_authorized=true only after the user "
+        raise SecurityError("Publishing writes to GitHub and needs explicit user approval. Pass user_authorized=true only after the user "
                             "approved this exact plan.", {"required": "user_authorized"})
     if not isinstance(confirm, str) or confirm != plan["confirmation"]:
         raise SecurityError("The confirmation does not match this plan. It must quote the plan's confirmation text exactly, which names "

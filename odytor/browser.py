@@ -76,14 +76,22 @@ class SessionStore:
     def create(self, *, owner: str, repo: str, workspace_id: str, version: int, tree: str, base: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             self.purge()
-            live = [r for r in self._records() if r["owner"] == owner]
-            if len(live) >= self.max_per_owner:
-                raise ValidationError("Browser session limit reached; close one with browser_close first.",
-                                      {"max_per_owner": self.max_per_owner, "open": [r["session_id"] for r in live]})
+            live = sorted((r for r in self._records() if r["owner"] == owner), key=lambda r: r["created_at"])
+            evicted = []
+            # A session is only replay history, so at the cap the oldest one yields rather than the caller being locked out
+            # for hours by a handful of one-shot runs. Sessions with a run in flight are never evicted.
+            while len(live) >= self.max_per_owner:
+                victim = next((r for r in live if not r["pending"]), None)
+                if victim is None:
+                    raise ValidationError("Browser session limit reached and every session has a run in flight; wait for one to finish.",
+                                          {"max_per_owner": self.max_per_owner})
+                self._path(victim["session_id"]).unlink(missing_ok=True)
+                live.remove(victim)
+                evicted.append(victim["session_id"])
             now = self.clock()
             record = {"schema": SESSION_SCHEMA, "session_id": new_session_id(), "owner": owner, "repo": repo, "workspace_id": workspace_id,
                       "workspace_version": version, "tree": tree, "base": base, "steps": [], "pending": [], "runs": [],
-                      "created_at": now, "expires_at": now + self.ttl}
+                      "created_at": now, "expires_at": now + self.ttl, "evicted_sessions": evicted}
             self._save(record)
             return record
 

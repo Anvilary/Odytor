@@ -301,3 +301,23 @@ def test_node_test_profile_executes_real_tests_and_never_greens_zero_or_skipped(
     assert 'error' in data(server, 'workspace_run', workspace_id=w, expected_version=4, profile='python-pytest')  # not enabled by this policy
     assert 'browser_run' in data(server, 'workspace_run', workspace_id=w, expected_version=4, profile='browser-playwright')['error']
     assert containers() == []
+
+
+def test_a_delayed_mock_is_asynchronous_and_wait_requests_is_race_free(stack):
+    """Regression: mock delay once used time.sleep inside the route handler, freezing the driver for the whole delay."""
+    server, head = stack
+    w = open_workspace(server, head)['workspace_id']
+    slow = [dict(MOCK, delay_ms=4000)]
+    out = data(server, 'browser_run', workspace_id=w, expected_version=0, mocks=slow, steps=[
+        {'op': 'goto', 'path': '/index.html', 'wait_until': 'domcontentloaded'},
+        {'op': 'wait_requests', 'path': '/api/models', 'count': 1, 'timeout_ms': 8000},
+        {'op': 'assert_count', 'selector': '#list li', 'count': 0},                 # the slow response has not landed yet
+        {'op': 'select', 'selector': '#sort', 'value': 'name'},                      # the sort change happens while the fetch is in flight
+        {'op': 'wait_for', 'selector': '#list li >> nth=0', 'timeout_ms': 9000},
+        {'op': 'assert_count', 'selector': '#list li', 'count': 3}])
+    assert out['status'] == 'passed', out
+    waited = next(s for s in out['steps'] if s['op'] == 'wait_requests')
+    assert waited['ms'] < 2500, 'the driver was frozen for the duration of the mock delay'
+    timeout = data(server, 'browser_run', workspace_id=w, expected_version=0, mocks=[MOCK], steps=[
+        {'op': 'goto', 'path': '/index.html'}, {'op': 'wait_requests', 'path': '/api/never', 'count': 1, 'timeout_ms': 600}])
+    assert timeout['status'] == 'failed' and 'were issued within 600 ms' in timeout['failure']['message']

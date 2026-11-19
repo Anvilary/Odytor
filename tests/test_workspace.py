@@ -438,3 +438,14 @@ def test_state_survives_a_service_restart_and_half_created_debris_is_purged(open
     clock.now += 1
     restarted.purge(force=True)
     assert not debris.exists() and restarted._dir(w).exists()
+
+
+def test_run_budget_is_enforced_per_workspace(tmp_path, clock, local_fetch):
+    repo, sha = local_fetch
+    small = WorkspaceService(WorkspaceSettings(data_dir=str(tmp_path / 'b'), max_runs=2, min_free_bytes=64 * 1024 * 1024), clock=clock)
+    w = open_workspace(client_for(sha), 'owner/repo', service=small, owner=OWNER, source='branch', branch='feature', expected_sha=sha)['workspace_id']
+    for n in range(2):
+        small.snapshot(w, OWNER, expected_version=0, destination=tmp_path / f's{n}.tar', max_bytes=10_000_000, attach_run=f'test-{n:032x}')
+    with pytest.raises(ValidationError) as info:
+        small.snapshot(w, OWNER, expected_version=0, destination=tmp_path / 's3.tar', max_bytes=10_000_000, attach_run='test-' + 'f' * 32)
+    assert info.value.diagnostic['max_runs'] == 2

@@ -124,3 +124,12 @@ def test_network_summary_is_bounded_and_counts_blocked_separately():
 def test_compare():
     assert driver.compare('eq', 2, 2) and not driver.compare('eq', 3, 2) and driver.compare('le', 1, 2) and driver.compare('ge', 3, 2)
     assert not driver.compare('le', 3, 2) and not driver.compare('ge', 1, 2)
+
+
+def test_wait_requests_is_a_bounded_typed_step():
+    ok = validate_step({'op': 'wait_requests', 'path': '/api/x', 'count': 1, 'timeout_ms': 8000, 'method': 'GET'}, 0)
+    assert ok == {'op': 'wait_requests', 'path': '/api/x', 'count': 1, 'timeout_ms': 8000, 'method': 'GET'}
+    for bad in ({'op': 'wait_requests', 'path': '/api/x'}, {'op': 'wait_requests', 'count': 1}, {'op': 'wait_requests', 'path': 'http://e/', 'count': 1},
+                {'op': 'wait_requests', 'path': '/x', 'count': 1, 'timeout_ms': 60000}):
+        with pytest.raises(SpecError):
+            validate_step(bad, 0)

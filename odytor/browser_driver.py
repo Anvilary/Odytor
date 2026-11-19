@@ -188,7 +188,8 @@ class Run:
         entry["mocked"] = True
         entry["status"] = mock["status"]
         if mock["delay_ms"]:
-            time.sleep(mock["delay_ms"] / 1000)
+            # Not time.sleep: that freezes Playwright's dispatcher, so the "slow" response would block every other step.
+            request.frame.page.wait_for_timeout(mock["delay_ms"])
         body = json.dumps(mock["json"]) if "json" in mock else mock["body"]
         route.fulfill(status=mock["status"], body=body, content_type=mock["content_type"], headers={"Cache-Control": "no-store"})
 
@@ -305,6 +306,14 @@ def execute_step(run, page, step, index, expect):
         if not compare(kind, actual, step["count"]):
             raise AssertionError(f"expected {kind} {step['count']} request(s) to {step['path']} since the last reset, observed {actual}")
         return {"requests": actual}
+    elif op == "wait_requests":
+        # Race-free alternative to sleeping: wait until the application has *issued* at least `count` requests to the path.
+        deadline = time.monotonic() + timeout / 1000
+        while count_requests(run.network, step["path"], step.get("method"), run.baseline) < step["count"]:
+            if time.monotonic() > deadline:
+                raise AssertionError(f"fewer than {step['count']} request(s) to {step['path']} were issued within {timeout} ms")
+            page.wait_for_timeout(50)
+        return {"requests": count_requests(run.network, step["path"], step.get("method"), run.baseline)}
     elif op == "reset_network_counts":
         run.baseline = len(run.network)
     return {}

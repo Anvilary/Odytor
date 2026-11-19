@@ -246,7 +246,7 @@ class WorkspaceService:
     def limits(self) -> dict[str, Any]:
         c = self.cfg
         return {"ttl_hours": c.ttl_hours, "max_ttl_hours": c.max_ttl_hours, "max_workspace_mib": c.max_workspace_bytes // (1 << 20),
-                "max_file_bytes": c.max_file_bytes, "max_changed_files": c.max_changed_files, "max_checkpoints": c.max_checkpoints,
+                "max_file_bytes": c.max_file_bytes, "max_changed_files": c.max_changed_files, "max_checkpoints": c.max_checkpoints, "max_runs": c.max_runs,
                 "read_max_lines": READ_MAX_LINES, "read_max_bytes": READ_MAX_BYTES, "search_max_results": SEARCH_MAX_RESULTS}
 
     def close(self, ws_id: str, owner: str) -> dict[str, Any]:
@@ -756,6 +756,10 @@ class WorkspaceService:
                 raise ValidationError("Unknown workspace_id.")
             if type(expected_version) is not int or expected_version != record["version"]:
                 raise VersionConflictError(expected_version, record["version"], record["tree"])
+            budget = record["limits"].get("max_runs", self.cfg.max_runs)
+            if len(record["runs"]) >= budget:
+                raise ValidationError(f"This workspace has used its budget of {budget} runs; open a new workspace to continue.",
+                                      {"stage": "limits", "max_runs": budget})
             artifact = self._repo(ws_id).export_tree(record["tree"], destination, max_bytes=max_bytes)
             if attach_run:
                 record["runs"] = (record["runs"] + [attach_run])[-100:]

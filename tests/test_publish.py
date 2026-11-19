@@ -164,9 +164,11 @@ def approved(stack):
 def test_apply_requires_explicit_authorization_and_the_exact_confirmation(stack):
     service, plans, client, *_ = stack
     w, p = approved(stack)
-    with pytest.raises(SecurityError, match='explicit user authorization'):
+    with pytest.raises(SecurityError, match='explicit user approval') as info:
         apply(stack, p['plan_id'], p['confirmation'], authorized=False)
-    with pytest.raises(SecurityError, match='explicit user authorization'):
+    from odytor.diagnostics import safe_payload
+    assert 'REDACTED' not in safe_payload(info.value.to_dict())['error']  # the refusal must stay readable after payload redaction
+    with pytest.raises(SecurityError, match='explicit user approval'):
         apply(stack, p['plan_id'], p['confirmation'], authorized='true')
     for wrong in ('', 'yes', p['confirmation'] + ' ', p['confirmation'].replace('tree', 'TREE'), 'publish pp-x tree a patch b'):
         with pytest.raises(SecurityError, match='confirmation does not match'):

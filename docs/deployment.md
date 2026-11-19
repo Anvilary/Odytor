@@ -161,3 +161,46 @@ All settings can be configured via environment variables.
 | `ODYTOR_TEST_RUNNER_COMMAND` | `""` | JSON argv array for invoking the isolated test runner |
 | `ODYTOR_TEST_POLICIES` | `""` | Path to repository test policies TOML file |
 | `ODYTOR_TEST_DATA_DIR` | `~/.local/state/odytor/tests` | Spool directory for retained test results |
+
+## Remote engineering workspace: settings and staging preparation
+
+New settings (all optional; defaults are safe). Workspaces, artifacts and sessions are stored beneath the Odytor state
+directory unless overridden and **must be on a persistent volume in production**.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ODYTOR_WORKSPACES` | `on` | `off` disables workspace tools. |
+| `ODYTOR_WORKSPACE_DIR` | `$XDG_STATE_HOME/odytor/workspaces` | Workspace objects, state, browser sessions, publication plans. |
+| `ODYTOR_WORKSPACE_TTL_HOURS`, `_MAX_TTL_HOURS`, `_MAX_PER_OWNER`, `_MAX_MIB`, `_MAX_TOTAL_MIB`, `_MAX_FILE_BYTES`, `_MAX_CHANGED_FILES`, `_MAX_CHECKPOINTS`, `_MAX_RUNS`, `_MIN_FREE_MIB` | see [workspaces](workspaces.md) | Hard caps. |
+| `ODYTOR_ARTIFACTS`, `ODYTOR_ARTIFACT_DIR`, `_RETENTION_HOURS`, `_MAX_MIB`, `_MAX_IMAGE_BYTES`, `_MAX_OWNER_MIB`, `_MAX_TOTAL_MIB` | see [artifacts](artifacts.md) | Evidence storage. |
+| `ODYTOR_BUILD_REVISION` (40-hex), `ODYTOR_BUILD_ID` | unset | Reported by `odytor_capabilities` so the running revision can be verified. Stamp it when building the image. |
+
+Maintainer policy (`ODYTOR_TEST_POLICIES`) gains optional per-profile tables, for example:
+
+```toml
+[repos."owner/repo"]
+profile = "python-pytest"
+test_dirs = ["tests"]
+requirements = "owner-repo.requirements.txt"
+[repos."owner/repo".node-test]
+test_dirs = ["tests"]
+[repos."owner/repo".browser-playwright]
+kind = "static"
+root = "static"
+port = 8765
+ready_path = "/index.html"
+```
+
+### Exact changes a staging deployment would need (none were made)
+
+1. Build the runner image from `deploy/runner/image/Containerfile` on or for the runner VM, load it, and set
+   `ODYTOR_RUNNER_IMAGE` (root-owned `runner.env`) to its digest. Run `odytor-runner check` on the VM; it must report
+   cpu, memory and pids cgroup limits delegated.
+2. Update the runner wheel on the VM so it understands the probe frame and the new profiles (an older runner keeps
+   serving pytest and is reported `probe_unsupported`).
+3. Rebuild the Odytor app image with `--build-arg`/`ENV ODYTOR_BUILD_REVISION=<commit>` (the Dockerfile does not stamp
+   it yet) and mount a persistent volume for `ODYTOR_WORKSPACE_DIR` and `ODYTOR_ARTIFACT_DIR`.
+4. Add the browser and node tables to the production policy for repositories that should use them; add `publish` only
+   where authoritative writes from workspaces are intended.
+5. After starting, call `odytor_capabilities(probe_runner=true)` and confirm the revision, runner `ok` state and profile
+   `installed` flags before relying on any new tool.
