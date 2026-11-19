@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 LAUNCHER = Path(__file__).resolve().parents[1] / "deploy" / "local" / "odytor-mcp"
-ALLOWED = "odysseus-dev/odysseus,Anvilary/git-plus"
+ALLOWED = "alteixeira20/*,Anvilary/*"
 TOKEN = "gho_" + "t" * 36
 
 

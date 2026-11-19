@@ -12,3 +12,17 @@ kind = "static"
 root = "static"
 port = 8765
 ready_path = "/index.html"
+
+[repos."alteixeira20/odytor-smoke-test"]
+profile = "python-pytest"
+test_dirs = ["tests"]
+requirements = "smoke-test.requirements.txt"
+
+[repos."alteixeira20/odytor-smoke-test".node-test]
+test_dirs = ["tests"]
+
+[repos."alteixeira20/odytor-smoke-test".browser-playwright]
+kind = "static"
+root = "."
+port = 8765
+ready_path = "/index.html"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 
 from odytor.envvars import EnvConflictError, default_state_dir, lookup
@@ -185,6 +186,31 @@ class ServerPat:
     repository: str | None
 
 
+_ALLOWED_REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/(?:\*|[A-Za-z0-9_.-]+)$")
+
+
+def validate_allowed_repository_pattern(pattern: str) -> str:
+    """Validate repository allowlist pattern ('owner/repo' or 'owner/*')."""
+    from odytor.errors import ValidationError
+    cleaned = pattern.strip()
+    if not _ALLOWED_REPO_PATTERN.fullmatch(cleaned):
+        raise ValidationError(
+            f"Invalid repository allowlist pattern '{pattern}'. Expected 'owner/repo' or 'owner/*'."
+        )
+    owner, name = cleaned.split("/", 1)
+    if owner in {".", ".."} or (name != "*" and name in {".", ".."}):
+        raise ValidationError(f"Prohibited repository allowlist pattern '{pattern}'.")
+    return cleaned.casefold()
+
+
+def parse_allowed_repositories(raw: str) -> tuple[str, ...]:
+    """Parse comma-separated repository allowlist with exact repos or owner wildcards."""
+    if not raw.strip():
+        return ()
+    parsed = [validate_allowed_repository_pattern(item) for item in raw.split(",") if item.strip()]
+    return tuple(dict.fromkeys(parsed))
+
+
 @dataclass(frozen=True)
 class Settings:
     """Runtime configuration settings."""
@@ -271,7 +297,7 @@ class Settings:
             quick_fix_limits.append(value)
 
         raw_allowed = (_env("ALLOWED_REPOSITORIES") or "").strip()
-        allowed = tuple(r.strip().casefold() for r in raw_allowed.split(",") if r.strip())
+        allowed = parse_allowed_repositories(raw_allowed)
         raw_users = (_env("ALLOWED_GITHUB_USERS") or "").strip()
         users = tuple(u.strip().casefold() for u in raw_users.split(",") if u.strip())
 
@@ -324,4 +350,17 @@ class Settings:
         """Check if a repository is permitted by allowed_repositories setting."""
         if not self.allowed_repositories:
             return True
-        return repo.strip().casefold() in self.allowed_repositories
+        if not isinstance(repo, str):
+            return False
+        from odytor.github import validate_repo
+        try:
+            owner, name = validate_repo(repo)
+        except Exception:
+            return False
+        target_exact = f"{owner.casefold()}/{name.casefold()}"
+        target_wildcard = f"{owner.casefold()}/*"
+        for pattern in self.allowed_repositories:
+            norm = pattern.strip().casefold()
+            if norm == target_exact or norm == target_wildcard:
+                return True
+        return False

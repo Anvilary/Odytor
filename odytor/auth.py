@@ -27,7 +27,7 @@ def create_auth(settings: Settings, remote: bool = False):
         if (not all(oauth_values) or settings.auth_token
                 or pat.login.casefold() not in {u.casefold() for u in settings.allowed_github_users}
                 or not settings.allowed_repositories
-                or (pat.repository is not None and pat.repository not in settings.allowed_repositories)):
+                or (pat.repository is not None and not (settings.is_repo_allowed(pat.repository) or (pat.repository.endswith("/*") and pat.repository.casefold() in {p.casefold() for p in settings.allowed_repositories})))):
             raise SecurityError(
                 "A server-side PAT requires OAuth, an explicit repository allowlist "
                 "and a separately configured PAT owner in the authenticated user allowlist."
@@ -117,7 +117,13 @@ def github_client(settings: Settings, remote: bool = False, *, repo: str | None 
                 if not repo:
                     raise SecurityError("Repository context is required for server-side PAT selection.")
                 target = repo.strip().casefold()
-                serves = target == pat.repository if pat.repository else settings.is_repo_allowed(target) and bool(settings.allowed_repositories)
+                if pat.repository:
+                    if pat.repository.endswith("/*"):
+                        serves = target.split("/", 1)[0] == pat.repository[:-2] and settings.is_repo_allowed(target)
+                    else:
+                        serves = target == pat.repository
+                else:
+                    serves = settings.is_repo_allowed(target) and bool(settings.allowed_repositories)
                 if serves and login.casefold() == pat.login.casefold():
                     token = pat.token
                     restricted_repo = target
