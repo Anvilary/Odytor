@@ -137,6 +137,11 @@ class StaticHandler(http.server.SimpleHTTPRequestHandler):
     extensions_map = {**http.server.SimpleHTTPRequestHandler.extensions_map, ".mjs": "text/javascript", ".js": "text/javascript",
                       ".json": "application/json", ".wasm": "application/wasm", ".svg": "image/svg+xml"}
 
+    def translate_path(self, path):
+        if path.startswith("/static/") and (os.path.basename(self.directory) == "static" or not os.path.exists(os.path.join(self.directory, "static"))):
+            path = path[7:]
+        return super().translate_path(path)
+
     def log_message(self, *args):  # the report carries the evidence; nothing may spam the log
         pass
 
