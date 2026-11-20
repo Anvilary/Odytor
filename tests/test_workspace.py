@@ -449,3 +449,15 @@ def test_run_budget_is_enforced_per_workspace(tmp_path, clock, local_fetch):
     with pytest.raises(ValidationError) as info:
         small.snapshot(w, OWNER, expected_version=0, destination=tmp_path / 's3.tar', max_bytes=10_000_000, attach_run='test-' + 'f' * 32)
     assert info.value.diagnostic['max_runs'] == 2
+
+
+def test_batch_read_returns_multiple_files(opened):
+    service = opened[0]
+    w = ws(opened)
+    service.write_file(w, OWNER, expected_version=0, path='f1.txt', content='line 1\n')
+    service.write_file(w, OWNER, expected_version=1, path='f2.txt', content='line 2\n')
+    batch = service.batch_read(w, OWNER, paths=['f1.txt', 'f2.txt', 'nonexistent.txt'])
+    assert batch['count'] == 3
+    assert batch['files']['f1.txt']['lines'][0]['text'] == 'line 1'
+    assert batch['files']['f2.txt']['lines'][0]['text'] == 'line 2'
+    assert 'No such file' in batch['files']['nonexistent.txt']['error']

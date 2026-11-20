@@ -150,3 +150,18 @@ def test_delete_for_run_and_restart_persistence(store, tmp_path, clock):
     again = ArtifactStore(store.root, store.limits, clock=clock)
     assert again.content(record['artifact_id'], 'alice')['text'] == 'kept'
     assert again.delete_for_run(CTX['run_id']) == 1 and not list(again.root.glob('ar-*'))
+
+
+def test_normalize_artifact_name_handles_extensions_and_duplicates():
+    from odytor.artifacts import normalize_artifact_name
+    assert normalize_artifact_name('screenshot.png.png', mime='image/png', kind='screenshot') == 'screenshot.png'
+    assert normalize_artifact_name('screenshot', mime='image/png', kind='screenshot') == 'screenshot.png'
+    assert normalize_artifact_name('screenshot.png', mime='image/png', kind='screenshot') == 'screenshot.png'
+    assert normalize_artifact_name('screenshot.txt', mime='image/png', kind='screenshot') == 'screenshot.png'
+    assert normalize_artifact_name('pic.jpg.jpg', mime='image/jpeg', kind='screenshot') == 'pic.jpg'
+    assert normalize_artifact_name('../../etc/passwd') == 'artifact'
+    assert normalize_artifact_name('valid_log.txt', mime='text/plain', kind='log') == 'valid_log.txt'
+    # Test length clamping preserving extension
+    long_name = 'a' * 100 + '.png'
+    clamped = normalize_artifact_name(long_name, mime='image/png')
+    assert len(clamped) <= 80 and clamped.endswith('.png')

@@ -31,11 +31,41 @@ RUNNER_PROTOCOL = 1
 
 @functools.lru_cache(maxsize=1)
 def source_revision() -> dict[str, Any]:
-    """Build identity: operator-stamped values win; a development checkout falls back to its own git HEAD."""
-    stamped = (os.environ.get("ODYTOR_BUILD_REVISION") or "").strip().lower()
-    build_id = (os.environ.get("ODYTOR_BUILD_ID") or "").strip()[:64] or None
-    if len(stamped) == 40 and all(c in "0123456789abcdef" for c in stamped):
-        return {"revision": stamped, "source": "build_stamp", "build_id": build_id}
+    """Build identity: operator-stamped values win; files win; a development checkout falls back to its own git HEAD."""
+    # 1. Environment variables
+    stamped = (os.environ.get("ODYTOR_BUILD_REVISION") or os.environ.get("GIT_COMMIT") or os.environ.get("SOURCE_SHA") or "").strip().lower()
+    build_id = (os.environ.get("ODYTOR_BUILD_ID") or os.environ.get("BUILD_ID") or "").strip()[:64] or None
+    build_time = (os.environ.get("ODYTOR_BUILD_TIME") or os.environ.get("BUILD_TIME") or "").strip() or None
+    image_digest = (os.environ.get("ODYTOR_IMAGE_DIGEST") or "").strip() or None
+
+    # 2. File-based stamps
+    if not stamped:
+        for candidate_path in (
+            Path("/etc/odytor/DEPLOYED_SOURCE_SHA"),
+            Path("/home/git-plus/DEPLOYED_SOURCE_SHA"),
+            Path("/app/DEPLOYED_SOURCE_SHA"),
+            Path(__file__).resolve().parent.parent / "DEPLOYED_SOURCE_SHA",
+        ):
+            try:
+                if candidate_path.is_file():
+                    content = candidate_path.read_text(encoding="utf-8").strip().lower()
+                    if content:
+                        stamped = content
+                        break
+            except OSError:
+                pass
+
+    if stamped:
+        # Validate hex SHA (7 to 40 characters)
+        if 7 <= len(stamped) <= 40 and all(c in "0123456789abcdef" for c in stamped):
+            info: dict[str, Any] = {"revision": stamped, "source": "build_stamp", "build_id": build_id}
+            if build_time:
+                info["build_time"] = build_time
+            if image_digest:
+                info["image_digest"] = image_digest
+            return info
+
+    # 3. Local git checkout fallback
     root = Path(__file__).resolve().parent.parent
     if (root / ".git").exists():
         env = {"PATH": os.environ.get("PATH", ""), "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
@@ -44,12 +74,16 @@ def source_revision() -> dict[str, Any]:
             dirty = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"], env=env,
                                    capture_output=True, text=True, timeout=5)
             if head.returncode == 0 and len(head.stdout.strip()) == 40:
-                return {"revision": head.stdout.strip(), "source": "git_checkout", "build_id": build_id,
+                info = {"revision": head.stdout.strip(), "source": "git_checkout", "build_id": build_id,
                         "working_tree_dirty": bool(dirty.stdout.strip())}
+                if build_time:
+                    info["build_time"] = build_time
+                return info
         except (OSError, subprocess.SubprocessError):
             pass
+
     return {"revision": None, "source": "unknown", "build_id": build_id,
-            "note": "No build stamp. Set ODYTOR_BUILD_REVISION (40-hex commit) when building the image."}
+            "note": "No build stamp. Set ODYTOR_BUILD_REVISION (40-hex commit) or provide DEPLOYED_SOURCE_SHA when building/deploying."}
 
 
 def _capability(name: str, *, installed: bool, configured: bool, operational: bool | None, authorized: bool | None,

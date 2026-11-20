@@ -407,6 +407,23 @@ class WorkspaceService:
                 "lines": out, "complete": stop >= total and start_line == 1,
                 "next_start_line": stop + 1 if stop < total else None, "ends_with_newline": text.endswith("\n")}
 
+    def batch_read(self, ws_id: str, owner: str, *, paths: list[str], max_files: int = 20) -> dict[str, Any]:
+        record = self.get(ws_id, owner, operation="read")
+        if not isinstance(paths, (list, tuple)) or not paths:
+            raise ValidationError("paths must be a non-empty list of file paths.")
+        if len(paths) > max_files:
+            raise ValidationError(f"At most {max_files} files can be read in a single batch.")
+        results = {}
+        for p in paths:
+            if not isinstance(p, str) or not p.strip():
+                continue
+            clean_p = p.strip()
+            try:
+                results[clean_p] = self.read(ws_id, owner, path=clean_p)
+            except Exception as err:
+                results[clean_p] = {"error": str(err), "path": clean_p}
+        return {**self._ident(record), "files": results, "count": len(results)}
+
     def search(self, ws_id: str, owner: str, *, pattern: str, path: str = "", fixed: bool = True, ignore_case: bool = False,
                max_results: int = SEARCH_MAX_RESULTS) -> dict[str, Any]:
         record = self.get(ws_id, owner, operation="search")

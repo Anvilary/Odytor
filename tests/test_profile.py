@@ -115,3 +115,37 @@ def test_node_argv_expands_directories_to_globs_and_keeps_files_literal():
         except Exception:
             continue
         raise AssertionError(f'selector {selector!r} must be rejected so it can never become a glob or an option')
+
+
+def test_multilanguage_profile_argv_generation():
+    from odytor.profile import (
+        build_profile_argv, validate_path_selectors,
+        PYTHON_LINT_PROFILE, PYTHON_TYPECHECK_PROFILE, PYTHON_BUILD_PROFILE,
+        NODE_LINT_PROFILE, NODE_TYPECHECK_PROFILE, NODE_BUILD_PROFILE,
+        CMAKE_BUILD_PROFILE, MAKE_BUILD_PROFILE, C_TEST_PROFILE,
+    )
+    assert build_profile_argv(PYTHON_LINT_PROFILE, ('src/foo.py',)) == ['python3', '-m', 'ruff', 'check', 'src/foo.py']
+    assert build_profile_argv(PYTHON_TYPECHECK_PROFILE, ()) == ['python3', '-m', 'mypy', '.']
+    assert build_profile_argv(PYTHON_BUILD_PROFILE, ()) == ['python3', '-m', 'build', '--no-isolation']
+    assert build_profile_argv(NODE_LINT_PROFILE, ()) == ['npx', '--no-install', 'eslint', '.']
+    assert build_profile_argv(NODE_TYPECHECK_PROFILE, ()) == ['npx', '--no-install', 'tsc', '--noEmit']
+    assert build_profile_argv(NODE_BUILD_PROFILE, ()) == ['npm', 'run', 'build']
+    assert build_profile_argv(CMAKE_BUILD_PROFILE, ()) == ['sh', '-c', 'cmake -B build -S . && cmake --build build']
+    assert build_profile_argv(MAKE_BUILD_PROFILE, ()) == ['make']
+    assert 'ctest' in build_profile_argv(C_TEST_PROFILE, ())[2]
+
+    assert validate_path_selectors(['src/a.py', 'src/b.py']) == ('src/a.py', 'src/b.py')
+    with pytest.raises(Exception):
+        validate_path_selectors(['../etc/passwd'])
+
+
+def test_template_inheritance_in_load_policies():
+    from pathlib import Path
+    from odytor.profile import load_policies
+    policies = load_policies(Path(__file__).resolve().parents[1] / 'deploy' / 'policies' / 'policy.toml')
+    smoke_policy = policies['alteixeira20/odytor-smoke-test']
+    assert 'python-pytest' in smoke_policy.profiles
+    assert 'python-lint' in smoke_policy.profiles
+    assert 'node-test' in smoke_policy.profiles
+    assert 'cmake-build' in smoke_policy.profiles
+    assert 'make-build' in smoke_policy.profiles

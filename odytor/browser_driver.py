@@ -278,8 +278,11 @@ def execute_step(run, page, step, index, expect):
             options["quality"] = 80
         data = (page.locator(step["selector"]).screenshot(**options) if "selector" in step
                 else page.screenshot(full_page=step.get("full_page", False), **options))
-        stored = run.add_artifact(step["name"] + (".jpg" if kind == "jpeg" else ".png"), "screenshot", data)
-        return {"artifact": step["name"], "bytes": len(data), "stored": stored}
+        mime = "image/jpeg" if kind == "jpeg" else "image/png"
+        from odytor.artifacts import normalize_artifact_name
+        artifact_name = normalize_artifact_name(step["name"], mime=mime, kind="screenshot")
+        stored = run.add_artifact(artifact_name, "screenshot", data)
+        return {"artifact": artifact_name, "bytes": len(data), "stored": stored}
     elif op == "snapshot":
         snap = run.take_snapshot(page, step.get("selector"), index)
         return {"title": snap["title"], "url": snap["url"]}

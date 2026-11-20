@@ -1,4 +1,21 @@
 # Maintainer test policy: repositories not listed here cannot be tested. Requirements files sit beside this file.
+
+[templates.standard-python]
+profile = "python-pytest"
+test_dirs = ["tests"]
+requirements = "smoke-test.requirements.txt"
+profiles = ["python-pytest", "python-lint", "python-typecheck", "python-build"]
+
+[templates.standard-polyglot]
+profile = "python-pytest"
+test_dirs = ["tests"]
+requirements = "smoke-test.requirements.txt"
+profiles = [
+    "python-pytest", "python-lint", "python-typecheck", "python-build",
+    "node-test", "node-lint", "node-typecheck", "node-build",
+    "cmake-build", "make-build", "c-test"
+]
+
 [repos."odysseus-dev/odysseus"]
 profile = "python-pytest"
 test_dirs = ["tests"]
@@ -14,7 +31,7 @@ port = 8765
 ready_path = "/index.html"
 
 [repos."alteixeira20/odytor-smoke-test"]
-profile = "python-pytest"
+template = "standard-polyglot"
 test_dirs = ["tests"]
 requirements = "smoke-test.requirements.txt"
 

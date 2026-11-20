@@ -368,6 +368,88 @@ def _prep(spec):
     return report
 
 
+_DIAG_LINE = re.compile(
+    r"^(?P<file>[A-Za-z0-9_./+-]+):(?P<line>\d+)(?::(?P<col>\d+))?:\s*(?:(?P<severity>error|warning|fatal error|note|info):\s*)?(?:(?P<code>[A-Za-z0-9_\[\]-]+)\s+)?(?P<message>.+)$"
+)
+
+
+def _parse_diagnostics(text, max_items=50):
+    items = []
+    for line in text.splitlines():
+        line_str = line.strip()
+        m = _DIAG_LINE.match(line_str)
+        if m:
+            d = m.groupdict()
+            items.append({
+                "file": d["file"],
+                "line": int(d["line"]),
+                "col": int(d["col"]) if d["col"] else None,
+                "severity": d["severity"] or "error",
+                "code": d["code"] or "",
+                "message": d["message"].strip()[:200],
+            })
+            if len(items) >= max_items:
+                break
+    return items
+
+
+def _run_cmd(spec):
+    report = {"harness": 1, "kind": spec.get("kind", "command"), "profile": spec.get("profile", ""), "extract": {"ok": False}}
+    os.makedirs("/tmp/home", exist_ok=True)
+    try:
+        files, size, skipped = _extract(spec["limits"]["files"], spec["limits"]["bytes"])
+        report["extract"] = {"ok": True, "members": files, "bytes": size, "skipped_unsafe_links": skipped[:20],
+                             "skipped_unsafe_link_count": len(skipped)}
+    except Exception as exc:
+        report["error"] = {"stage": "extract", "message": f"{type(exc).__name__}: {exc}"[:400]}
+        return report
+
+    env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": "/tmp/home", "TMPDIR": "/tmp",
+           "LANG": "C.UTF-8", "CI": "1", "NO_COLOR": "1"}
+    if os.path.exists(ENV_SITE):
+        env["PYTHONPATH"] = ENV_SITE
+
+    argv = spec["argv"]
+    log, started = _Log(), time.monotonic()
+    report["argv"] = argv
+    try:
+        proc = subprocess.Popen(argv, cwd=WORK, env=env, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    except OSError as exc:
+        report["error"] = {"stage": "spawn", "message": str(exc)[:400]}
+        return report
+
+    def pump():
+        for chunk in iter(lambda: proc.stdout.read(8192), b""):
+            log.feed(chunk)
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+    timed_out = False
+    try:
+        proc.wait(timeout=spec["timeout"])
+    except subprocess.TimeoutExpired:
+        timed_out = True
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    proc.wait()
+    reader.join(timeout=5)
+    rendered_log = log.render()
+    diagnostics = _parse_diagnostics(rendered_log.get("tail", "") + "\n" + rendered_log.get("head", ""))
+    report.update({
+        "exit": proc.returncode,
+        "timed_out": timed_out,
+        "duration_seconds": round(time.monotonic() - started, 3),
+        "log": rendered_log,
+        "diagnostics": diagnostics,
+        "diagnostics_count": len(diagnostics),
+    })
+    return report
+
+
 def main(argv):
     with open(os.path.join(INPUT, "job.json"), "r", encoding="utf-8") as handle:
         spec = json.load(handle)
@@ -375,6 +457,8 @@ def main(argv):
         report = _prep(spec)
     elif spec.get("kind") == "node_test":
         report = _run_node(spec)
+    elif spec.get("kind") in {"linter", "typechecker", "builder", "c_test"}:
+        report = _run_cmd(spec)
     else:
         report = _run_tests(spec)
     sys.stdout.write("\n" + MARK + json.dumps(report, separators=(",", ":")) + "\n")

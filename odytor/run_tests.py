@@ -172,11 +172,15 @@ def submit_workspace_run(repo: str, workspace_id: str, expected_version: int, *,
         raise ValidationError(f"The maintainer policy for this repository enables: {', '.join(policy.profiles)}.")
     try:
         if spec.kind == "node_test":
-            test_dirs = policy.extra[NODE_PROFILE]["test_dirs"]
+            test_dirs = policy.extra.get(NODE_PROFILE, {}).get("test_dirs", policy.test_dirs)
             selected = validate_node_selectors(selectors, test_dirs)
-        else:
+        elif spec.kind == "pytest":
             test_dirs = policy.test_dirs
             selected = validate_selectors(selectors, test_dirs)
+        else:
+            test_dirs = policy.test_dirs
+            from odytor.profile import validate_path_selectors
+            selected = validate_path_selectors(selectors)
     except ProfileError as exc:
         raise ValidationError(str(exc)) from exc
     current = workspaces.get(workspace_id, owner, operation="execute")

@@ -183,7 +183,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                     return safe_payload(ValidationError("Unknown run_id.").to_dict())
                 if not cfg.is_repo_allowed(record["repo"]):
                     return safe_payload(SecurityError("This run's repository is no longer permitted by Odytor configuration.").to_dict())
-                return safe_payload(fetch_test_result(client, record["repo"], run_id, service=service, owner=owner, workspaces=workspaces))
+                return safe_payload(fetch_test_result(client, record["repo"], run_id, service=service, owner=owner, workspaces=workspaces), limit=262144)
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 
@@ -224,11 +224,13 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             return safe_payload(err.to_dict())
 
     @tool(annotations={"readOnlyHint": True, "openWorldHint": False},
-          description="Read a workspace without changing it. mode='tree' lists a directory (path, optional recursive); mode='file' returns numbered lines (start_line/end_line, at most 400 lines or 64 KiB per call; next_start_line says where to continue); mode='symbols' lists definitions in one file (exact for Python, best effort for JS/TS). Symlinks are reported, never followed; binary files are flagged, not returned. Always reports workspace_id, version and tree.")
+          description="Read a workspace without changing it. mode='tree' lists a directory (path, optional recursive); mode='file' returns numbered lines (start_line/end_line, at most 400 lines or 64 KiB per call; next_start_line says where to continue); mode='symbols' lists definitions in one file (exact for Python, best effort for JS/TS). Symlinks are reported, never followed; binary files are flagged, not returned. Optional paths list reads multiple files in a single turn. Always reports workspace_id, version and tree.")
     def workspace_read(workspace_id: WorkspaceId, mode: Literal["tree", "file", "symbols"] = "tree", path: str = "",
                        start_line: Annotated[int, Field(ge=1)] = 1, end_line: Annotated[int | None, Field(ge=1)] = None,
-                       recursive: bool = False) -> dict[str, Any]:
+                       recursive: bool = False, paths: list[str] | None = None) -> dict[str, Any]:
         def call(owner):
+            if paths:
+                return workspaces.batch_read(workspace_id, owner, paths=paths)
             if mode == "tree":
                 return workspaces.tree(workspace_id, owner, path=path, recursive=recursive)
             if not path:
@@ -236,7 +238,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             if mode == "file":
                 return workspaces.read(workspace_id, owner, path=path, start_line=start_line, end_line=end_line)
             return workspaces.symbols(workspace_id, owner, path=path)
-        return invoke_ws(workspace_id, call)
+        return invoke_ws(workspace_id, call, limit=262144)
 
     @tool(annotations={"readOnlyHint": True, "openWorldHint": False},
           description="Search workspace text with git grep over the exact tree. fixed=true (default) matches the literal string; fixed=false uses an extended regular expression. path limits the search to a directory or file. Returns at most 100 matches with file, line and a clipped line of text, and says whether the result is complete.")
@@ -294,7 +296,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             return safe_payload(runner_not_configured())
         return invoke_ws(workspace_id, lambda owner: submit_workspace_run(
             workspaces.peek(workspace_id, owner)["repo"], workspace_id, expected_version, workspaces=workspaces, service=service,
-            policies=policies, owner=owner, cfg=runs, profile=profile, selectors=selectors))
+            policies=policies, owner=owner, cfg=runs, profile=profile, selectors=selectors), limit=262144)
 
     @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
           description="Manage workspaces. action='list' (your open workspaces), 'status' (one workspace: version, tree, expiry, checkpoints, whether it differs from its source), 'extend' (hours, capped by the maximum lifetime) or 'close' (deletes the workspace and its unpublished changes). Expired workspaces are removed automatically; nothing here touches GitHub.")
@@ -421,9 +423,10 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 
-    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
-          description="The only tool that writes workspace changes to GitHub: appends the planned commit to the PR head branch. Needs user_authorized=true (only after the user explicitly approved this exact plan) and confirm equal to the plan's confirmation text, which names the tree and patch digest. Refuses if the workspace changed since planning, the recomputed patch differs, or the PR head moved. Same-repository branches use GitHub's atomic expected-head check; contributor forks use a leased fast-forward push with the authenticated user's attribution and GitHub-confirmed maintainer access. Never force-pushes, merges, approves or comments. A plan applies at most once: repeats return the earlier result, and after an uncertain outcome calling this again reconciles against the real remote before writing anything.")
-    def publish_apply(plan_id: Annotated[str, Field(pattern=r"^pp-[0-9a-f]{32}$")], confirm: str, user_authorized: bool = False) -> dict[str, Any]:
+    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+          description="The only tool that writes workspace changes to GitHub: appends the planned commit to the PR head branch. Needs user_authorized=true (only after the user explicitly approved this exact plan) and confirm equal to the plan's confirmation text (or cryptographic approval_token). Refuses if the workspace changed since planning, the recomputed patch differs, or the PR head moved. Same-repository branches use GitHub's atomic expected-head check; contributor forks use a leased fast-forward push with the authenticated user's attribution and GitHub-confirmed maintainer access. Never force-pushes, merges, approves or comments. A plan applies at most once: repeats return the earlier result, and after an uncertain outcome calling this again reconciles against the real remote before writing anything.")
+    def publish_apply(plan_id: Annotated[str, Field(pattern=r"^pp-[0-9a-f]{32}$")], confirm: str, user_authorized: bool = False,
+                      approval_token: str | None = None) -> dict[str, Any]:
         if workspaces is None or plans is None:
             return safe_payload(ValidationError("Workspaces are disabled on this server.").to_dict())
         if not getattr(cfg.workspaces, "allow_publish_apply", False):
@@ -436,8 +439,8 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             if not cfg.is_repo_allowed(plan["repo"]):
                 raise SecurityError("This plan's repository is no longer permitted by Odytor configuration.")
             with github_client(cfg, remote, repo=plan["repo"]) as client:
-                return safe_payload(apply_publication(client, plan["repo"], plan_id, confirm, user_authorized, workspaces=workspaces, plans=plans,
-                                                      jobs=service, owner=owner), limit=70000)
+                return safe_payload(apply_publication(client, plan["repo"], plan_id, confirm, user_authorized, approval_token=approval_token,
+                                                      workspaces=workspaces, plans=plans, jobs=service, owner=owner), limit=70000)
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 

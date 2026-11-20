@@ -12,6 +12,16 @@ PROFILE_VERSION = "1"
 NODE_PROFILE = "node-test"
 BROWSER_PROFILE = "browser-playwright"
 
+PYTHON_LINT_PROFILE = "python-lint"
+PYTHON_TYPECHECK_PROFILE = "python-typecheck"
+PYTHON_BUILD_PROFILE = "python-build"
+NODE_LINT_PROFILE = "node-lint"
+NODE_TYPECHECK_PROFILE = "node-typecheck"
+NODE_BUILD_PROFILE = "node-build"
+CMAKE_BUILD_PROFILE = "cmake-build"
+MAKE_BUILD_PROFILE = "make-build"
+C_TEST_PROFILE = "c-test"
+
 
 @dataclass(frozen=True)
 class ProfileSpec:
@@ -23,8 +33,8 @@ class ProfileSpec:
     """
     name: str
     version: str
-    kind: str                 # pytest | node_test | browser
-    runtime: str              # python | node | browser
+    kind: str                 # pytest | node_test | browser | linter | typechecker | builder | c_test
+    runtime: str              # python | node | browser | c
     summary: str
     tools: tuple[str, ...]
     needs_env: bool = False
@@ -37,9 +47,36 @@ REGISTRY: dict[str, ProfileSpec] = {
     PROFILE_NAME: ProfileSpec(
         PROFILE_NAME, PROFILE_VERSION, "pytest", "python", "pytest on an exact tree with maintainer-approved pinned requirements",
         ("python",), needs_env=True, commands=("pytest",)),
+    PYTHON_LINT_PROFILE: ProfileSpec(
+        PYTHON_LINT_PROFILE, "1", "linter", "python", "Python code analysis and linting (ruff check or flake8)",
+        ("python",), commands=("ruff", "lint")),
+    PYTHON_TYPECHECK_PROFILE: ProfileSpec(
+        PYTHON_TYPECHECK_PROFILE, "1", "typechecker", "python", "Python static type checking (mypy)",
+        ("python",), commands=("mypy", "typecheck")),
+    PYTHON_BUILD_PROFILE: ProfileSpec(
+        PYTHON_BUILD_PROFILE, "1", "builder", "python", "Python package build verification (python -m build)",
+        ("python",), commands=("build",)),
     NODE_PROFILE: ProfileSpec(
         NODE_PROFILE, "1", "node_test", "node", "node --test (TAP) on repository test files, no dependency installation",
         ("node",), commands=("node --test",)),
+    NODE_LINT_PROFILE: ProfileSpec(
+        NODE_LINT_PROFILE, "1", "linter", "node", "JavaScript/TypeScript code analysis (eslint)",
+        ("node",), commands=("eslint", "lint")),
+    NODE_TYPECHECK_PROFILE: ProfileSpec(
+        NODE_TYPECHECK_PROFILE, "1", "typechecker", "node", "TypeScript static type checking (tsc --noEmit)",
+        ("node",), commands=("tsc", "typecheck")),
+    NODE_BUILD_PROFILE: ProfileSpec(
+        NODE_BUILD_PROFILE, "1", "builder", "node", "Node/JavaScript build verification (npm run build)",
+        ("node",), commands=("build",)),
+    CMAKE_BUILD_PROFILE: ProfileSpec(
+        CMAKE_BUILD_PROFILE, "1", "builder", "c", "C/C++ CMake configuration and build",
+        ("cmake", "make", "compiler"), commands=("cmake", "make")),
+    MAKE_BUILD_PROFILE: ProfileSpec(
+        MAKE_BUILD_PROFILE, "1", "builder", "c", "C/C++ Make build",
+        ("make", "compiler"), commands=("make",)),
+    C_TEST_PROFILE: ProfileSpec(
+        C_TEST_PROFILE, "1", "c_test", "c", "C/C++ test execution (ctest or make test)",
+        ("make", "compiler"), commands=("ctest", "test")),
     BROWSER_PROFILE: ProfileSpec(
         BROWSER_PROFILE, "1", "browser", "browser", "Chromium against an application served inside the sandbox; scripted steps, assertions, screenshots, traces",
         ("python", "playwright", "chromium"), produces_artifacts=True,
@@ -168,6 +205,51 @@ def build_argv(selectors: tuple[str, ...]) -> list[str]:
             "--", *selectors]
 
 
+def validate_path_selectors(selectors: object) -> tuple[str, ...]:
+    if selectors is None:
+        return ()
+    if not isinstance(selectors, (list, tuple)):
+        raise ProfileError("selectors must be a list of paths or omitted.")
+    if len(selectors) > MAX_SELECTORS:
+        raise ProfileError(f"At most {MAX_SELECTORS} selectors are allowed.")
+    cleaned = []
+    for s in selectors:
+        if not isinstance(s, str) or not s.strip():
+            raise ProfileError("Selectors must be non-empty strings.")
+        p = s.strip().rstrip("/")
+        if _SELECTOR_PATH.fullmatch(p) is None or any(part in {".", ".."} for part in p.split("/")):
+            raise ProfileError(f"Invalid selector path: {s!r}")
+        cleaned.append(p)
+    return tuple(dict.fromkeys(cleaned))
+
+
+def build_profile_argv(profile: str, selectors: tuple[str, ...]) -> list[str]:
+    """Build the command argv for a given profile and validated selectors."""
+    if profile == PROFILE_NAME:
+        return build_argv(selectors)
+    if profile == NODE_PROFILE:
+        return build_node_argv(selectors)
+    if profile == PYTHON_LINT_PROFILE:
+        return ["python3", "-m", "ruff", "check", *(selectors if selectors else (".",))]
+    if profile == PYTHON_TYPECHECK_PROFILE:
+        return ["python3", "-m", "mypy", *(selectors if selectors else (".",))]
+    if profile == PYTHON_BUILD_PROFILE:
+        return ["python3", "-m", "build", "--no-isolation"]
+    if profile == NODE_LINT_PROFILE:
+        return ["npx", "--no-install", "eslint", *(selectors if selectors else (".",))]
+    if profile == NODE_TYPECHECK_PROFILE:
+        return ["npx", "--no-install", "tsc", "--noEmit"]
+    if profile == NODE_BUILD_PROFILE:
+        return ["npm", "run", "build"]
+    if profile == CMAKE_BUILD_PROFILE:
+        return ["sh", "-c", "cmake -B build -S . && cmake --build build"]
+    if profile == MAKE_BUILD_PROFILE:
+        return ["make"]
+    if profile == C_TEST_PROFILE:
+        return ["sh", "-c", "if [ -d build ]; then ctest --test-dir build --output-on-failure; else make test; fi"]
+    raise ProfileError(f"Unknown execution profile: {profile}")
+
+
 _REQUIREMENT = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?(?:\[[A-Za-z0-9._,-]+\])?==[A-Za-z0-9][A-Za-z0-9._+!*-]*")
 _MARKER = re.compile(r"[A-Za-z0-9._<>=!~'\" ()-]+")
@@ -245,10 +327,17 @@ def load_policies(path: str | Path) -> dict[str, RepoPolicy]:
     file = Path(path)
     with file.open("rb") as handle:
         data = tomllib.load(handle)
+    templates = data.get("templates") or {}
     policies: dict[str, RepoPolicy] = {}
-    for repo, entry in (data.get("repos") or {}).items():
-        if not is_repo(repo) or not isinstance(entry, dict):
+    for repo, raw_entry in (data.get("repos") or {}).items():
+        if not is_repo(repo) or not isinstance(raw_entry, dict):
             raise ProfileError(f"Invalid repository policy '{repo}'.")
+        entry = dict(raw_entry)
+        template_name = entry.get("template")
+        if template_name:
+            if template_name not in templates or not isinstance(templates[template_name], dict):
+                raise ProfileError(f"Unknown template '{template_name}' for {repo}.")
+            entry = {**templates[template_name], **entry}
         profile = entry.get("profile", PROFILE_NAME)
         if profile not in PROFILES:
             raise ProfileError(f"Unknown profile '{profile}' for {repo}.")
@@ -271,6 +360,13 @@ def load_policies(path: str | Path) -> dict[str, RepoPolicy]:
         else:
             text = ""  # a profile without Python dependencies has nothing to approve
         extra: dict = {}
+        for p in entry.get("profiles", []):
+            if p in PROFILES and p != profile:
+                extra.setdefault(p, {})
+        for p_name in PROFILES:
+            if p_name in entry and p_name not in {NODE_PROFILE, BROWSER_PROFILE} and p_name != profile:
+                val = entry[p_name]
+                extra[p_name] = val if isinstance(val, dict) else {}
         if NODE_PROFILE in entry:
             table = entry[NODE_PROFILE]
             node_dirs = table.get("test_dirs", dirs) if isinstance(table, dict) else None

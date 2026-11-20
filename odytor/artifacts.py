@@ -29,9 +29,65 @@ SCHEMA = 1
 AR_ID = re.compile(r"ar-[0-9a-f]{32}")
 KINDS = frozenset({"screenshot", "log", "report", "trace", "console", "network", "snapshot", "video", "other"})
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._ -]{0,79}")
+_SAFE_NAME_CHARS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,255}$")
 TEXT_WINDOW = 65536
 BASE64_WINDOW = 49152  # raw bytes per chunk; keeps the encoded JSON string under ~64 KiB
 _ACTIVE_HINTS = (b"<html", b"<!doctype html", b"<svg", b"<script", b"<?xml")
+
+_EXT_BY_MIME: dict[str, str] = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "application/zip": ".zip",
+    "text/plain": ".txt",
+    "application/octet-stream": ".bin",
+    "application/json": ".json",
+}
+
+
+def normalize_artifact_name(name: str, *, mime: str | None = None, kind: str | None = None) -> str:
+    """Normalize and sanitize an artifact filename.
+
+    Collapses duplicated extensions (e.g. .png.png), validates character set,
+    and aligns extension with mime/kind. Invalid names or paths fall back to 'artifact'.
+    """
+    if not isinstance(name, str) or not _SAFE_NAME_CHARS.fullmatch(name):
+        return "artifact"
+
+    clean = name
+    # Collapse repeated consecutive duplicate extensions (e.g. .png.png -> .png, .jpg.jpg -> .jpg)
+    while True:
+        m = re.search(r"(\.[a-zA-Z0-9]+)\1+$", clean, re.IGNORECASE)
+        if m:
+            clean = clean[:m.start(0)] + m.group(1)
+        else:
+            break
+
+    target_ext = _EXT_BY_MIME.get(mime or "")
+    if not target_ext and kind == "screenshot":
+        target_ext = ".png"
+
+    if target_ext and (kind == "screenshot" or any(clean.lower().endswith(e) for e in (".png", ".jpg", ".jpeg", ".webp", ".txt", ".log", ".bin", ".json"))):
+        lower = clean.lower()
+        valid_exts = (".jpg", ".jpeg") if target_ext in (".jpg", ".jpeg") else (target_ext,)
+        has_valid_ext = any(lower.endswith(ve) for ve in valid_exts)
+        if not has_valid_ext:
+            for ke in (".png", ".jpg", ".jpeg", ".webp", ".txt", ".log", ".bin", ".json"):
+                if lower.endswith(ke):
+                    clean = clean[:-len(ke)]
+                    break
+            clean = clean.rstrip(".") + target_ext
+
+    if len(clean) > 80:
+        dot_idx = clean.rfind(".")
+        if dot_idx > 0 and len(clean) - dot_idx <= 10:
+            ext = clean[dot_idx:]
+            base = clean[:dot_idx]
+            clean = base[:80 - len(ext)] + ext
+        else:
+            clean = clean[:80]
+
+    return clean if NAME.fullmatch(clean) else "artifact"
 
 
 @dataclass(frozen=True)
@@ -119,10 +175,10 @@ class ArtifactStore:
             kind = "other"
         if len(data) == 0 or len(data) > self.limits.max_artifact_bytes:
             raise ValidationError("Artifact is empty or exceeds the per-artifact limit.", {"max_bytes": self.limits.max_artifact_bytes})
-        clean = name if isinstance(name, str) and NAME.fullmatch(name) else "artifact"
         info = sniff(data)
         if kind == "screenshot" and info["class"] != "image":
             raise ValidationError("A screenshot must be a PNG, JPEG or WebP image.")
+        clean = normalize_artifact_name(name, mime=info["mime"], kind=kind)
         with self._lock:
             live = [r for r in self.records() if r["expires_at"] > self.clock()]
             if sum(r["size"] for r in live if r["owner"] == owner) + len(data) > self.limits.max_owner_bytes:

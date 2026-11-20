@@ -120,6 +120,17 @@ def test_a_diff_is_not_held_to_the_small_per_string_cap_but_other_text_is():
     assert len(explicit['diff']) < 1100  # an explicit limit still binds the diff
 
 
+def test_content_and_patch_and_chunk_are_exempt_from_small_per_string_cap():
+    big = 'a' * 50000
+    result = safe_payload({'content': big, 'patch': big, 'chunk': big, 'log': big, 'note': big})
+    assert len(result['content']) == 50000
+    assert len(result['patch']) == 50000
+    assert len(result['chunk']) == 50000
+    assert len(result['log']) == 50000
+    assert len(result['note']) < 9000
+    assert result['truncated_fields'] == ['note']
+
+
 def test_an_over_budget_field_keeps_most_of_the_budget_instead_of_half():
     import json
     line = '+                if count == 0 or force or time.monotonic() >= deadline: unicode é ü'

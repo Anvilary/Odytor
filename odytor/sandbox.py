@@ -393,6 +393,10 @@ _TOOLS_SCRIPT = (
     "try:\n import playwright\n out['playwright']=True\n"
     "except Exception:\n out['playwright']=False\n"
     "out['chromium']=bool(glob.glob(os.environ.get('PLAYWRIGHT_BROWSERS_PATH','/ms-playwright')+'/chromium-*'))\n"
+    "out['cmake']=bool(shutil.which('cmake'))\n"
+    "out['make']=bool(shutil.which('make'))\n"
+    "out['compiler']=bool(shutil.which('gcc') or shutil.which('clang') or shutil.which('cc'))\n"
+    "out['clang']=bool(shutil.which('clang'))\n"
     "print(json.dumps(out))\n")
 
 
@@ -410,7 +414,7 @@ def image_tools(cfg: RunnerConfig, image: ImageInfo) -> dict:
         tools = json.loads(probe_run.stdout.decode().strip().splitlines()[-1])
     except (ValueError, IndexError):
         return {"python": True, "node": False, "playwright": False, "chromium": False, "observed": False}
-    tools = {k: bool(v) for k, v in tools.items() if k in {"python", "node", "playwright", "chromium"}}
+    tools = {k: bool(v) for k, v in tools.items() if k in {"python", "node", "playwright", "chromium", "cmake", "make", "compiler", "clang"}}
     cfg.root.mkdir(parents=True, exist_ok=True)
     cache.write_text(json.dumps(tools))
     return tools
@@ -433,9 +437,15 @@ def _run_plain(cfg: RunnerConfig, job: dict, image: ImageInfo, source: Path, job
     if job["kind"] == "browser":
         spec = {"kind": "browser", "timeout": job["timeout"], "limits": limits, "serve": job["serve"], "scenario": job["scenario"]}
         scripts, command, ceiling = ("harness.py", "browser_driver.py", "browser_spec.py"), [f"{INPUT_DIR}/browser_driver.py"], MAX_ARTIFACT_REPORT_BYTES
-    else:
+    elif job["kind"] == "node_test":
         spec = {"kind": "node_test", "argv": build_node_argv(job["selectors"]), "selectors": list(job["selectors"]), "timeout": job["timeout"],
                 "limits": limits}
+        scripts, command, ceiling = ("harness.py",), [f"{INPUT_DIR}/harness.py", "test"], MAX_REPORT_BYTES
+    else:
+        from odytor.profile import build_profile_argv
+        argv = build_profile_argv(job["profile"], tuple(job.get("selectors") or ()))
+        spec = {"kind": job["kind"], "profile": job["profile"], "argv": argv, "selectors": list(job.get("selectors") or ()),
+                "timeout": job["timeout"], "limits": limits}
         scripts, command, ceiling = ("harness.py",), [f"{INPUT_DIR}/harness.py", "test"], MAX_REPORT_BYTES
     _write(run / "job.json", json.dumps(spec))
     for name in scripts:

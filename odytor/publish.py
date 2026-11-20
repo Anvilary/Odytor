@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -57,6 +58,25 @@ class PlanStore:
     def __init__(self, directory: str | Path, clock: Callable[[], float] = time.time) -> None:
         self.root, self.clock = Path(directory), clock
         self._lock = threading.RLock()
+
+    def signing_key(self) -> bytes:
+        with self._lock:
+            self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            key_file = self.root / ".signing_key"
+            if key_file.exists():
+                try:
+                    k = key_file.read_bytes()
+                    if len(k) >= 32:
+                        return k
+                except OSError:
+                    pass
+            new_key = os.urandom(32)
+            tmp = key_file.with_suffix(f".tmp-{os.getpid()}-{threading.get_ident()}")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(new_key)
+            os.replace(tmp, key_file)
+            return new_key
 
     def _path(self, plan_id: str) -> Path:
         if not isinstance(plan_id, str) or not PLAN_ID.fullmatch(plan_id):
@@ -106,6 +126,28 @@ def _iso(epoch: float | None) -> str | None:
 def confirmation_phrase(plan_id: str, tree: str, patch_sha256: str) -> str:
     """What the authorizer must quote back: it names the plan, the exact tree and the patch digest."""
     return f"publish {plan_id} tree {tree[:12]} patch {patch_sha256[:12]}"
+
+
+def _normalize_expiry(expires_at: float | str) -> int:
+    if isinstance(expires_at, (int, float)):
+        return int(expires_at)
+    import datetime as dt
+    try:
+        return int(dt.datetime.fromisoformat(str(expires_at)).timestamp())
+    except Exception:
+        return 0
+
+
+def make_approval_token(key: bytes, plan_id: str, owner: str, repo: str, tree: str, patch_sha256: str, expires_at: float | str) -> str:
+    msg = f"{plan_id}:{owner}:{repo}:{tree}:{patch_sha256}:{_normalize_expiry(expires_at)}".encode("utf-8")
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()
+
+
+def verify_approval_token(key: bytes, token: str, plan_id: str, owner: str, repo: str, tree: str, patch_sha256: str, expires_at: float | str) -> bool:
+    if not isinstance(token, str) or not token:
+        return False
+    expected = make_approval_token(key, plan_id, owner, repo, tree, patch_sha256, expires_at)
+    return hmac.compare_digest(token, expected)
 
 
 def _changed_files(repository: WorkspaceRepo, base: str, tree: str) -> list[dict[str, Any]]:
@@ -236,12 +278,14 @@ def plan_publication(client: Any, repo: str, workspace_id: str, expected_version
                            "as a leased fast-forward; the commit will not be GitHub-signed.")
     now = workspaces.clock()
     plan_id = new_plan_id()
+    approval_token = make_approval_token(plans.signing_key(), plan_id, owner, repo, tree, hashlib.sha256(patch).hexdigest(), now + PLAN_TTL_SECONDS)
     plan = {"schema": SCHEMA, "plan_id": plan_id, "owner": owner, "repo": repo, "state": "pending", "workspace_id": workspace_id,
             "workspace_version": record["version"], "tree": tree, "base_tree": base_tree, "patch_sha256": hashlib.sha256(patch).hexdigest(),
             "patch_bytes": len(patch), "files": files, "commit_message": commit_message.strip(),
             "target": {"kind": "pr_head", "number": record["pr"], "head_sha": head, "head_repo": source["head_repo"], "head_ref": source["head_ref"],
                        "is_fork": fork},
-            "validation": evidence, "limitations": limitations, "created_at": now, "expires_at": now + PLAN_TTL_SECONDS}
+            "validation": evidence, "limitations": limitations, "created_at": now, "expires_at": now + PLAN_TTL_SECONDS,
+            "approval_token": approval_token}
     plan["confirmation"] = confirmation_phrase(plan_id, tree, plan["patch_sha256"])
     plans.save(plan)
     return public_plan(plan, patch)
@@ -250,10 +294,13 @@ def plan_publication(client: Any, repo: str, workspace_id: str, expected_version
 def public_plan(plan: dict[str, Any], patch: bytes | None = None) -> dict[str, Any]:
     out = {k: plan[k] for k in ("plan_id", "state", "repo", "workspace_id", "workspace_version", "tree", "base_tree", "patch_sha256", "patch_bytes",
                                 "files", "commit_message", "target", "validation", "limitations", "confirmation")}
+    if "approval_token" in plan:
+        out["approval_token"] = plan["approval_token"]
     out.update(created_at=_iso(plan["created_at"]), expires_at=_iso(plan["expires_at"]), github_mutations="none until publish_apply succeeds",
                required_authorization={"user_authorized": True, "confirm": plan["confirmation"],
+                                       "approval_token": plan.get("approval_token"),
                                        "note": "Show this plan to the user. Call publish_apply only with their explicit approval, passing "
-                                               "user_authorized=true and the confirm text above."})
+                                               "user_authorized=true and the confirm text or approval_token above."})
     if plan.get("result"):
         out["result"] = plan["result"]
     if patch is not None:
@@ -289,7 +336,7 @@ def _reconcile(repository: WorkspaceRepo, plan: dict[str, Any]) -> dict[str, Any
 
 
 def apply_publication(client: Any, repo: str, plan_id: str, confirm: str, user_authorized: bool, *, workspaces: WorkspaceService,
-                      plans: PlanStore, jobs: Any | None, owner: str) -> dict[str, Any]:
+                      plans: PlanStore, jobs: Any | None, owner: str, approval_token: str | None = None) -> dict[str, Any]:
     """The only GitHub write in this module. Every precondition is re-checked against live state, not against the plan alone."""
     validate_repo(repo)
     plan = plans.get(plan_id, owner)
@@ -300,7 +347,15 @@ def apply_publication(client: Any, repo: str, plan_id: str, confirm: str, user_a
     if user_authorized is not True:
         raise SecurityError("Publishing writes to GitHub and needs explicit user approval. Pass user_authorized=true only after the user "
                             "approved this exact plan.", {"required": "user_authorized"})
-    if not isinstance(confirm, str) or confirm != plan["confirmation"]:
+    token_valid = False
+    if approval_token:
+        token_valid = verify_approval_token(plans.signing_key(), approval_token, plan_id, owner, plan["repo"],
+                                            plan["tree"], plan["patch_sha256"], plan["expires_at"])
+    confirm_valid = isinstance(confirm, str) and (
+        confirm == plan["confirmation"] or
+        confirm == confirmation_phrase(plan_id, plan["tree"], plan["patch_sha256"])
+    )
+    if not token_valid and not confirm_valid:
         raise SecurityError("The confirmation does not match this plan. It must quote the plan's confirmation text exactly, which names "
                             "the tree and patch digest the user approved.", {"required": "confirm"})
     if plan["state"] == "pending" and plan["expires_at"] <= workspaces.clock():

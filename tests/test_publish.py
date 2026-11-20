@@ -46,9 +46,9 @@ def plan(stack, w, version, message='test: cover the empty case', **kw):
     return plan_publication(client, 'owner/repo', w, version, message, workspaces=service, plans=plans, jobs=None, owner=OWNER, **{**LIMITS, **kw})
 
 
-def apply(stack, plan_id, confirm, authorized=True, owner=OWNER):
+def apply(stack, plan_id, confirm, authorized=True, owner=OWNER, approval_token=None):
     service, plans, client, *_ = stack
-    return apply_publication(client, 'owner/repo', plan_id, confirm, authorized, workspaces=service, plans=plans, jobs=None, owner=owner)
+    return apply_publication(client, 'owner/repo', plan_id, confirm, authorized, workspaces=service, plans=plans, jobs=None, owner=owner, approval_token=approval_token)
 
 
 def commit_response(tree, head, sha='f' * 40):
@@ -379,3 +379,21 @@ def test_a_rejected_fork_push_leaves_the_plan_applicable(fork_stack, monkeypatch
 def test_the_fork_write_grant_set_includes_publication_and_nothing_broader():
     from odytor.github import FORK_WRITE_OPERATIONS
     assert FORK_WRITE_OPERATIONS == frozenset({'quick_fix', 'workspace_publish'})
+
+
+def test_cryptographically_bound_approval_token_verification(stack):
+    from odytor.publish import verify_approval_token
+    service, plans, client, repo, head, open_ws = stack
+    w, v = edited(stack)
+    p = plan(stack, w, v)
+    assert 'approval_token' in p and len(p['approval_token']) == 64
+    assert verify_approval_token(plans.signing_key(), p['approval_token'], p['plan_id'], OWNER, 'owner/repo',
+                                 p['tree'], p['patch_sha256'], p['expires_at']) is True
+    assert verify_approval_token(plans.signing_key(), 'invalid', p['plan_id'], OWNER, 'owner/repo',
+                                 p['tree'], p['patch_sha256'], p['expires_at']) is False
+    client.graphql.return_value = commit_response(p['tree'], head)
+    applied = apply(stack, p['plan_id'], '', approval_token=p['approval_token'])
+    assert applied['state'] == 'applied'
+    # Replay is idempotent
+    replayed = apply(stack, p['plan_id'], '', approval_token=p['approval_token'])
+    assert replayed['idempotent_replay'] is True

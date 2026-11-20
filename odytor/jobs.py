@@ -520,6 +520,83 @@ def classify_browser(payload: dict[str, Any], expected_steps: int, replay: int) 
     return end("passed")
 
 
+def classify_command(payload: dict[str, Any], profile: str) -> dict[str, Any]:
+    outcome: dict[str, Any] = {
+        "runner": _sanitize_runner(payload.get("runner")),
+        "failure": None, "counts": None, "log": None, "execution": None,
+        "diagnostics": [], "diagnostics_summary": {"errors": 0, "warnings": 0, "total": 0},
+    }
+
+    def end(status: str, kind: str | None = None, message: str | None = None, **extra: Any) -> dict[str, Any]:
+        outcome["status"] = status
+        if kind:
+            outcome["failure"] = {"kind": kind, "message": message or kind, **extra}
+        return outcome
+
+    problem = payload.get("setup_error")
+    if isinstance(problem, dict):
+        return end("setup_error", _str(problem.get("stage"), 40) or "runner", _str(problem.get("message"), 300),
+                   detail=safe_text(json.dumps(problem.get("detail", {}), default=str), 1200))
+
+    sandbox = payload.get("sandbox") if isinstance(payload.get("sandbox"), dict) else {}
+    if sandbox.get("timed_out"):
+        return end("timeout", "timeout", "The sandbox exceeded its execution deadline.")
+
+    report = payload.get("report")
+    if not isinstance(report, dict) or report.get("harness") != 1:
+        return end("setup_error", "missing_report", "The sandbox produced no valid report.",
+                   engine_exit_code=sandbox.get("engine_exit_code"),
+                   stderr=safe_text(_str(sandbox.get("engine_stderr_tail"), 600), 600))
+
+    if isinstance(report.get("error"), dict):
+        err = report["error"]
+        return end("setup_error", _str(err.get("stage"), 40) or "sandbox", _str(err.get("message"), 300))
+
+    log = report.get("log") if isinstance(report.get("log"), dict) else {}
+    outcome["log"] = {
+        "head": _log_part(log.get("head"), 4096),
+        "tail": _log_part(log.get("tail"), 8192),
+        "total_bytes": _int(log.get("total_bytes"), 10**13),
+        "truncated": bool(log.get("truncated")),
+    }
+    outcome["execution"] = {
+        "container_seconds": round(_num(sandbox.get("container_seconds"), 1e6), 3),
+        "exit_code": report.get("exit"),
+        "duration_seconds": round(_num(report.get("duration_seconds"), 1e6), 3),
+        "argv": report.get("argv") or [],
+    }
+
+    diags = []
+    err_count, warn_count = 0, 0
+    for d in report.get("diagnostics") or []:
+        if isinstance(d, dict):
+            sev = str(d.get("severity", "error")).lower()
+            if "err" in sev or "fatal" in sev:
+                err_count += 1
+            elif "warn" in sev:
+                warn_count += 1
+            diags.append({
+                "file": _str(d.get("file"), 200),
+                "line": _int(d.get("line")),
+                "column": _int(d.get("col")) if d.get("col") is not None else None,
+                "severity": _str(d.get("severity"), 20),
+                "code": _str(d.get("code"), 40) or None,
+                "message": _str(d.get("message"), 300),
+            })
+    outcome["diagnostics"] = diags[:50]
+    outcome["diagnostics_summary"] = {"errors": err_count, "warnings": warn_count, "total": len(diags)}
+
+    if report.get("timed_out"):
+        return end("timeout", "timeout", f"Execution for profile '{profile}' timed out.")
+
+    exit_code = report.get("exit")
+    if exit_code == 0:
+        return end("passed")
+    else:
+        return end("failed", "nonzero_exit", f"Profile '{profile}' failed with exit code {exit_code}.",
+                   exit_code=exit_code)
+
+
 def classify_job(record: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     """Dispatch on the profile's kind: each profile has its own evidence rules; none falls through to pytest's."""
     from odytor.profile import REGISTRY
@@ -529,6 +606,8 @@ def classify_job(record: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
         return classify_node(payload, tuple(record["selectors"]))
     if kind == "browser":
         return classify_browser(payload, record["browser"]["steps_total"], record["browser"]["replay"])
+    if kind in {"linter", "typechecker", "builder", "c_test"}:
+        return classify_command(payload, record.get("profile", ""))
     return classify(payload, tuple(record["selectors"]), record["requirements_sha256"],
                     tuple((record.get("overlay") or {}).get("test_paths", [])))
 
