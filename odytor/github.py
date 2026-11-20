@@ -205,22 +205,24 @@ class GitHubClient:
         *,
         params: dict[str, Any] | None = None,
         json_data: Any = None,
+        json: Any = None,
         data: Any = None,
         accept: str = "application/vnd.github+json",
         raw: bool = False,
     ) -> requests.Response:
         """Execute a GitHub API request with bounded retry and rate limit checks."""
+        payload = json_data if json is None else json
         url = path if path.startswith("http") else f"{self.base_url}/{path.lstrip('/')}"
         if urlsplit(url).netloc != urlsplit(self.base_url).netloc or urlsplit(url).scheme != "https":
             raise SecurityError("API requests must stay on the configured GitHub origin.")
-        self._check_scoped_request(url, json_data, method.upper())
+        self._check_scoped_request(url, payload, method.upper())
         headers = self._headers(accept=accept)
         attempts = self.max_retries if method.upper() in {"GET", "HEAD"} else 1
 
         last_error: Exception | None = None
         for attempt in range(attempts):
             try:
-                resp = self._bounded_request(method, url, params=params, json=json_data,
+                resp = self._bounded_request(method, url, params=params, json=payload,
                                              data=data, headers=headers)
 
                 if resp.status_code in {502, 503, 504} and attempt < attempts - 1:

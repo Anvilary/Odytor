@@ -445,9 +445,10 @@ def test_plan_and_apply_pr_body_draft_only_and_invariants(stack):
 
     # Reset body and simulate successful PATCH + read-back
     client.get_pr.return_value["body"] = current_body
-    def mock_patch(method, path, json=None):
-        if method == "PATCH" and "pulls/5" in path:
-            client.get_pr.return_value["body"] = json.get("body")
+    def mock_patch(method, path, json=None, json_data=None, **kwargs):
+        payload = json if json is not None else json_data
+        if method == "PATCH" and "pulls/5" in path and payload:
+            client.get_pr.return_value["body"] = payload.get("body")
             return MagicMock(status_code=200)
         return MagicMock(status_code=200)
     client.request.side_effect = mock_patch

@@ -606,7 +606,7 @@ def apply_pr_body(
 
     # Update body
     try:
-        client.request("PATCH", f"repos/{repo}/pulls/{number}", json={"body": plan["replacement_body"]})
+        client.request("PATCH", f"repos/{repo}/pulls/{number}", json_data={"body": plan["replacement_body"]})
     except Exception as exc:
         raise GitOperationError(f"GitHub rejected the body update: {exc}") from exc
 
