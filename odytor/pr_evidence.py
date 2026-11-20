@@ -134,17 +134,31 @@ def get_pr_evidence(
     initial_pr = client.get_pr(repo, number)
     initial_head = initial_pr.get("head", {}).get("sha", "")
     base_sha = initial_pr.get("base", {}).get("sha", "")
+    base_ref = initial_pr.get("base", {}).get("ref")
 
     if expected_head and initial_head.casefold() != expected_head.casefold():
         raise RevisionMismatchError(expected=expected_head, actual=initial_head)
+
+    live_target_tip = None
+    if base_ref and hasattr(client, "request"):
+        try:
+            resp = client.request("GET", f"repos/{repo}/git/ref/heads/{base_ref}")
+            data = resp.json() if hasattr(resp, "json") else {}
+            if isinstance(data, dict) and "object" in data:
+                live_target_tip = data["object"].get("sha")
+        except Exception:
+            live_target_tip = None
 
     result: dict[str, Any] = {
         "repo": repo,
         "number": number,
         "head_sha": initial_head,
         "base_sha": base_sha,
+        "pr_api_base_snapshot": base_sha,
+        "live_target_branch_tip": live_target_tip,
+        "base_snapshot_is_current": (base_sha == live_target_tip) if (base_sha and live_target_tip) else False,
         "head_ref": initial_pr.get("head", {}).get("ref"),
-        "base_ref": initial_pr.get("base", {}).get("ref"),
+        "base_ref": base_ref,
         "state": initial_pr.get("state"),
         "is_draft": initial_pr.get("draft", False),
         "title": initial_pr.get("title"),
@@ -340,6 +354,23 @@ def get_pr_evidence(
         else:
             if status_data.get("total_count", len(status_data.get("statuses", []))) > len(status_data.get("statuses", [])):
                 checks_complete = False
+
+        runs_list = result.get("check_runs", [])
+        statuses_list = (result.get("combined_status") or {}).get("statuses", [])
+        passed_runs = sum(1 for r in runs_list if r.get("conclusion") in ("success", "neutral"))
+        failed_runs = sum(1 for r in runs_list if r.get("conclusion") in ("failure", "timed_out", "action_required"))
+        in_progress_runs = sum(1 for r in runs_list if r.get("status") in ("in_progress", "queued"))
+        skipped_runs = sum(1 for r in runs_list if r.get("conclusion") == "skipped")
+        result["checks_summary"] = {
+            "head_sha": initial_head,
+            "total_check_runs": len(runs_list),
+            "passed": passed_runs,
+            "failed": failed_runs,
+            "in_progress": in_progress_runs,
+            "skipped": skipped_runs,
+            "combined_state": (result.get("combined_status") or {}).get("state"),
+            "scope": "github_ci_head",
+        }
         result["checks_complete"] = checks_complete
     else:
         result["checks_complete"] = False

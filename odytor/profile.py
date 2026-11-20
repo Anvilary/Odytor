@@ -380,7 +380,21 @@ def load_policies(path: str | Path) -> dict[str, RepoPolicy]:
             try:
                 if not isinstance(table, dict):
                     raise SpecError("the browser table must be an object.")
-                extra[BROWSER_PROFILE] = {"serve": validate_serve(table)}
+                app_profiles: dict[str, dict[str, Any]] = {}
+                raw_profiles = table.get("profiles")
+                if isinstance(raw_profiles, dict):
+                    for prof_name, prof_cfg in raw_profiles.items():
+                        if not isinstance(prof_name, str) or not prof_name:
+                            raise SpecError("application launch profile names must be non-empty strings.")
+                        app_profiles[prof_name] = validate_serve(prof_cfg)
+                default_serve = validate_serve(table) if table.get("kind") else (
+                    app_profiles.get("default") or (next(iter(app_profiles.values())) if app_profiles else None)
+                )
+                if default_serve is None:
+                    raise SpecError("no default serve policy or application launch profile defined.")
+                if "default" not in app_profiles:
+                    app_profiles["default"] = default_serve
+                extra[BROWSER_PROFILE] = {"serve": default_serve, "profiles": app_profiles}
             except SpecError as exc:
                 raise ProfileError(f"Invalid {BROWSER_PROFILE} settings for {repo}: {exc}") from exc
         policies[repo.casefold()] = RepoPolicy(repo, profile, tuple(roots), text, requirements_digest(text), extra)

@@ -151,7 +151,7 @@ def submit_browser_run(repo: str, workspace_id: str, expected_version: int, step
                        service: JobService, policies: dict[str, RepoPolicy], owner: str, cfg: RunSettings,
                        session_id: str | None = None, mocks: Any = None, viewport: Any = None, locale: str | None = None,
                        timezone: str | None = None, color_scheme: str | None = None, trace: bool | None = None,
-                       video: bool | None = None) -> dict[str, Any]:
+                       video: bool | None = None, app_profile: str | None = None) -> dict[str, Any]:
     """Queue a browser run on the exact current tree of a workspace, continuing a session when one is named."""
     from odytor.run_tests import public_view  # local import: run_tests owns the shared result view
 
@@ -162,6 +162,13 @@ def submit_browser_run(repo: str, workspace_id: str, expected_version: int, step
     settings = policy.extra.get(BROWSER_PROFILE)
     if settings is None:
         raise SecurityError("Browser runs are not enabled for this repository by the maintainer test policy.")
+    serve = settings.get("serve")
+    if app_profile is not None:
+        profiles_map = settings.get("profiles", {})
+        if app_profile not in profiles_map:
+            available = ", ".join(sorted(profiles_map.keys())) or "none"
+            raise ValidationError(f"Unknown application launch profile '{app_profile}'. Approved profiles: {available}.")
+        serve = profiles_map[app_profile]
     if not isinstance(steps, list):
         raise ValidationError("steps must be a list.")
     if len(steps) > browser_spec.MAX_STEPS:
@@ -227,7 +234,7 @@ def submit_browser_run(repo: str, workspace_id: str, expected_version: int, step
             "artifact": taken["artifact"], "timestamps": {"created_at": now, "started_at": None, "finished_at": None},
             "expires_at": now + cfg.retention_hours * 3600, "result": None}
         header = {"schema": 1, "job_id": run_id, "repo": repo, "profile": BROWSER_PROFILE, "profile_version": PROFILES[BROWSER_PROFILE],
-                  "timeout_seconds": cfg.default_timeout, "serve": settings["serve"], "scenario": scenario}
+                  "timeout_seconds": cfg.default_timeout, "serve": serve, "scenario": scenario}
         service.enqueue(record, QueuedJob(run_id, spool, header, cfg.default_timeout, max_output=ARTIFACT_OUTPUT_BYTES))
         reserved = False
         sessions.add_pending(session, run_id, new_steps)

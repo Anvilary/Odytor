@@ -29,7 +29,7 @@ from odytor.run_tests import cancel_test_run, fetch_test_result, submit_test_run
 from odytor.artifacts import ArtifactLimits, ArtifactStore
 from odytor.browser import SessionStore, submit_browser_run, wait_for_run
 from odytor.campaign import CampaignStore, run_validation_campaign
-from odytor.publish import PlanStore, apply_publication, plan_publication
+from odytor.publish import PlanStore, apply_pr_body, apply_publication, plan_pr_body, plan_publication
 from odytor.workspace import SOURCES, WorkspaceService, open_workspace
 
 RUNNER_NOT_CONFIGURED = (
@@ -410,6 +410,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         browser_scenario: list[dict[str, Any]] | None = None,
         browser_mocks: list[dict[str, Any]] | None = None,
         browser_video: bool = False,
+        app_profile: str | None = None,
         overlay_patch: str | None = None,
         timeout_seconds: Annotated[int, Field(ge=10, le=900)] = 300,
     ) -> dict[str, Any]:
@@ -432,6 +433,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                     browser_scenario=browser_scenario,
                     browser_mocks=browser_mocks,
                     browser_video=browser_video,
+                    app_profile=app_profile,
                     overlay_patch=overlay_patch,
                     timeout_seconds=timeout_seconds,
                     workspaces=workspaces,
@@ -442,6 +444,31 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                     cfg=cfg,
                     campaign_store=campaigns,
                 ), limit=262144)
+        except GitPlusError as err:
+            return safe_payload(err.to_dict())
+
+    @tool(annotations={"readOnlyHint": True, "openWorldHint": False},
+          description="Check the execution status, results, and artifacts of a validation campaign by campaign_id. Campaigns clean up workspaces deterministically upon completion; detailed results and artifacts remain queryable.")
+    def campaign_status(campaign_id: Annotated[str, Field(pattern=r"^cmp-[0-9a-f]{32}$")]) -> dict[str, Any]:
+        if campaigns is None:
+            return safe_payload(ValidationError("Validation campaigns are disabled on this server.").to_dict())
+        try:
+            owner = caller_principal(cfg, remote)
+            record = campaigns.load(campaign_id, owner)
+            if record is None:
+                raise ValidationError(f"Unknown campaign '{campaign_id}'.")
+            return safe_payload(record.to_dict())
+        except GitPlusError as err:
+            return safe_payload(err.to_dict())
+
+    @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
+          description="Cancel an active validation campaign. Halts any running test or browser child run and immediately disposes of its temporary workspace.")
+    def campaign_cancel(campaign_id: Annotated[str, Field(pattern=r"^cmp-[0-9a-f]{32}$")]) -> dict[str, Any]:
+        if campaigns is None or service is None or workspaces is None:
+            return safe_payload(ValidationError("Validation campaigns are disabled on this server.").to_dict())
+        try:
+            owner = caller_principal(cfg, remote)
+            return safe_payload(campaigns.cancel(campaign_id, owner, service=service, workspaces=workspaces))
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 
@@ -508,6 +535,35 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             with github_client(cfg, remote, repo=plan["repo"]) as client:
                 return safe_payload(apply_publication(client, plan["repo"], plan_id, confirm, user_authorized, approval_token=approval_token,
                                                       workspaces=workspaces, plans=plans, jobs=service, owner=owner), limit=70000)
+        except GitPlusError as err:
+            return safe_payload(err.to_dict())
+
+    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+          description="Prepare, without performing, a body-only update plan for an open draft PR. Strictly permitted only on draft PRs to protect public review context. Binds the exact PR, expected head SHA, current body digest, and replacement markdown. Nothing is written to GitHub. Show the plan to the user; apply it only with pr_body_apply after their explicit approval.")
+    def pr_body_plan(repo: str, number: Number, expected_head: SHA, body: str) -> dict[str, Any]:
+        if plans is None:
+            return safe_payload(ValidationError("Workspaces and plan storage are disabled on this server.").to_dict())
+        if not cfg.is_repo_allowed(repo):
+            raise SecurityError(f"Repository '{repo}' is not permitted by Odytor configuration.")
+        try:
+            owner = caller_principal(cfg, remote)
+            with github_client(cfg, remote, repo=repo) as client:
+                return safe_payload(plan_pr_body(client, repo, number, expected_head, body, plans=plans, owner=owner))
+        except GitPlusError as err:
+            return safe_payload(err.to_dict())
+
+    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+          description="Apply an approved body update plan to a draft PR. Needs user_authorized=true (only after the user explicitly approved this exact plan) and confirm equal to the plan's confirmation text. Re-verifies live PR state before write: head SHA, current body digest, and that the PR is still a draft. Immediately re-reads after write to verify title, base, head, and draft state remained unchanged.")
+    def pr_body_apply(plan_id: Annotated[str, Field(pattern=r"^pb-[0-9a-f]{32}$")], confirm: str, user_authorized: bool = False) -> dict[str, Any]:
+        if plans is None:
+            return safe_payload(ValidationError("Workspaces and plan storage are disabled on this server.").to_dict())
+        try:
+            owner = caller_principal(cfg, remote)
+            plan = plans.get(plan_id, owner)
+            if not cfg.is_repo_allowed(plan["repo"]):
+                raise SecurityError("This plan's repository is no longer permitted by Odytor configuration.")
+            with github_client(cfg, remote, repo=plan["repo"]) as client:
+                return safe_payload(apply_pr_body(client, plan["repo"], plan_id, confirm, user_authorized, plans=plans, owner=owner))
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 

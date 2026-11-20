@@ -397,3 +397,69 @@ def test_cryptographically_bound_approval_token_verification(stack):
     # Replay is idempotent
     replayed = apply(stack, p['plan_id'], '', approval_token=p['approval_token'])
     assert replayed['idempotent_replay'] is True
+
+
+def test_plan_and_apply_pr_body_draft_only_and_invariants(stack):
+    from unittest.mock import MagicMock
+    from odytor.publish import plan_pr_body, apply_pr_body
+    service, plans, client, repo, head, open_ws = stack
+
+    # Setup PR: open, draft=True
+    current_body = "Old PR description"
+    client.get_pr.return_value = {
+        "number": 5,
+        "state": "open",
+        "draft": True,
+        "title": "Fix something",
+        "head": {"sha": head, "ref": "feat"},
+        "base": {"sha": "0" * 40, "ref": "main"},
+        "body": current_body,
+    }
+
+    # 1. Non-draft PR is rejected
+    client.get_pr.return_value["draft"] = False
+    with pytest.raises(SecurityError, match="permitted on draft pull requests"):
+        plan_pr_body(client, "owner/repo", 5, head, "New description", plans=plans, owner=OWNER)
+
+    # 2. Open draft PR creates body plan
+    client.get_pr.return_value["draft"] = True
+    new_body = "Updated markdown body with audit evidence"
+    bp = plan_pr_body(client, "owner/repo", 5, head, new_body, plans=plans, owner=OWNER)
+    assert bp["plan_id"].startswith("pb-")
+    assert bp["is_draft"] is True
+    assert bp["state"] == "pending"
+    assert "I approve updating the body of draft PR #5" in bp["confirmation"]
+
+    # 3. Apply requires user_authorized=True
+    with pytest.raises(SecurityError, match="user_authorized"):
+        apply_pr_body(client, "owner/repo", bp["plan_id"], bp["confirmation"], False, plans=plans, owner=OWNER)
+
+    # 4. Apply requires matching confirmation
+    with pytest.raises(SecurityError, match="confirmation does not match"):
+        apply_pr_body(client, "owner/repo", bp["plan_id"], "wrong confirm", True, plans=plans, owner=OWNER)
+
+    # 5. Apply re-reads and rejects if body changed concurrently before apply
+    client.get_pr.return_value["body"] = "Someone edited this concurrently"
+    with pytest.raises(SecurityError, match="PR body changed"):
+        apply_pr_body(client, "owner/repo", bp["plan_id"], bp["confirmation"], True, plans=plans, owner=OWNER)
+
+    # Reset body and simulate successful PATCH + read-back
+    client.get_pr.return_value["body"] = current_body
+    def mock_patch(method, path, json=None):
+        if method == "PATCH" and "pulls/5" in path:
+            client.get_pr.return_value["body"] = json.get("body")
+            return MagicMock(status_code=200)
+        return MagicMock(status_code=200)
+    client.request.side_effect = mock_patch
+
+    applied = apply_pr_body(client, "owner/repo", bp["plan_id"], bp["confirmation"], True, plans=plans, owner=OWNER)
+    assert applied["status"] == "applied"
+    assert applied["invariants_verified"]["title"] is True
+    assert applied["invariants_verified"]["base_ref"] is True
+    assert applied["invariants_verified"]["head_sha"] is True
+    assert applied["invariants_verified"]["draft"] is True
+    assert applied["invariants_verified"]["body_matches"] is True
+
+    # 6. Idempotent replay
+    replayed = apply_pr_body(client, "owner/repo", bp["plan_id"], bp["confirmation"], True, plans=plans, owner=OWNER)
+    assert replayed["idempotent_replay"] is True

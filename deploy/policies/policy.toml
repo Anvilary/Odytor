@@ -30,6 +30,18 @@ root = "static"
 port = 8765
 ready_path = "/index.html"
 
+[repos."odysseus-dev/odysseus".browser-playwright.profiles.default]
+kind = "static"
+root = "static"
+port = 8765
+ready_path = "/index.html"
+
+[repos."odysseus-dev/odysseus".browser-playwright.profiles.cookbook]
+kind = "static"
+root = "static"
+port = 8765
+ready_path = "/index.html"
+
 [repos."alteixeira20/odytor-smoke-test"]
 template = "standard-polyglot"
 test_dirs = ["tests"]

@@ -46,6 +46,8 @@ class CampaignRecord:
     created_at: float
     updated_at: float
     finished_at: float | None = None
+    requested_head: str | None = None
+    requested_base: str | None = None
     tested_head: str | None = None
     tested_base: str | None = None
     tested_tree: str | None = None
@@ -70,6 +72,8 @@ class CampaignRecord:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "finished_at": self.finished_at,
+            "requested_head": self.requested_head,
+            "requested_base": self.requested_base,
             "tested_head": self.tested_head,
             "tested_base": self.tested_base,
             "tested_tree": self.tested_tree,
@@ -155,6 +159,7 @@ def run_validation_campaign(
     browser_scenario: list[dict[str, Any]] | None = None,
     browser_mocks: list[dict[str, Any]] | None = None,
     browser_video: bool = False,
+    app_profile: str | None = None,
     overlay_patch: str | None = None,
     timeout_seconds: int = 300,
     workspaces: Any,
@@ -168,7 +173,7 @@ def run_validation_campaign(
     """Execute the bounded disposable validation campaign."""
     now = time.time()
     campaign_id = f"cmp-{secrets.token_hex(16)}"
-    requested_profiles = profiles or ["python-pytest"]
+    requested_profiles = ["python-pytest"] if profiles is None else list(profiles)
 
     # Validate profiles
     for prof in requested_profiles:
@@ -193,8 +198,22 @@ def run_validation_campaign(
     if expected_head and expected_head.lower() != live_head.lower():
         raise ValidationError(f"PR head has moved: expected {expected_head}, found {live_head}.")
 
-    if mode == "prospective_merge" and not expected_base:
-        raise ValidationError("expected_base (the live target-branch tip) is required for mode='prospective_merge'.")
+    if mode == "prospective_merge":
+        if not expected_base:
+            raise ValidationError("expected_base (the live target-branch tip) is required for mode='prospective_merge'.")
+        base_ref = ctx.get("base_ref")
+        if base_ref and hasattr(client, "request"):
+            try:
+                resp = client.request("GET", f"repos/{repo}/git/ref/heads/{base_ref}")
+                ref_data = resp.json() if hasattr(resp, "json") else {}
+                live_tip = ref_data.get("object", {}).get("sha") if isinstance(ref_data, dict) else None
+                if live_tip and expected_base.lower() != live_tip.lower():
+                    raise ValidationError(
+                        f"Target branch '{base_ref}' tip has moved: expected {expected_base}, found live tip {live_tip}."
+                    )
+            except Exception as exc:
+                if isinstance(exc, ValidationError):
+                    raise
 
     record = CampaignRecord(
         campaign_id=campaign_id,
@@ -205,8 +224,10 @@ def run_validation_campaign(
         status="running",
         created_at=now,
         updated_at=now,
-        tested_head=live_head,
-        tested_base=expected_base if mode == "prospective_merge" else None,
+        requested_head=live_head,
+        requested_base=expected_base if mode == "prospective_merge" else None,
+        tested_head=None,
+        tested_base=None,
     )
     if campaign_store:
         campaign_store.save(record)
@@ -232,6 +253,8 @@ def run_validation_campaign(
         ws_id = ws["workspace_id"]
         expected_version = ws["version"]
         record.workspace_id = ws_id
+        record.tested_head = live_head
+        record.tested_base = expected_base if mode == "prospective_merge" else None
         record.tested_tree = ws["tree"]
         record.steps.append({
             "name": "workspace_create",
@@ -295,23 +318,24 @@ def run_validation_campaign(
                 break
 
             status = final.get("status", "unknown")
+            res = final.get("result") or {}
             record.steps.append({
                 "name": f"profile:{prof}",
                 "status": status,
                 "duration_seconds": dur,
                 "run_id": run_id,
-                "failure": final.get("failure"),
+                "failure": res.get("failure") or final.get("failure"),
             })
             record.results[prof] = {
                 "status": status,
                 "run_id": run_id,
                 "duration_seconds": dur,
-                "failure": final.get("failure"),
-                "counts": final.get("counts"),
-                "diagnostics_summary": final.get("diagnostics_summary"),
+                "failure": res.get("failure") or final.get("failure"),
+                "counts": res.get("counts") or final.get("counts"),
+                "diagnostics_summary": res.get("diagnostics_summary") or final.get("diagnostics_summary"),
             }
             # Collect artifacts from run
-            for art in final.get("artifacts") or []:
+            for art in (res.get("artifacts") or final.get("artifacts") or []):
                 record.artifacts.append(art)
 
             if status != "passed":
@@ -343,6 +367,7 @@ def run_validation_campaign(
                 cfg=cfg.testing,
                 mocks=browser_mocks,
                 video=browser_video,
+                app_profile=app_profile,
             )
             b_run_id = sub_b["run_id"]
             record.current_run_id = b_run_id
@@ -358,22 +383,24 @@ def run_validation_campaign(
                 all_passed = False
             else:
                 b_status = final_b.get("status", "unknown")
+                res_b = final_b.get("result") or {}
+                b_failure = res_b.get("failure") or final_b.get("failure")
                 record.steps.append({
                     "name": "browser-playwright",
                     "status": b_status,
                     "duration_seconds": dur,
                     "run_id": b_run_id,
-                    "failure": final_b.get("failure"),
+                    "failure": b_failure,
                 })
                 record.browser = {
                     "status": b_status,
                     "run_id": b_run_id,
                     "duration_seconds": dur,
-                    "counts": final_b.get("counts"),
-                    "network": final_b.get("network"),
-                    "failure": final_b.get("failure"),
+                    "counts": res_b.get("counts") or final_b.get("counts"),
+                    "network": res_b.get("network") or final_b.get("network"),
+                    "failure": b_failure,
                 }
-                for art in final_b.get("artifacts") or []:
+                for art in (res_b.get("artifacts") or final_b.get("artifacts") or []):
                     record.artifacts.append(art)
 
                 if b_status != "passed":

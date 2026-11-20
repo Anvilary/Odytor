@@ -344,4 +344,4 @@ def test_unconfigured_runner_explains_how_to_enable_it_and_that_other_tools_are_
         assert 'ODYTOR_TEST_RUNNER_COMMAND' in result['error'] and 'docs/test-runner.md' in result['error']
         assert 'do not need a runner' in result['error'] and 'workspace' in result['error']
     names = {t.name for t in asyncio.run(plain.list_tools())}
-    assert {'test_run', 'test_result'} <= names and len(names) == 24  # still discoverable; never silently removed
+    assert {'test_run', 'test_result'} <= names and len(names) == 28  # still discoverable; never silently removed

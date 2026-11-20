@@ -31,13 +31,14 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from odytor.diagnostics import safe_text
 from odytor.errors import APIError, GitOperationError, GitPlusError, RevisionMismatchError, SecurityError, ValidationError
 from odytor.git_workspace import pr_context
 from odytor.github import validate_repo, validate_sha
 from odytor.quick_fix import PatchSummary, _CREATE_COMMIT, _commit_identity, _validate_path
 from odytor.workspace import WorkspaceRepo, WorkspaceService
 
-PLAN_ID = re.compile(r"pp-[0-9a-f]{32}")
+PLAN_ID = re.compile(r"^(?:pp|pb)-[0-9a-f]{32}$")
 SCHEMA = 1
 OPERATION = "workspace_publish"
 PLAN_TTL_SECONDS = 3600
@@ -108,7 +109,9 @@ class PlanStore:
         now = self.clock()
         if not self.root.exists():
             return
-        for path in self.root.glob("pp-*.json"):
+        for path in self.root.glob("*.json"):
+            if not PLAN_ID.fullmatch(path.stem):
+                continue
             try:
                 plan = json.loads(path.read_text())
             except (OSError, ValueError):
@@ -451,3 +454,200 @@ def _finish(plans: PlanStore, plan: dict[str, Any], new_sha: str, target: dict[s
                       "validation_at_apply": {"tests_run_by_this_call": False, **plan["validation"]}}
     plans.save(plan)
     return public_plan(plan)
+
+
+def new_body_plan_id() -> str:
+    return "pb-" + os.urandom(16).hex()
+
+
+def confirmation_phrase_body(plan_id: str, repo: str, number: int, current_digest: str, replacement_digest: str) -> str:
+    return (
+        f"I approve updating the body of draft PR #{number} on {repo} "
+        f"(plan {plan_id}, current digest {current_digest[:8]}, replacement digest {replacement_digest[:8]})"
+    )
+
+
+def plan_pr_body(
+    client: Any,
+    repo: str,
+    number: int,
+    expected_head: str,
+    body: str,
+    *,
+    plans: PlanStore,
+    owner: str,
+) -> dict[str, Any]:
+    """Prepare a body-only update plan for a draft PR. Read-only: nothing is written to GitHub."""
+    validate_repo(repo)
+    if type(number) is not int or number <= 0:
+        raise ValidationError(f"Pull request number must be positive (got {number}).")
+    expected_head = validate_sha(expected_head, "expected_head").lower()
+    if not isinstance(body, str):
+        raise ValidationError("body must be a string.")
+    body_bytes = body.encode("utf-8")
+    if len(body_bytes) > 65536:
+        raise ValidationError(f"Replacement body exceeds limit of 65536 bytes (got {len(body_bytes)} bytes).")
+
+    pr = client.get_pr(repo, number)
+    if pr.get("state") != "open" or pr.get("merged"):
+        raise ValidationError("The pull request is no longer open.")
+    if pr.get("draft") is not True:
+        raise SecurityError(
+            "pr_body operations are only permitted on draft pull requests to protect public review context.",
+            {"draft": pr.get("draft", False)},
+        )
+    live_head = ((pr.get("head") or {}).get("sha") or "").lower()
+    if live_head != expected_head:
+        raise RevisionMismatchError(expected_head, live_head, "The PR head moved; inspect the PR before planning.")
+
+    current_body = pr.get("body") or ""
+    current_digest = hashlib.sha256(current_body.encode("utf-8")).hexdigest()
+    replacement_digest = hashlib.sha256(body_bytes).hexdigest()
+
+    plan_id = new_body_plan_id()
+    now = plans.clock()
+    expires_at = now + PLAN_TTL_SECONDS
+    confirm = confirmation_phrase_body(plan_id, repo, number, current_digest, replacement_digest)
+
+    plan = {
+        "schema": SCHEMA,
+        "kind": "pr_body",
+        "plan_id": plan_id,
+        "owner": owner,
+        "repo": repo,
+        "number": number,
+        "expected_head": expected_head,
+        "expected_draft": True,
+        "current_body_digest": current_digest,
+        "replacement_body": body,
+        "replacement_body_digest": replacement_digest,
+        "state": "pending",
+        "created_at": now,
+        "expires_at": expires_at,
+        "confirmation": confirm,
+    }
+    plans.save(plan)
+
+    return {
+        "plan_id": plan_id,
+        "kind": "pr_body",
+        "repo": repo,
+        "number": number,
+        "expected_head": expected_head,
+        "is_draft": True,
+        "current_body_digest": current_digest,
+        "replacement_body_digest": replacement_digest,
+        "body_preview": safe_text(body, 500),
+        "confirmation": confirm,
+        "expires_at": _iso(expires_at),
+        "state": "pending",
+    }
+
+
+def apply_pr_body(
+    client: Any,
+    repo: str,
+    plan_id: str,
+    confirm: str,
+    user_authorized: bool,
+    *,
+    plans: PlanStore,
+    owner: str,
+) -> dict[str, Any]:
+    """Apply an approved body update plan to a draft PR with strict invariant verification."""
+    validate_repo(repo)
+    plan = plans.get(plan_id, owner)
+    if plan.get("kind") != "pr_body" or plan["repo"].casefold() != repo.casefold():
+        raise ValidationError("Unknown plan_id.")
+    if plan["state"] == "applied":
+        return {
+            "plan_id": plan_id,
+            "kind": "pr_body",
+            "repo": repo,
+            "number": plan["number"],
+            "status": "applied",
+            "idempotent_replay": True,
+            "note": "This plan was already applied; nothing was written again.",
+        }
+    if user_authorized is not True:
+        raise SecurityError(
+            "Updating the PR body writes to GitHub and needs explicit user approval. Pass user_authorized=true only after the user approved this exact plan.",
+            {"required": "user_authorized"},
+        )
+    if not isinstance(confirm, str) or confirm != plan["confirmation"]:
+        raise SecurityError(
+            "The confirmation does not match this plan. It must quote the plan's confirmation text exactly.",
+            {"required": "confirm"},
+        )
+    if plan["expires_at"] <= plans.clock():
+        raise ValidationError("This plan expired; create a new body plan.")
+    if plan["state"] != "pending":
+        raise ValidationError(f"This plan is in state '{plan['state']}' and cannot be applied.")
+
+    number = plan["number"]
+    # Re-read PR before write
+    pr = client.get_pr(repo, number)
+    if pr.get("state") != "open" or pr.get("merged"):
+        raise ValidationError("The pull request is no longer open.")
+    if pr.get("draft") is not True:
+        raise SecurityError("The PR is no longer a draft; body update aborted.")
+    live_head = ((pr.get("head") or {}).get("sha") or "").lower()
+    if live_head != plan["expected_head"].lower():
+        raise RevisionMismatchError(plan["expected_head"], live_head, "PR head moved before body update.")
+
+    live_body = pr.get("body") or ""
+    live_digest = hashlib.sha256(live_body.encode("utf-8")).hexdigest()
+    if live_digest != plan["current_body_digest"]:
+        raise SecurityError("The PR body changed since this plan was created; re-plan with current body.")
+
+    orig_title = pr.get("title")
+    orig_base_ref = (pr.get("base") or {}).get("ref")
+    orig_base_sha = (pr.get("base") or {}).get("sha")
+
+    # Update body
+    try:
+        client.request("PATCH", f"repos/{repo}/pulls/{number}", json={"body": plan["replacement_body"]})
+    except Exception as exc:
+        raise GitOperationError(f"GitHub rejected the body update: {exc}") from exc
+
+    # Immediate post-write read-back to verify invariants
+    after_pr = client.get_pr(repo, number)
+    after_head = ((after_pr.get("head") or {}).get("sha") or "").lower()
+    after_base_ref = (after_pr.get("base") or {}).get("ref")
+    after_base_sha = (after_pr.get("base") or {}).get("sha")
+    after_draft = after_pr.get("draft") is True
+    after_title = after_pr.get("title")
+    after_body = after_pr.get("body") or ""
+
+    invariants_ok = (
+        after_head == plan["expected_head"].lower()
+        and after_base_ref == orig_base_ref
+        and after_base_sha == orig_base_sha
+        and after_draft is True
+        and after_title == orig_title
+        and after_body == plan["replacement_body"]
+    )
+    if not invariants_ok:
+        raise GitOperationError("Invariant violation after PR body update: title, base, head, or draft state changed unexpectedly.")
+
+    plan["state"] = "applied"
+    plan["applied_at"] = plans.clock()
+    plans.save(plan)
+
+    return {
+        "plan_id": plan_id,
+        "kind": "pr_body",
+        "repo": repo,
+        "number": number,
+        "status": "applied",
+        "body_sha256": plan["replacement_body_digest"],
+        "invariants_verified": {
+            "title": True,
+            "base_ref": True,
+            "base_sha": True,
+            "head_sha": True,
+            "draft": True,
+            "body_matches": True,
+        },
+        "applied_at": _iso(plan["applied_at"]),
+    }

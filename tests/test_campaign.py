@@ -178,3 +178,73 @@ def test_campaign_cancels_cleanly_via_store(test_env):
     assert res["status"] == "canceled"
     loaded = store.load("cmp-test123", OWNER)
     assert loaded.status == "canceled"
+
+
+def test_empty_profiles_does_not_silently_run_pytest(test_env, monkeypatch):
+    client = test_env["client"]
+    head = test_env["head"]
+    ws_service = test_env["ws_service"]
+    store = test_env["store"]
+    policies = test_env["policies"]
+    service = test_env["job_service"]
+    cfg = test_env["cfg"]
+
+    called_runs = []
+    monkeypatch.setattr(
+        "odytor.campaign.submit_workspace_run",
+        lambda *args, **kwargs: called_runs.append(kwargs.get("profile")),
+    )
+
+    result = run_validation_campaign(
+        client,
+        "owner/repo",
+        1,
+        expected_head=head,
+        mode="pr_head",
+        profiles=[],  # explicitly empty
+        workspaces=ws_service,
+        service=service,
+        sessions=None,
+        policies=policies,
+        owner=OWNER,
+        cfg=cfg,
+        campaign_store=store,
+    )
+    assert result["status"] == "passed"
+    assert len(called_runs) == 0
+    assert result["results"] == {}
+    assert result["tested_head"] == head
+    assert result["workspace_cleaned"] is True
+
+
+def test_setup_error_does_not_label_requested_revisions_as_tested(test_env):
+    from odytor.errors import RevisionMismatchError
+    client = test_env["client"]
+    ws_service = test_env["ws_service"]
+    store = test_env["store"]
+    policies = test_env["policies"]
+    service = test_env["job_service"]
+    cfg = test_env["cfg"]
+
+    # PR head mismatch -> setup error before workspace creation
+    with pytest.raises((RevisionMismatchError, ValidationError)):
+        run_validation_campaign(
+            client,
+            "owner/repo",
+            1,
+            expected_head="0000000000000000000000000000000000000000",
+            mode="pr_head",
+            profiles=["python-pytest"],
+            workspaces=ws_service,
+            service=service,
+            sessions=None,
+            policies=policies,
+            owner=OWNER,
+            cfg=cfg,
+            campaign_store=store,
+        )
+
+    # No campaign was created / saved with tested_head set
+    for camp_file in store.root.glob("cmp-*.json"):
+        data = json.loads(camp_file.read_text())
+        assert data.get("tested_head") is None
