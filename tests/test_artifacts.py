@@ -47,7 +47,7 @@ def put(store, data, kind='log', name='out.txt', owner='alice'):
 
 @pytest.mark.parametrize('data,mime,klass', [
     (png(), 'image/png', 'image'), (b'\xff\xd8\xff\xe0jfif', 'image/jpeg', 'image'), (b'RIFF\x00\x00\x00\x00WEBPVP8 ', 'image/webp', 'image'),
-    (b'PK\x03\x04zip', 'application/zip', 'archive'), (b'plain text\nlog line\n', 'text/plain', 'text'),
+    (b'PK\x03\x04zip', 'application/zip', 'archive'), (b'\x1a\x45\xdf\xa3webm', 'video/webm', 'binary'), (b'plain text\nlog line\n', 'text/plain', 'text'),
     (b'{"a": 1}', 'text/plain', 'text'), (b'\x00\x01\x02', 'application/octet-stream', 'binary'),
     (b'<svg onload="alert(1)"></svg>', 'text/plain', 'active_text'), (b'<!DOCTYPE html><script>x</script>', 'text/plain', 'active_text'),
     (b'  <html><body>x</body></html>', 'text/plain', 'active_text'), (b'text with <script>alert(1)</script> inside', 'text/plain', 'active_text')])
@@ -96,12 +96,31 @@ def test_images_are_delivered_natively_within_the_limit_and_chunked_beyond_it(st
     small = put(store, png(), kind='screenshot')
     out = store.content(small['artifact_id'], 'alice')
     assert out['image'][0] == 'image/png' and out['image'][1] == png() and 'base64' not in out
+    assert out['data_uri'].startswith('data:image/png;base64,')
     big = put(store, png(64, 64, noise=True), kind='screenshot')  # larger than the 4096-byte native limit in this fixture
     assert big['size'] > 4096
     fallback = store.content(big['artifact_id'], 'alice')
     assert 'image' not in fallback and 'base64' in fallback['note'] and fallback['window']['returned'] == 0
     chunk = store.content(big['artifact_id'], 'alice', mode='base64')
     assert base64.b64decode(chunk['base64']) == png(64, 64, noise=True)[:chunk['window']['returned']] and chunk['window']['sha256_of_whole'] == big['sha256']
+
+
+def test_full_reconstruction_from_base64_chunks_matches_sha256(store):
+    raw_img = png(64, 64, noise=True)
+    record = put(store, raw_img, kind='screenshot', name='large_shot.png')
+    reconstructed = bytearray()
+    offset = 0
+    while True:
+        chunk = store.content(record['artifact_id'], 'alice', mode='base64', offset=offset, length=1024)
+        b64 = chunk['base64']
+        reconstructed.extend(base64.b64decode(b64))
+        next_off = chunk['window']['next_offset']
+        if next_off is None:
+            break
+        offset = next_off
+    assert bytes(reconstructed) == raw_img
+    assert len(reconstructed) == record['size']
+    assert hashlib.sha256(reconstructed).hexdigest() == record['sha256']
 
 
 def test_text_is_windowed_and_active_text_is_labelled_untrusted(store):

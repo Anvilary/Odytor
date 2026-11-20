@@ -28,6 +28,7 @@ from odytor.profile import PROFILE_NAME, load_policies
 from odytor.run_tests import cancel_test_run, fetch_test_result, submit_test_run, submit_workspace_run
 from odytor.artifacts import ArtifactLimits, ArtifactStore
 from odytor.browser import SessionStore, submit_browser_run, wait_for_run
+from odytor.campaign import CampaignStore, run_validation_campaign
 from odytor.publish import PlanStore, apply_publication, plan_publication
 from odytor.workspace import SOURCES, WorkspaceService, open_workspace
 
@@ -123,6 +124,12 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                   apply: bool = False, allow_history_rewrite: bool = False) -> dict[str, Any]:
         return invoke(repo, rebase_pr, number, expected_head, expected_base,
                       apply=apply, allow_history_rewrite=allow_history_rewrite)
+
+    @tool(annotations={"readOnlyHint": True, "openWorldHint": True},
+          description="Preview a genuine linear PR rebase onto an exact base without GitHub write authority. Merge histories are rejected; repository tests are not run. Returns replayed commits, predicted rebased head SHA, whether history rewrite would be required, and whether the PR is already up to date or has conflicts. Completely read-only with zero GitHub mutations.")
+    def pr_rebase_preview(repo: str, number: Number, expected_head: SHA, expected_base: SHA) -> dict[str, Any]:
+        return invoke(repo, rebase_pr, number, expected_head, expected_base,
+                      apply=False, allow_history_rewrite=False)
 
     @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
               description="Coordinate revision-checked PR CI reruns, individual failed-job reruns, dispatches and fork approvals. Fork approval requires explicit user authorization. Dispatches run on the head repository ref and are not normal PR required checks; ref races are disclosed.")
@@ -318,8 +325,17 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         return invoke_ws(workspace_id, handlers[action])
 
     @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
-          description="Cancel a queued or running test (test_run or workspace_run) you submitted. A queued run is removed; a running run's sandbox is torn down by the runner and the run ends as status 'canceled'. Finished runs are reported as already_finished.")
+          description="Cancel a queued or running test (test_run or workspace_run) or validation campaign you submitted. A queued run is removed; a running run's sandbox is torn down by the runner and the run ends as status 'canceled'. Finished runs are reported as already_finished.")
     def test_cancel(run_id: str) -> dict[str, Any]:
+        if run_id.startswith("cmp-"):
+            if campaigns is None:
+                return safe_payload(ValidationError("Campaign storage is disabled on this server.").to_dict())
+            if service is None or workspaces is None:
+                return safe_payload(runner_not_configured())
+            try:
+                return safe_payload(campaigns.cancel(run_id, caller_principal(cfg, remote), service=service, workspaces=workspaces))
+            except GitPlusError as err:
+                return safe_payload(err.to_dict())
         if service is None:
             return safe_payload(runner_not_configured())
         try:
@@ -328,6 +344,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             return safe_payload(err.to_dict())
 
     sessions = SessionStore(Path(cfg.workspaces.data_dir) / "sessions") if cfg.workspaces else None
+    campaigns = CampaignStore(Path(cfg.workspaces.data_dir) / "campaigns") if cfg.workspaces else None
 
     def as_result(payload: dict[str, Any], images: list[tuple[str, bytes]] | None = None, *, limit: int | None = None) -> ToolResult:
         """Structured evidence plus native MCP image content; images never travel as base64 inside JSON.
@@ -347,6 +364,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                     session_id: Annotated[str | None, Field(pattern=r"^bs-[0-9a-f]{32}$")] = None,
                     mocks: list[dict[str, Any]] | None = None, viewport: dict[str, int] | None = None, locale: str | None = None,
                     timezone: str | None = None, color_scheme: Literal["light", "dark"] | None = None, trace: bool | None = None,
+                    video: bool | None = None,
                     wait_seconds: Annotated[int, Field(ge=0, le=300)] = 90,
                     include_images: Annotated[int, Field(ge=0, le=4)] = 2) -> ToolResult:
         if service is None:
@@ -362,7 +380,8 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                 raise SecurityError("This workspace's repository is no longer permitted by Odytor configuration.")
             submitted = submit_browser_run(record["repo"], workspace_id, expected_version, steps, workspaces=workspaces, sessions=sessions,
                                            service=service, policies=policies, owner=owner, cfg=runs, session_id=session_id, mocks=mocks,
-                                           viewport=viewport, locale=locale, timezone=timezone, color_scheme=color_scheme, trace=trace)
+                                           viewport=viewport, locale=locale, timezone=timezone, color_scheme=color_scheme, trace=trace,
+                                           video=video)
             final = wait_for_run(service, submitted["run_id"], wait_seconds)
             if final is None:
                 return as_result({**submitted, "note": "Still running. Poll test_result with run_id; artifacts appear when it finishes."})
@@ -377,6 +396,54 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             return as_result({**view, "session": session}, images, limit=16000)
         except GitPlusError as err:
             return as_result(err.to_dict())
+
+    @tool(annotations={"readOnlyHint": True, "openWorldHint": True},
+          description="Execute a bounded disposable validation campaign for a pull request without requiring human confirmation for intermediate steps. Pins PR head/base revisions, provisions an isolated disposable workspace without publication authority, optionally applies an overlay patch or edits, executes specified test profiles (e.g. python-pytest, node-test) and headless browser scenarios, collects all evidence/artifacts/network metrics, and deterministically cleans up the disposable workspace. Leaves zero GitHub mutations. Safe, isolated, and completely read-only to external systems.")
+    def validation_campaign(
+        repo: str,
+        number: Number,
+        expected_head: SHA | None = None,
+        expected_base: SHA | None = None,
+        mode: Literal["pr_head", "prospective_merge"] = "pr_head",
+        profiles: list[str] | None = None,
+        profile_selectors: dict[str, list[str]] | None = None,
+        browser_scenario: list[dict[str, Any]] | None = None,
+        browser_mocks: list[dict[str, Any]] | None = None,
+        browser_video: bool = False,
+        overlay_patch: str | None = None,
+        timeout_seconds: Annotated[int, Field(ge=10, le=900)] = 300,
+    ) -> dict[str, Any]:
+        if service is None or workspaces is None or campaigns is None:
+            return safe_payload(ValidationError("Workspaces or runner execution are disabled on this server.").to_dict())
+        if not cfg.is_repo_allowed(repo):
+            raise SecurityError(f"Repository '{repo}' is not permitted by Odytor configuration.")
+        try:
+            with github_client(cfg, remote, repo=repo) as client:
+                owner = getattr(client, "principal", None) or ("service" if remote else "local")
+                return safe_payload(run_validation_campaign(
+                    client,
+                    repo,
+                    number,
+                    expected_head=expected_head,
+                    expected_base=expected_base,
+                    mode=mode,
+                    profiles=profiles,
+                    profile_selectors=profile_selectors,
+                    browser_scenario=browser_scenario,
+                    browser_mocks=browser_mocks,
+                    browser_video=browser_video,
+                    overlay_patch=overlay_patch,
+                    timeout_seconds=timeout_seconds,
+                    workspaces=workspaces,
+                    service=service,
+                    sessions=sessions,
+                    policies=policies,
+                    owner=owner,
+                    cfg=cfg,
+                    campaign_store=campaigns,
+                ), limit=262144)
+        except GitPlusError as err:
+            return safe_payload(err.to_dict())
 
     @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
           description="Close a browser session and discard its step history. Browser runs hold no process or container between calls, so closing only releases the session record.")

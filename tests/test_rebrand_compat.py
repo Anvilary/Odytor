@@ -142,7 +142,7 @@ def test_mcp_identity_is_odytor_and_keeps_the_original_eight_tools():
     tools = {t.name: t.annotations.model_dump(exclude_none=True, by_alias=True) for t in asyncio.run(server.list_tools())}
     ORIGINAL = {"pr_evidence", "ci_diagnose", "pr_conflicts", "quick_fix", "pr_rebase", "ci_control", "test_run", "test_result"}
     assert ORIGINAL <= set(tools)  # the original eight stay, by name
-    assert set(tools) - ORIGINAL == {"odytor_capabilities", "browser_run", "browser_close", "artifact_get", "publish_plan", "publish_apply", "workspace_create", "workspace_read", "workspace_search", "workspace_edit", "workspace_diff", "workspace_run", "workspace_manage", "test_cancel"}
+    assert set(tools) - ORIGINAL == {"odytor_capabilities", "browser_run", "browser_close", "artifact_get", "publish_plan", "publish_apply", "workspace_create", "workspace_read", "workspace_search", "workspace_edit", "workspace_diff", "workspace_run", "workspace_manage", "test_cancel", "pr_rebase_preview", "validation_campaign"}
     assert tools["pr_evidence"]["readOnlyHint"] is True and tools["pr_rebase"]["destructiveHint"] is True
     assert tools["quick_fix"]["readOnlyHint"] is False and tools["test_result"]["readOnlyHint"] is True
 

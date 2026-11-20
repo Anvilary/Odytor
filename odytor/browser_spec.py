@@ -204,7 +204,7 @@ def validate_scenario(scenario: Any, *, max_steps: int = MAX_STEPS) -> dict[str,
     """Normalize and bound a caller scenario: steps, mocks, viewport, locale, timezone."""
     if not isinstance(scenario, dict):
         _fail("scenario", "must be an object.")
-    extra = set(scenario) - {"steps", "mocks", "viewport", "locale", "timezone", "color_scheme", "trace", "replay"}
+    extra = set(scenario) - {"steps", "mocks", "viewport", "locale", "timezone", "color_scheme", "trace", "replay", "video"}
     if extra:
         _fail("scenario", f"unexpected field(s): {', '.join(sorted(extra))}.")
     steps = scenario.get("steps")
@@ -240,8 +240,11 @@ def validate_scenario(scenario: Any, *, max_steps: int = MAX_STEPS) -> dict[str,
     trace = scenario.get("trace", False)
     if type(trace) is not bool:
         _fail("trace", "must be true or false.")
+    video = scenario.get("video", False)
+    if type(video) is not bool:
+        _fail("video", "must be true or false.")
     out = {"steps": normalized, "mocks": mocks, "viewport": viewport, "locale": locale, "timezone": timezone,
-           "color_scheme": scheme, "trace": trace}
+           "color_scheme": scheme, "trace": trace, "video": video}
     if "replay" in scenario:  # steps[:replay] rebuild session state; their screenshots and evidence are not captured
         out["replay"] = _int(scenario["replay"], "replay", 0, len(normalized) - 1)
     return out

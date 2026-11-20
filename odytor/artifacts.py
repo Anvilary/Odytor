@@ -111,6 +111,8 @@ def sniff(data: bytes) -> dict[str, Any]:
         return {"mime": "image/webp", "class": "image"}
     if data.startswith(b"PK\x03\x04"):
         return {"mime": "application/zip", "class": "archive"}
+    if data.startswith(b"\x1a\x45\xdf\xa3"):
+        return {"mime": "video/webm", "class": "binary"}
     head = data[:4096].lstrip().lower()
     if b"\0" in data[:8192]:
         return {"mime": "application/octet-stream", "class": "binary"}
@@ -250,7 +252,10 @@ class ArtifactStore:
                 return {"meta": meta, "note": f"The image is {record['size']} bytes, above the {self.limits.max_image_delivery_bytes}-byte "
                                               "native delivery limit; use mode='base64' to read it in bounded chunks.",
                         "window": {"offset": 0, "returned": 0, "total": record["size"]}}
-            return {"meta": meta, "image": (record["mime"], self.read(record, 0, record["size"])),
+            raw = self.read(record, 0, record["size"])
+            b64_str = base64.b64encode(raw).decode()
+            return {"meta": meta, "image": (record["mime"], raw),
+                    "data_uri": f"data:{record['mime']};base64,{b64_str}",
                     "window": {"offset": 0, "returned": record["size"], "total": record["size"]}}
         if mode == "text":
             if kind in {"image", "archive", "binary"}:

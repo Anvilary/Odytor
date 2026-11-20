@@ -11,6 +11,7 @@ anything else is disabled, and service workers, downloads, popups and dialogs ar
 import base64
 import collections
 import functools
+import glob
 import http.server
 import json
 import os
@@ -112,12 +113,24 @@ def count_requests(entries, path, method=None, since=0):
                and (method is None or entry["method"] == method))
 
 
-def summarize_network(entries):
+def summarize_network(entries, baseline=0, replayed_total=0):
+    since_entries = entries[baseline:]
     by_path = collections.Counter(f"{e['method']} {e['path'].split('?', 1)[0]}" for e in entries if not e.get("blocked"))
-    return {"total": len(entries), "blocked": sum(1 for e in entries if e.get("blocked")),
-            "mocked": sum(1 for e in entries if e.get("mocked")), "failed": sum(1 for e in entries if e.get("failed")),
-            "by_path": dict(by_path.most_common(MAX_PATHS)), "by_path_truncated": len(by_path) > MAX_PATHS,
-            "entries": entries[:MAX_NETWORK], "entries_truncated": len(entries) > MAX_NETWORK}
+    by_path_since_reset = collections.Counter(f"{e['method']} {e['path'].split('?', 1)[0]}" for e in since_entries if not e.get("blocked"))
+    return {
+        "scope_explanation": "Network request counts. 'since_last_reset' and 'by_path_since_reset' measure matching requests after the most recent reset_network_counts step (the scope evaluated by assert_requests). 'total' is all non-replayed requests in this execution turn; 'replayed_total' is the count of requests from session continuation replay.",
+        "total": len(entries),
+        "since_last_reset": len(since_entries),
+        "replayed_total": replayed_total,
+        "blocked": sum(1 for e in entries if e.get("blocked")),
+        "mocked": sum(1 for e in entries if e.get("mocked")),
+        "failed": sum(1 for e in entries if e.get("failed")),
+        "by_path": dict(by_path.most_common(MAX_PATHS)),
+        "by_path_since_reset": dict(by_path_since_reset.most_common(MAX_PATHS)),
+        "by_path_truncated": len(by_path) > MAX_PATHS,
+        "entries": entries[:MAX_NETWORK],
+        "entries_truncated": len(entries) > MAX_NETWORK,
+    }
 
 
 class StaticHandler(http.server.SimpleHTTPRequestHandler):
@@ -198,6 +211,7 @@ class Run:
         self.network, self.console, self.page_errors, self.step_results = [], [], [], []
         self.snapshots, self.artifacts, self.events = [], [], []
         self.artifact_bytes, self.baseline = 0, 0
+        self.replayed_total = 0
         self.by_request = {}
 
     # evidence hooks ------------------------------------------------------------------------------------------
@@ -278,7 +292,8 @@ class Run:
 
 def execute_step(run, page, step, index, expect):
     op, timeout = step["op"], step.get("timeout_ms", 5000)
-    page.set_default_timeout(timeout)
+    if page is not None:
+        page.set_default_timeout(timeout)
     if op == "goto":
         response = page.goto(run.origin + step["path"], wait_until=step.get("wait_until", "load"))
         return {"status": response.status if response else None, "url": request_path(page.url)}
@@ -337,8 +352,8 @@ def execute_step(run, page, step, index, expect):
         actual = count_requests(run.network, step["path"], step.get("method"), run.baseline)
         kind = step.get("compare", "eq")
         if not compare(kind, actual, step["count"]):
-            raise AssertionError(f"expected {kind} {step['count']} request(s) to {step['path']} since the last reset, observed {actual}")
-        return {"requests": actual}
+            raise AssertionError(f"expected {kind} {step['count']} request(s) to {step['path']} since the last reset (baseline index {run.baseline}, total requests {len(run.network)}), observed {actual}")
+        return {"requests": actual, "since_last_reset": True, "baseline": run.baseline}
     elif op == "wait_requests":
         # Race-free alternative to sleeping: wait until the application has *issued* at least `count` requests to the path.
         deadline = time.monotonic() + timeout / 1000
@@ -349,6 +364,7 @@ def execute_step(run, page, step, index, expect):
         return {"requests": count_requests(run.network, step["path"], step.get("method"), run.baseline)}
     elif op == "reset_network_counts":
         run.baseline = len(run.network)
+        return {"baseline": run.baseline, "reset": True}
     return {}
 
 
@@ -362,7 +378,7 @@ def _emergency(run, report, total_steps):
         report.update({"steps": steps, "steps_total": total_steps, "timed_out": True,
                        "console": {"messages": list(run.console)[:MAX_CONSOLE], "counts": dict(counts), "truncated": False},
                        "page_errors": list(run.page_errors)[:MAX_PAGE_ERRORS], "page_errors_total": len(run.page_errors),
-                       "network": summarize_network(list(run.network)), "snapshots": list(run.snapshots)[-6:],
+                       "network": summarize_network(list(run.network), run.baseline, run.replayed_total), "snapshots": list(run.snapshots)[-6:],
                        "events": list(run.events)[:20] + [{"watchdog": "the browser driver hung and was stopped"}],
                        "artifacts": list(run.artifacts)})
         sys.stdout.write("\n" + MARK + json.dumps(report, separators=(",", ":")) + "\n")
@@ -396,9 +412,18 @@ def run_browser(spec, report):
                                                "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1"])
             report["browser"] = {"name": "chromium", "version": browser.version, "viewport": scenario["viewport"],
                                  "locale": scenario["locale"], "timezone": scenario["timezone"], "color_scheme": scenario["color_scheme"]}
-            context = browser.new_context(viewport=scenario["viewport"], locale=scenario["locale"], timezone_id=scenario["timezone"],
-                                          color_scheme=scenario["color_scheme"], service_workers="block", accept_downloads=False,
-                                          device_scale_factor=1, ignore_https_errors=False, permissions=[])
+            record_video_dir = "/tmp/gp/videos" if scenario.get("video") else None
+            if record_video_dir:
+                os.makedirs(record_video_dir, exist_ok=True)
+            context_kwargs = {
+                "viewport": scenario["viewport"], "locale": scenario["locale"], "timezone_id": scenario["timezone"],
+                "color_scheme": scenario["color_scheme"], "service_workers": "block", "accept_downloads": False,
+                "device_scale_factor": 1, "ignore_https_errors": False, "permissions": []
+            }
+            if record_video_dir:
+                context_kwargs["record_video_dir"] = record_video_dir
+                context_kwargs["record_video_size"] = scenario["viewport"]
+            context = browser.new_context(**context_kwargs)
             context.route("**/*", run.on_route)
 
             # WebSockets are not routed: closing one from inside Playwright's route handler deadlocks the sync API. The
@@ -444,6 +469,7 @@ def run_browser(spec, report):
                     # Evidence must describe only the new steps: drop what the replay produced.
                     replay_noise = {"network_requests": len(run.network), "console_messages": len(run.console), "page_errors": len(run.page_errors)}
                     report["replay"] = replay_noise
+                    run.replayed_total += len(run.network)
                     run.network.clear()
                     run.console.clear()
                     run.page_errors.clear()
@@ -468,6 +494,18 @@ def run_browser(spec, report):
                     run.events.append({"trace_failed": str(exc)[:120]})
             context.close()
             browser.close()
+            if scenario.get("video"):
+                try:
+                    video_files = glob.glob("/tmp/gp/videos/*.webm")
+                    if video_files:
+                        with open(video_files[0], "rb") as vf:
+                            vblob = vf.read(MAX_ARTIFACT_BYTES + 1)
+                        if len(vblob) <= MAX_ARTIFACT_BYTES:
+                            run.add_artifact("recording.webm", "video", vblob)
+                        else:
+                            run.events.append({"artifact_omitted": "recording.webm", "reason": "size"})
+                except Exception as exc:
+                    run.events.append({"video_capture_failed": str(exc)[:120]})
     finally:
         watchdog.cancel()
         server.stop()
@@ -478,7 +516,7 @@ def run_browser(spec, report):
             "steps": run.step_results, "steps_total": len(scenario["steps"]),
             "console": {"messages": run.console[:MAX_CONSOLE], "counts": dict(counts), "truncated": len(run.console) > MAX_CONSOLE},
             "page_errors": run.page_errors[:MAX_PAGE_ERRORS], "page_errors_total": len(run.page_errors),
-            "network": summarize_network(run.network), "snapshots": run.snapshots[-6:], "events": run.events[:20],
+            "network": summarize_network(run.network, run.baseline, run.replayed_total), "snapshots": run.snapshots[-6:], "events": run.events[:20],
             "artifacts": run.artifacts, "duration_seconds": round(time.monotonic() - started, 3)})
 
 

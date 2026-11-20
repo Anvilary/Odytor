@@ -23,9 +23,9 @@ from odytor import browser_spec
 from odytor.profile import BROWSER_PROFILE, REGISTRY, RepoPolicy
 
 # Tools that cannot work without a configured runner; the server registers them either way and explains why.
-RUNNER_TOOLS = ("test_run", "test_result", "workspace_run", "test_cancel", "browser_run")
+RUNNER_TOOLS = ("test_run", "test_result", "workspace_run", "test_cancel", "browser_run", "validation_campaign")
 WORKSPACE_TOOLS = ("workspace_create", "workspace_read", "workspace_search", "workspace_edit", "workspace_diff",
-                   "workspace_run", "workspace_manage", "publish_plan", "publish_apply")
+                   "workspace_run", "workspace_manage", "publish_plan", "publish_apply", "validation_campaign")
 RUNNER_PROTOCOL = 1
 
 
@@ -150,7 +150,8 @@ def describe(cfg: Settings, *, policies: dict[str, RepoPolicy], service: Any | N
         engine="chromium", executes_code=True, isolation="container: no network, read-only root, no capabilities",
         limits={"max_new_steps": browser_spec.MAX_STEPS, "max_session_steps": browser_spec.MAX_SESSION_STEPS,
                 "max_screenshots_per_run": browser_spec.MAX_SCREENSHOTS, "max_mocks": browser_spec.MAX_MOCKS},
-        not_implemented=["unrestricted JavaScript evaluation", "video", "file upload and download", "external origins"])
+        video={"opt_in": True, "format": "video/webm", "delivery": "base64_chunks", "unsupported": ["inline playback"]},
+        not_implemented=["unrestricted JavaScript evaluation", "file upload and download", "external origins"])
     pub_apply_enabled = workspaces_enabled and bool(getattr(getattr(cfg, "workspaces", None), "allow_publish_apply", False))
     publication = _capability(
         "publication", installed=True, configured=pub_apply_enabled, operational=None,
@@ -187,7 +188,7 @@ def describe(cfg: Settings, *, policies: dict[str, RepoPolicy], service: Any | N
                 "runner": facts.get("limits")} if runs is not None else {})},
         "health": ({"queue_depth": service.queue_depth()} if service is not None else {}),
         "artifact_formats": {"native_image": ["image/png", "image/jpeg", "image/webp"], "text_window": ["text/plain"],
-                             "base64_chunks": ["application/zip (Playwright traces)", "other binary"],
+                             "base64_chunks": ["application/zip (Playwright traces)", "video/webm (browser recordings)", "other binary"],
                              "never_rendered": ["text/html", "image/svg+xml", "scripts"]},
         "known_unavailable": [
             ],

@@ -150,7 +150,8 @@ class SessionStore:
 def submit_browser_run(repo: str, workspace_id: str, expected_version: int, steps: Any, *, workspaces: Any, sessions: SessionStore,
                        service: JobService, policies: dict[str, RepoPolicy], owner: str, cfg: RunSettings,
                        session_id: str | None = None, mocks: Any = None, viewport: Any = None, locale: str | None = None,
-                       timezone: str | None = None, color_scheme: str | None = None, trace: bool | None = None) -> dict[str, Any]:
+                       timezone: str | None = None, color_scheme: str | None = None, trace: bool | None = None,
+                       video: bool | None = None) -> dict[str, Any]:
     """Queue a browser run on the exact current tree of a workspace, continuing a session when one is named."""
     from odytor.run_tests import public_view  # local import: run_tests owns the shared result view
 
@@ -169,8 +170,8 @@ def submit_browser_run(repo: str, workspace_id: str, expected_version: int, step
     if current["repo"].casefold() != repo.casefold():
         raise ValidationError("Unknown workspace_id.")
     if session_id is not None:
-        if any(v is not None for v in (mocks, viewport, locale, timezone, color_scheme, trace)):
-            raise ValidationError("A session keeps the mocks, viewport, locale, timezone and trace setting it was opened with; "
+        if any(v is not None for v in (mocks, viewport, locale, timezone, color_scheme, trace, video)):
+            raise ValidationError("A session keeps the mocks, viewport, locale, timezone, trace and video setting it was opened with; "
                                   "close it and open a new one to change them.")
         session = sessions.get(session_id, owner, service=service)
         if session["workspace_id"] != workspace_id:
@@ -186,8 +187,9 @@ def submit_browser_run(repo: str, workspace_id: str, expected_version: int, step
     else:
         probe = browser_spec.validate_scenario({"steps": [{"op": "wait_ms", "ms": 0}], "mocks": mocks or [], "viewport": viewport or {"width": 1280, "height": 720},
                                                 "locale": locale or "en-US", "timezone": timezone or "UTC",
-                                                "color_scheme": color_scheme or "light", "trace": bool(trace)})
-        base = {k: probe[k] for k in ("mocks", "viewport", "locale", "timezone", "color_scheme", "trace")}
+                                                "color_scheme": color_scheme or "light", "trace": bool(trace),
+                                                "video": bool(video)})
+        base = {k: probe[k] for k in ("mocks", "viewport", "locale", "timezone", "color_scheme", "trace", "video")}
         session = None
     history = list(session["steps"]) if session else []
     try:

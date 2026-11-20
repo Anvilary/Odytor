@@ -129,7 +129,7 @@ def safe_payload(
         raise ValueError("total_bytes must be at least 512.")
     # With the default per-string limit, caller-bounded fields (diff, content, patch, log, chunk)
     # are bounded by their explicit window limits and by the response budget instead of DEFAULT_TEXT_LIMIT.
-    exempt = ("diff", "content", "patch", "log", "chunk") if limit == DEFAULT_TEXT_LIMIT else ()
+    exempt = ("diff", "content", "patch", "log", "chunk", "base64", "data_uri") if limit == DEFAULT_TEXT_LIMIT else ()
     result, _, _ = _safe_payload_track(
         payload,
         "",
