@@ -262,7 +262,7 @@ class Settings:
     @classmethod
     def load(cls) -> Settings:
         """Load settings from environment variables."""
-        token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or _env("SERVER_PAT")
         api_url = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
         auth_token = _env("AUTH_TOKEN")
 
