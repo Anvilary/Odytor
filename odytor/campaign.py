@@ -384,7 +384,7 @@ def run_validation_campaign(
             else:
                 b_status = final_b.get("status", "unknown")
                 res_b = final_b.get("result") or {}
-                b_failure = res_b.get("failure") or final_b.get("failure")
+                b_failure = res_b.get("failure") or final_b.get("failure") or res_b.get("error") or final_b.get("error")
                 record.steps.append({
                     "name": "browser-playwright",
                     "status": b_status,
@@ -399,6 +399,8 @@ def run_validation_campaign(
                     "counts": res_b.get("counts") or final_b.get("counts"),
                     "network": res_b.get("network") or final_b.get("network"),
                     "failure": b_failure,
+                    "error": res_b.get("error") or final_b.get("error"),
+                    "serve": res_b.get("serve") or final_b.get("serve"),
                 }
                 for art in (res_b.get("artifacts") or final_b.get("artifacts") or []):
                     record.artifacts.append(art)

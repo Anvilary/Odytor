@@ -42,6 +42,13 @@ root = "static"
 port = 8765
 ready_path = "/index.html"
 
+[repos."odysseus-dev/odysseus".browser-playwright.profiles.app]
+kind = "command"
+argv = ["python3", "-m", "uvicorn", "app:app", "--host", "127.0.0.1", "--port", "8765"]
+port = 8765
+ready_path = "/index.html"
+ready_timeout = 10
+
 [repos."alteixeira20/odytor-smoke-test"]
 template = "standard-polyglot"
 test_dirs = ["tests"]

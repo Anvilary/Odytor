@@ -180,7 +180,10 @@ class Server:
         url_path = self.serve["ready_path"]
         while time.monotonic() < deadline:
             if self.proc is not None and self.proc.poll() is not None:
-                raise RuntimeError(f"the application exited with status {self.proc.returncode} before it was ready")
+                time.sleep(0.1)
+                log_snippet = self.log.decode("latin-1", "replace").strip()[-400:] if self.log else ""
+                detail = f": {log_snippet}" if log_snippet else ""
+                raise RuntimeError(f"the application exited with status {self.proc.returncode} before it was ready{detail}")
             try:
                 with socket.create_connection(("127.0.0.1", self.serve["port"]), timeout=1) as conn:
                     conn.sendall(f"GET {url_path} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n".encode())
@@ -190,7 +193,9 @@ class Server:
             except (OSError, ValueError, IndexError):
                 pass
             time.sleep(0.25)
-        raise RuntimeError(f"the application did not answer {url_path} within {self.serve['ready_timeout']}s")
+        log_snippet = self.log.decode("latin-1", "replace").strip()[-400:] if self.log else ""
+        detail = f": {log_snippet}" if log_snippet else ""
+        raise RuntimeError(f"the application did not answer {url_path} within {self.serve['ready_timeout']}s{detail}")
 
     def stop(self):
         if self.httpd is not None:
