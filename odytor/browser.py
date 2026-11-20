@@ -73,15 +73,28 @@ class SessionStore:
             if record["expires_at"] <= now:
                 self._path(record["session_id"]).unlink(missing_ok=True)
 
-    def create(self, *, owner: str, repo: str, workspace_id: str, version: int, tree: str, base: dict[str, Any]) -> dict[str, Any]:
+    def create(self, *, owner: str, repo: str, workspace_id: str, version: int, tree: str, base: dict[str, Any],
+               service: JobService | None = None) -> dict[str, Any]:
         with self._lock:
             self.purge()
-            live = sorted((r for r in self._records() if r["owner"] == owner), key=lambda r: r["created_at"])
+            raw_live = sorted((r for r in self._records() if r["owner"] == owner), key=lambda r: r["created_at"])
+            live = []
+            for r in raw_live:
+                if service is not None and r.get("pending"):
+                    r = self._reconcile(r, service)
+                live.append(r)
             evicted = []
             # A session is only replay history, so at the cap the oldest one yields rather than the caller being locked out
             # for hours by a handful of one-shot runs. Sessions with a run in flight are never evicted.
             while len(live) >= self.max_per_owner:
                 victim = next((r for r in live if not r["pending"]), None)
+                if victim is None and service is not None:
+                    # Look for any session whose pending runs are terminal in the job store
+                    for r in live:
+                        pending_runs = [item["run_id"] for item in r.get("pending", [])]
+                        if all(service.store.load(rid) is None or (service.store.load(rid) or {}).get("status") in TERMINAL for rid in pending_runs):
+                            victim = r
+                            break
                 if victim is None:
                     raise ValidationError("Browser session limit reached and every session has a run in flight; wait for one to finish.",
                                           {"max_per_owner": self.max_per_owner})
@@ -216,7 +229,7 @@ def submit_browser_run(repo: str, workspace_id: str, expected_version: int, step
                                     max_bytes=cfg.max_source_bytes, attach_run=run_id)
         ws = taken["record"]
         if session is None:
-            session = sessions.create(owner=owner, repo=repo, workspace_id=workspace_id, version=ws["version"], tree=ws["tree"], base=base)
+            session = sessions.create(owner=owner, repo=repo, workspace_id=workspace_id, version=ws["version"], tree=ws["tree"], base=base, service=service)
         elif session["workspace_version"] != ws["version"] or session["tree"] != ws["tree"]:
             raise ValidationError("The workspace changed since this session was opened.")
         scenario = {**combined, "replay": len(history)}

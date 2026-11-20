@@ -233,6 +233,7 @@ def run_validation_campaign(
         campaign_store.save(record)
 
     ws_id = None
+    b_session_id = None
     all_passed = True
     deadline = now + timeout_seconds
 
@@ -370,6 +371,7 @@ def run_validation_campaign(
                 app_profile=app_profile,
             )
             b_run_id = sub_b["run_id"]
+            b_session_id = (sub_b.get("session") or {}).get("session_id")
             record.current_run_id = b_run_id
             if campaign_store:
                 campaign_store.save(record)
@@ -425,6 +427,11 @@ def run_validation_campaign(
         all_passed = False
     finally:
         # Step 5: Clean up disposable workspace (guaranteed under all outcomes)
+        if b_session_id and sessions:
+            try:
+                sessions.close(b_session_id, owner)
+            except Exception:
+                pass
         if ws_id:
             try:
                 workspaces.close(ws_id, owner)
