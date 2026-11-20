@@ -347,6 +347,11 @@ def validate_header(cfg: RunnerConfig, header: object) -> dict:
             job["selectors"] = validate_node_selectors(header.get("selectors"), tuple(dirs))
             job["requirements"], job["overlay_paths"] = "", ()
             return job
+        if spec.kind in ("linter", "typechecker", "builder", "c_test"):
+            from odytor.profile import validate_path_selectors
+            job["selectors"] = validate_path_selectors(header.get("selectors"))
+            job["requirements"], job["overlay_paths"] = "", ()
+            return job
         selectors = validate_selectors(header.get("selectors"), tuple(dirs))
         requirements = validate_requirements(header.get("requirements"))
         overlay = header.get("overlay_paths", [])
