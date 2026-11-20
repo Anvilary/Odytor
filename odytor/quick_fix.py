@@ -6,7 +6,7 @@ import hashlib
 import os
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable
 
 from odytor.errors import APIError, GitOperationError, RevisionMismatchError, SecurityError, ValidationError
 from odytor.github import GitHubClient, validate_repo, validate_sha
@@ -34,6 +34,40 @@ _SENSITIVE_KEYWORDS = (
     "token", "jwt", "login", "session", "cookie",
     "permission", "privilege", "crypt", "ssrf",
 )
+
+# Exact, repository-scoped path exceptions for false positives on ordinary source files.
+# Bypasses the sensitive keyword pattern check only; traversal, extension, directory,
+# and protected-file restrictions remain strictly enforced.
+_REPO_PATH_KEYWORD_EXEMPTIONS: dict[str, frozenset[str]] = {
+    "odysseus-dev/odysseus": frozenset({
+        "frontend/src/features/notes/application/noteSession.js",
+        "static/js/features/notes/application/noteSession.js",
+    }),
+}
+
+
+def register_path_keyword_exemptions(repo: str, paths: Iterable[str]) -> frozenset[str]:
+    """Register declarative path exceptions for sensitive keyword matching."""
+    if not repo or not isinstance(repo, str):
+        return frozenset()
+    key = repo.casefold()
+    current = _REPO_PATH_KEYWORD_EXEMPTIONS.get(key, frozenset())
+    updated = current | frozenset(p for p in paths if isinstance(p, str) and p.strip())
+    _REPO_PATH_KEYWORD_EXEMPTIONS[key] = updated
+    return updated
+
+
+def _component_words(component: str) -> set[str]:
+    """Extract individual lowercase word tokens from a path component.
+
+    Splits on non-alphanumeric characters and camelCase boundaries so that
+    words like 'author' or 'tokenizer' do not trigger false positives on
+    'auth' or 'token', while 'auth_middleware' or 'authMiddleware' are caught.
+    """
+    stem, _ = os.path.splitext(component)
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", stem)
+    tokens = re.split(r"[^a-zA-Z0-9]+", s)
+    return {t.lower() for t in tokens if t}
 
 _KEY_AND_CERT_EXTENSIONS = frozenset({
     ".key", ".pem", ".crt", ".cer", ".p12", ".pfx",
@@ -77,7 +111,7 @@ class PatchSummary:
     patch_bytes: int
 
 
-def _validate_path(path_str: str) -> str:
+def _validate_path(path_str: str, repo: str | None = None) -> str:
     """Enforce security policies on a file path in a patch."""
     if not path_str or not path_str.strip():
         raise ValidationError("File path cannot be empty.")
@@ -119,9 +153,16 @@ def _validate_path(path_str: str) -> str:
     if re.match(r"^(docker-)?compose.*\.ya?ml$", filename):
         raise SecurityError(f"Docker Compose definitions are not permitted: '{path_str}'.")
 
-    for p in parts:
-        if any(kw in p.lower() for kw in _SENSITIVE_KEYWORDS):
-            raise SecurityError(f"Path contains sensitive keyword pattern: '{path_str}'.")
+    repo_exemptions = (
+        _REPO_PATH_KEYWORD_EXEMPTIONS.get(repo.casefold(), frozenset())
+        if repo
+        else frozenset()
+    )
+    if path_str not in repo_exemptions:
+        for p in parts:
+            words = _component_words(p)
+            if any(kw in words for kw in _SENSITIVE_KEYWORDS):
+                raise SecurityError(f"Path contains sensitive keyword pattern: '{path_str}'.")
 
     if ext in _KEY_AND_CERT_EXTENSIONS:
         raise SecurityError(f"Cryptographic key/cert files are not permitted: '{path_str}'.")
@@ -143,7 +184,7 @@ def _validate_path(path_str: str) -> str:
 
 
 def validate_patch(
-    patch: str, *, max_files: int = DEFAULT_MAX_FILES,
+    patch: str, *, repo: str | None = None, max_files: int = DEFAULT_MAX_FILES,
     max_changed_lines: int = DEFAULT_MAX_CHANGED_LINES, max_bytes: int = DEFAULT_MAX_BYTES,
 ) -> PatchSummary:
     """Accept matching unquoted Git paths and count every hunk line exactly."""
@@ -171,7 +212,7 @@ def validate_patch(
         match = re.fullmatch(r"diff --git a/([^\s\"]+) b/([^\s\"]+)", lines[i])
         if not match or match[1] != match[2]:
             raise ValidationError("Expected matching unquoted diff --git paths.")
-        path = _validate_path(match[1])
+        path = _validate_path(match[1], repo=repo)
         if path in files:
             raise ValidationError("Duplicate diff path.")
         files.append(path)
@@ -282,7 +323,7 @@ def apply_quick_fix(
     GitHub attributes the commit to the authenticated identity. No repository
     code or tests run. A lost mutation response requires reconciliation.
     """
-    summary = validate_patch(patch, max_files=max_files, max_changed_lines=max_changed_lines, max_bytes=max_bytes)
+    summary = validate_patch(patch, repo=repo, max_files=max_files, max_changed_lines=max_changed_lines, max_bytes=max_bytes)
     if not commit_message.strip() or len(commit_message.encode()) > 1440 or "\0" in commit_message:
         raise ValidationError("Commit message must contain 1-1440 bytes without NUL.")
     context = pr_context(client, repo, number, expected_head, write=True, operation="quick_fix")

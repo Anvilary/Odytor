@@ -183,11 +183,11 @@ def _changed_files(repository: WorkspaceRepo, base: str, tree: str) -> list[dict
     return files
 
 
-def _policy_violations(paths: list[str]) -> list[dict[str, str]]:
+def _policy_violations(paths: list[str], repo: str | None = None) -> list[dict[str, str]]:
     found = []
     for path in paths:
         try:
-            _validate_path(path)
+            _validate_path(path, repo=repo)
         except GitPlusError as exc:
             found.append({"path": path, "reason": exc.message})
     return found
@@ -239,7 +239,7 @@ def plan_publication(client: Any, repo: str, workspace_id: str, expected_version
     lines = sum(f["added"] + f["removed"] for f in files)
     if lines > max_changed_lines:
         raise ValidationError(f"The change touches {lines} lines; the publication limit is {max_changed_lines}.", {"stage": "limits"})
-    violations = _policy_violations([f["path"] for f in files])
+    violations = _policy_violations([f["path"] for f in files], repo=repo)
     if violations:
         raise SecurityError("Some changed paths are not publishable under the repository write policy.", {"stage": "path_policy", "violations": violations[:20]})
     patch = workspaces.canonical_patch(workspace_id, base_tree, tree)
@@ -377,7 +377,7 @@ def apply_publication(client: Any, repo: str, plan_id: str, confirm: str, user_a
     files = _changed_files(repository, plan["base_tree"], plan["tree"])
     if files != plan["files"]:
         raise SecurityError("The changed-file list no longer matches the plan; refusing to publish.")
-    if _policy_violations([f["path"] for f in files]):
+    if _policy_violations([f["path"] for f in files], repo=repo):
         raise SecurityError("The planned paths are no longer publishable under the repository write policy.")
     target = plan["target"]
     if plan["state"] == "unknown_outcome":

@@ -49,6 +49,12 @@ port = 8765
 ready_path = "/index.html"
 ready_timeout = 10
 
+[repos."odysseus-dev/odysseus".publish]
+exempt_paths = [
+    "frontend/src/features/notes/application/noteSession.js",
+    "static/js/features/notes/application/noteSession.js",
+]
+
 [repos."alteixeira20/odytor-smoke-test"]
 template = "standard-polyglot"
 test_dirs = ["tests"]

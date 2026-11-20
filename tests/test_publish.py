@@ -464,3 +464,61 @@ def test_plan_and_apply_pr_body_draft_only_and_invariants(stack):
     # 6. Idempotent replay
     replayed = apply_pr_body(client, "owner/repo", bp["plan_id"], bp["confirmation"], True, plans=plans, owner=OWNER)
     assert replayed["idempotent_replay"] is True
+
+
+def test_plan_publication_accepts_notes_session_for_odysseus_dev_odysseus(stack):
+    service, plans, client, repo, head, open_ws = stack
+    # Configure client PR data for odysseus-dev/odysseus using fixture branch 'feature'
+    client.get_pr.return_value = {
+        'state': 'open',
+        'head': {'sha': head, 'ref': 'feature', 'repo': {'full_name': 'odysseus-dev/odysseus'}},
+        'base': {'sha': head, 'ref': 'main', 'repo': {'full_name': 'odysseus-dev/odysseus'}},
+        'maintainer_can_modify': True,
+    }
+    w = open_workspace(
+        client, 'odysseus-dev/odysseus', service=service, owner=OWNER, number=7342,
+        expected_head=head, operations=['read', 'edit', 'diff', 'execute', 'publish'],
+    )['workspace_id']
+
+    service.write_file(w, OWNER, expected_version=0, path='frontend/src/features/notes/application/noteSession.js',
+                       content='export const noteSession = {};\n')
+    service.write_file(w, OWNER, expected_version=1, path='static/js/features/notes/application/noteSession.js',
+                       content='export const noteSession = {};\n')
+    service.write_file(w, OWNER, expected_version=2, path='tests/notesDraftRecovery.test.mjs',
+                       content='import test from "node:test";\n')
+
+    # plan_publication succeeds for odysseus-dev/odysseus
+    p = plan_publication(
+        client, 'odysseus-dev/odysseus', w, 3, 'feat(notes): make note window only editor',
+        workspaces=service, plans=plans, jobs=None, owner=OWNER, **LIMITS,
+    )
+    assert p['state'] == 'pending'
+    assert p['repo'] == 'odysseus-dev/odysseus'
+    assert len(p['files']) == 3
+    assert {f['path'] for f in p['files']} == {
+        'frontend/src/features/notes/application/noteSession.js',
+        'static/js/features/notes/application/noteSession.js',
+        'tests/notesDraftRecovery.test.mjs',
+    }
+
+    # apply_publication with approval applies cleanly on the same exact policy
+    client.graphql.return_value = commit_response(p['tree'], head)
+    applied = apply_publication(
+        client, 'odysseus-dev/odysseus', p['plan_id'], p['confirmation'], True,
+        workspaces=service, plans=plans, jobs=None, owner=OWNER,
+    )
+    assert applied['state'] == 'applied'
+    assert applied['result']['new_sha'] == 'f' * 40
+    assert applied['result']['force_push'] is False
+
+
+def test_plan_publication_rejects_notes_session_for_other_repository(stack):
+    service, plans, client, repo, head, open_ws = stack
+    w = open_ws()['workspace_id']
+    service.write_file(w, OWNER, expected_version=0, path='frontend/src/features/notes/application/noteSession.js',
+                       content='export const noteSession = {};\n')
+    with pytest.raises(SecurityError) as info:
+        plan(stack, w, 1)
+    assert info.value.diagnostic['stage'] == 'path_policy'
+    assert info.value.diagnostic['violations'][0]['path'] == 'frontend/src/features/notes/application/noteSession.js'
+

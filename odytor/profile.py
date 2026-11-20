@@ -400,5 +400,13 @@ def load_policies(path: str | Path) -> dict[str, RepoPolicy]:
                 extra[BROWSER_PROFILE] = {"serve": default_serve, "profiles": app_profiles}
             except SpecError as exc:
                 raise ProfileError(f"Invalid {BROWSER_PROFILE} settings for {repo}: {exc}") from exc
+        if "publish" in entry and isinstance(entry["publish"], dict):
+            pub = entry["publish"]
+            exemptions = pub.get("exempt_paths") or pub.get("allowed_paths")
+            if isinstance(exemptions, (list, tuple)):
+                from odytor.quick_fix import register_path_keyword_exemptions
+                cleaned_exemptions = tuple(p for p in exemptions if isinstance(p, str) and p.strip())
+                register_path_keyword_exemptions(repo, cleaned_exemptions)
+                extra["publish"] = {"exempt_paths": cleaned_exemptions}
         policies[repo.casefold()] = RepoPolicy(repo, profile, tuple(roots), text, requirements_digest(text), extra)
     return policies

@@ -282,3 +282,178 @@ def test_actual_unsafe_mode_never_mutates(local_fetch, mode):
     with pytest.raises(SecurityError):
         apply_quick_fix(client, 'owner/repo', 1, sha, SIMPLE_PATCH, 'Fix')
     client.graphql.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Repository-scoped path keyword exemption regression tests
+# ---------------------------------------------------------------------------
+
+def test_validate_path_odysseus_notes_session_exemptions() -> None:
+    p1 = "frontend/src/features/notes/application/noteSession.js"
+    p2 = "static/js/features/notes/application/noteSession.js"
+    p3 = "tests/notesDraftRecovery.test.mjs"
+
+    # Exact paths accepted for odysseus-dev/odysseus
+    assert _validate_path(p1, repo="odysseus-dev/odysseus") == p1
+    assert _validate_path(p2, repo="odysseus-dev/odysseus") == p2
+    assert _validate_path(p3, repo="odysseus-dev/odysseus") == p3
+
+    # Case-insensitive repository matching
+    assert _validate_path(p1, repo="Odysseus-Dev/Odysseus") == p1
+    assert _validate_path(p2, repo="ODYSSEUS-DEV/ODYSSEUS") == p2
+
+
+def test_validate_path_odysseus_notes_session_denied_in_other_repos() -> None:
+    p1 = "frontend/src/features/notes/application/noteSession.js"
+    p2 = "static/js/features/notes/application/noteSession.js"
+
+    # Denied when repo is another repository
+    for other_repo in ("owner/repo", "alteixeira20/odytor-smoke-test", "odysseus-dev/other", ""):
+        with pytest.raises(SecurityError, match="sensitive keyword pattern"):
+            _validate_path(p1, repo=other_repo)
+        with pytest.raises(SecurityError, match="sensitive keyword pattern"):
+            _validate_path(p2, repo=other_repo)
+
+    # Denied when repo is omitted (None)
+    with pytest.raises(SecurityError, match="sensitive keyword pattern"):
+        _validate_path(p1)
+    with pytest.raises(SecurityError, match="sensitive keyword pattern"):
+        _validate_path(p2)
+
+
+def test_validate_path_nearby_protected_paths_denied_in_odysseus() -> None:
+    repo = "odysseus-dev/odysseus"
+
+    # Nearby non-exempt session paths
+    nearby_session_paths = (
+        "frontend/src/features/notes/application/anotherSession.js",
+        "frontend/src/features/notes/application/session.js",
+        "frontend/src/features/notes/application/authSession.js",
+        "frontend/src/features/auth/noteSession.js",
+        "static/js/auth/noteSession.js",
+        "frontend/src/features/notes/ui/editorSession.js",
+    )
+    for path in nearby_session_paths:
+        with pytest.raises(SecurityError, match="sensitive keyword pattern"):
+            _validate_path(path, repo=repo)
+
+    # Other sensitive keywords in notes
+    other_sensitive_paths = (
+        "frontend/src/features/notes/application/noteAuth.js",
+        "frontend/src/features/notes/application/secretHelper.js",
+        "frontend/src/features/notes/domain/tokenValidator.js",
+        "frontend/src/features/notes/application/notePassword.js",
+    )
+    for path in other_sensitive_paths:
+        with pytest.raises(SecurityError, match="sensitive keyword pattern"):
+            _validate_path(path, repo=repo)
+
+
+def test_validate_path_exemption_preserves_structural_and_extension_checks() -> None:
+    repo = "odysseus-dev/odysseus"
+
+    # Directory traversal
+    with pytest.raises(SecurityError, match="traversal"):
+        _validate_path("frontend/src/features/notes/application/../application/noteSession.js", repo=repo)
+    with pytest.raises(SecurityError, match="traversal"):
+        _validate_path("../frontend/src/features/notes/application/noteSession.js", repo=repo)
+
+    # Prohibited directories
+    with pytest.raises(SecurityError, match="Restricted directory"):
+        _validate_path("scripts/frontend/src/features/notes/application/noteSession.js", repo=repo)
+    with pytest.raises(SecurityError, match="Restricted directory"):
+        _validate_path("deploy/noteSession.js", repo=repo)
+    with pytest.raises(SecurityError, match="github config"):
+        _validate_path(".github/frontend/src/features/notes/application/noteSession.js", repo=repo)
+
+    # Executable and cryptographic extensions on non-exempt paths
+    with pytest.raises(SecurityError, match="Executable script/binary"):
+        _validate_path("frontend/src/features/notes/application/runner.sh", repo=repo)
+    with pytest.raises(SecurityError, match="Cryptographic key/cert"):
+        _validate_path("frontend/src/features/notes/application/cert.pem", repo=repo)
+
+    # Appending extensions to exempted path is not exempt and rejected by keyword check
+    with pytest.raises(SecurityError, match="sensitive keyword pattern"):
+        _validate_path("frontend/src/features/notes/application/noteSession.js.sh", repo=repo)
+    with pytest.raises(SecurityError, match="sensitive keyword pattern"):
+        _validate_path("frontend/src/features/notes/application/noteSession.js.key", repo=repo)
+
+    # Sensitive identity / environment files
+    with pytest.raises(SecurityError, match="Sensitive identity/environment"):
+        _validate_path("frontend/src/features/notes/application/.env", repo=repo)
+
+
+def test_validate_patch_with_odysseus_notes_session_paths() -> None:
+    patch = textwrap.dedent("""\
+        diff --git a/frontend/src/features/notes/application/noteSession.js b/frontend/src/features/notes/application/noteSession.js
+        index 0000000..1111111 100644
+        --- a/frontend/src/features/notes/application/noteSession.js
+        +++ b/frontend/src/features/notes/application/noteSession.js
+        @@ -1,2 +1,3 @@
+         line 1
+        +line 2
+         line 3
+        diff --git a/tests/notesDraftRecovery.test.mjs b/tests/notesDraftRecovery.test.mjs
+        index 0000000..2222222 100644
+        --- a/tests/notesDraftRecovery.test.mjs
+        +++ b/tests/notesDraftRecovery.test.mjs
+        @@ -1,2 +1,3 @@
+         test 1
+        +test 2
+         test 3
+    """)
+
+    # Accepted for odysseus-dev/odysseus
+    summary = validate_patch(patch, repo="odysseus-dev/odysseus")
+    assert summary.files == (
+        "frontend/src/features/notes/application/noteSession.js",
+        "tests/notesDraftRecovery.test.mjs",
+    )
+    assert summary.added_lines == 2
+
+    # Denied for other repo
+    with pytest.raises(SecurityError, match="sensitive keyword pattern"):
+        validate_patch(patch, repo="owner/repo")
+
+    # Denied when repo is omitted
+    with pytest.raises(SecurityError, match="sensitive keyword pattern"):
+        validate_patch(patch)
+
+
+def test_component_words_prevents_false_positives_on_common_words() -> None:
+    from odytor.quick_fix import _component_words, register_path_keyword_exemptions
+
+    # Substring checks previously matched 'auth' in 'author' or 'token' in 'tokenizer'
+    assert "auth" not in _component_words("author.py")
+    assert "token" not in _component_words("tokenizer.py")
+    assert "auth" not in _component_words("authentic.js")
+    assert "session" not in _component_words("concession.py")
+
+    # Word-boundary checks catch compound forms
+    assert "auth" in _component_words("auth_middleware.py")
+    assert "auth" in _component_words("authMiddleware.js")
+    assert "session" in _component_words("session_manager.py")
+    assert "session" in _component_words("userSession.ts")
+
+    # Path validation allows common non-sensitive source files
+    assert _validate_path("src/author.py") == "src/author.py"
+    assert _validate_path("src/tokenizer.py") == "src/tokenizer.py"
+    assert _validate_path("src/authentic.js") == "src/authentic.js"
+
+    # Compound forms remain blocked without exemptions
+    with pytest.raises(SecurityError, match="sensitive keyword pattern"):
+        _validate_path("src/auth_middleware.py")
+    with pytest.raises(SecurityError, match="sensitive keyword pattern"):
+        _validate_path("src/authMiddleware.js")
+    with pytest.raises(SecurityError, match="sensitive keyword pattern"):
+        _validate_path("src/session_manager.py")
+
+    # Declarative registration allows new exemptions
+    test_repo = "example-org/example-repo"
+    register_path_keyword_exemptions(test_repo, ["src/session_manager.py"])
+    assert _validate_path("src/session_manager.py", repo=test_repo) == "src/session_manager.py"
+    # Other repos still reject it
+    with pytest.raises(SecurityError, match="sensitive keyword pattern"):
+        _validate_path("src/session_manager.py", repo="other-org/other-repo")
+
+

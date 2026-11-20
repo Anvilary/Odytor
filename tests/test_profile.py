@@ -149,3 +149,15 @@ def test_template_inheritance_in_load_policies():
     assert 'node-test' in smoke_policy.profiles
     assert 'cmake-build' in smoke_policy.profiles
     assert 'make-build' in smoke_policy.profiles
+
+
+def test_load_policies_publish_exemptions():
+    from pathlib import Path
+    from odytor.profile import load_policies
+    policies = load_policies(Path(__file__).resolve().parents[1] / 'deploy' / 'policies' / 'policy.toml')
+    ody_policy = policies['odysseus-dev/odysseus']
+    assert 'publish' in ody_policy.extra
+    exemptions = ody_policy.extra['publish']['exempt_paths']
+    assert "frontend/src/features/notes/application/noteSession.js" in exemptions
+    assert "static/js/features/notes/application/noteSession.js" in exemptions
+
