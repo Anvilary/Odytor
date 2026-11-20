@@ -147,7 +147,24 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                       user_authorized_fork_approval=user_authorized_fork_approval)
 
     runs = cfg.testing
-    policies = load_policies(runs.policies_path) if runs else {}
+    _cached_policies: dict[str, Any] = {"mtime": 0.0, "data": {}}
+
+    def current_policies():
+        if not runs or not runs.policies_path:
+            return {}
+        try:
+            mtime = os.path.getmtime(runs.policies_path)
+            if mtime != _cached_policies["mtime"]:
+                _cached_policies["data"] = load_policies(runs.policies_path)
+                _cached_policies["mtime"] = mtime
+        except Exception:
+            if not _cached_policies["data"]:
+                try:
+                    _cached_policies["data"] = load_policies(runs.policies_path)
+                except Exception:
+                    pass
+        return _cached_policies["data"]
+
     artifact_store = (ArtifactStore(cfg.artifacts.data_dir, ArtifactLimits(
         max_artifact_bytes=cfg.artifacts.max_artifact_bytes, max_image_delivery_bytes=cfg.artifacts.max_image_delivery_bytes,
         max_owner_bytes=cfg.artifacts.max_owner_bytes, max_total_bytes=cfg.artifacts.max_total_bytes,
@@ -174,7 +191,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
     def test_run(repo: str, number: Number, expected_head: SHA, profile: str = PROFILE_NAME,
                  selectors: list[str] | None = None, mode: str = "head", expected_base: SHA | None = None,
                  test_overlay: str | None = None) -> dict[str, Any]:
-        return invoke_runs(repo, submit_test_run, number, expected_head, cfg=runs, policies=policies, profile=profile,
+        return invoke_runs(repo, submit_test_run, number, expected_head, cfg=runs, policies=current_policies(), profile=profile,
                            selectors=selectors, mode=mode, expected_base=expected_base, test_overlay=test_overlay)
 
     @tool(annotations={"readOnlyHint": True, "openWorldHint": True},
@@ -306,7 +323,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             return safe_payload(runner_not_configured())
         return invoke_ws(workspace_id, lambda owner: submit_workspace_run(
             workspaces.peek(workspace_id, owner)["repo"], workspace_id, expected_version, workspaces=workspaces, service=service,
-            policies=policies, owner=owner, cfg=runs, profile=profile, selectors=selectors), limit=262144)
+            policies=current_policies(), owner=owner, cfg=runs, profile=profile, selectors=selectors), limit=262144)
 
     @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
           description="Manage workspaces. action='list' (your open workspaces), 'status' (one workspace: version, tree, expiry, checkpoints, whether it differs from its source), 'extend' (hours, capped by the maximum lifetime) or 'close' (deletes the workspace and its unpublished changes). Expired workspaces are removed automatically; nothing here touches GitHub.")
@@ -383,7 +400,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             if not cfg.is_repo_allowed(record["repo"]):
                 raise SecurityError("This workspace's repository is no longer permitted by Odytor configuration.")
             submitted = submit_browser_run(record["repo"], workspace_id, expected_version, steps, workspaces=workspaces, sessions=sessions,
-                                           service=service, policies=policies, owner=owner, cfg=runs, session_id=session_id, mocks=mocks,
+                                           service=service, policies=current_policies(), owner=owner, cfg=runs, session_id=session_id, mocks=mocks,
                                            viewport=viewport, locale=locale, timezone=timezone, color_scheme=color_scheme, trace=trace,
                                            video=video)
             final = wait_for_run(service, submitted["run_id"], wait_seconds)
@@ -499,7 +516,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                                 workspaces=workspaces,
                                 service=service,
                                 sessions=sessions,
-                                policies=policies,
+                                policies=current_policies(),
                                 owner=owner,
                                 cfg=cfg,
                                 campaign_store=campaigns,
@@ -509,6 +526,15 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                                 commit_message=commit_message,
                                 plans=plans,
                             )
+                        except Exception as exc:
+                            if campaigns:
+                                rec = campaigns.load(cid, owner)
+                                if rec and rec.status == "running":
+                                    rec.status = "failed"
+                                    rec.failure = {"kind": "setup_error", "message": str(exc)}
+                                    rec.finished_at = time.time()
+                                    rec.steps.append({"name": "campaign_setup", "status": "failed", "error": str(exc)})
+                                    campaigns.save(rec)
                         finally:
                             bg_client.session.close()
 
@@ -534,7 +560,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                     workspaces=workspaces,
                     service=service,
                     sessions=sessions,
-                    policies=policies,
+                    policies=current_policies(),
                     owner=owner,
                     cfg=cfg,
                     campaign_store=campaigns,
@@ -672,7 +698,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             if repo is not None:
                 validate_repo(repo)
             facts = service.probe_runner() if (probe_runner and service is not None) else None
-            return safe_payload(describe_capabilities(cfg, policies=policies, service=service, remote=remote, principal=principal,
+            return safe_payload(describe_capabilities(cfg, policies=current_policies(), service=service, remote=remote, principal=principal,
                                                       repo=repo, probe=probe_runner, runner_facts=facts,
                                                       operations=tuple(registered), workspaces_enabled=workspaces is not None))
         except GitPlusError as err:
