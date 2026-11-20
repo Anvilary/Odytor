@@ -32,7 +32,7 @@ if [ -z "$CHECKOUT" ]; then
   done
 fi
 CHECKOUT="${CHECKOUT:-$REAL_HOME/Projects/Anvilary-Tools/odytor}"
-ALLOWED_REPOSITORIES="alteixeira20/*,Anvilary/*"
+ALLOWED_REPOSITORIES="alteixeira20/*,Anvilary/*,odysseus-dev/odysseus"
 
 fail() { echo "odytor-mcp: $*" >&2; exit 1; }
 

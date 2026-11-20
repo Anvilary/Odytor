@@ -193,9 +193,8 @@ def run_validation_campaign(
     if expected_head and expected_head.lower() != live_head.lower():
         raise ValidationError(f"PR head has moved: expected {expected_head}, found {live_head}.")
 
-    if mode == "prospective_merge":
-        if expected_base and expected_base.lower() != live_base.lower():
-            raise ValidationError(f"PR base has moved: expected {expected_base}, found {live_base}.")
+    if mode == "prospective_merge" and not expected_base:
+        raise ValidationError("expected_base (the live target-branch tip) is required for mode='prospective_merge'.")
 
     record = CampaignRecord(
         campaign_id=campaign_id,
@@ -207,7 +206,7 @@ def run_validation_campaign(
         created_at=now,
         updated_at=now,
         tested_head=live_head,
-        tested_base=live_base if mode == "prospective_merge" else None,
+        tested_base=expected_base if mode == "prospective_merge" else None,
     )
     if campaign_store:
         campaign_store.save(record)
@@ -227,7 +226,7 @@ def run_validation_campaign(
             "operations": ["read", "search", "edit", "diff", "execute", "artifacts", "manage"],
         }
         if mode == "prospective_merge":
-            ws_kwargs["expected_base"] = live_base
+            ws_kwargs["expected_base"] = expected_base
 
         ws = open_workspace(client, repo, service=workspaces, owner=owner, **ws_kwargs)
         ws_id = ws["workspace_id"]
