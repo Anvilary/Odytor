@@ -441,7 +441,7 @@ def _run_plain(cfg: RunnerConfig, job: dict, image: ImageInfo, source: Path, job
     limits = {"files": 200000, "bytes": cfg.work_mib * _MIB}
     if job["kind"] == "browser":
         spec = {"kind": "browser", "timeout": job["timeout"], "limits": limits, "serve": job["serve"], "scenario": job["scenario"]}
-        scripts, command, ceiling = ("harness.py", "browser_driver.py", "browser_spec.py", "artifacts.py"), [f"{INPUT_DIR}/browser_driver.py"], MAX_ARTIFACT_REPORT_BYTES
+        scripts, command, ceiling = ("harness.py", "browser_driver.py", "browser_spec.py"), [f"{INPUT_DIR}/browser_driver.py"], MAX_ARTIFACT_REPORT_BYTES
     elif job["kind"] == "node_test":
         spec = {"kind": "node_test", "argv": build_node_argv(job["selectors"]), "selectors": list(job["selectors"]), "timeout": job["timeout"],
                 "limits": limits}
