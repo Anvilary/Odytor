@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 MAX_STEPS = 60
 MAX_SESSION_STEPS = 150
@@ -70,6 +71,14 @@ def _path(value: Any, where: str) -> str:
 
 def validate_step(step: Any, index: int) -> dict[str, Any]:
     where = f"steps[{index}]"
+    if isinstance(step, dict):
+        step = dict(step)
+        if "op" not in step and "action" in step and isinstance(step["action"], str):
+            step["op"] = step.pop("action")
+        if step.get("op") == "goto" and "url" in step and "path" not in step:
+            raw_url = str(step.pop("url"))
+            parsed_p = urlsplit(raw_url).path if "://" in raw_url else raw_url
+            step["path"] = ("/" + parsed_p.lstrip("/")) if not parsed_p.startswith("/") else parsed_p
     if not isinstance(step, dict) or not isinstance(step.get("op"), str):
         _fail(where, "each step is an object with an 'op'.")
     op = step["op"]

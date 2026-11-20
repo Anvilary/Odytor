@@ -474,7 +474,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                     bg_client = GitHubClient(
                         token=getattr(client, "token", cfg.github_token),
                         base_url=getattr(client, "base_url", cfg.github_api_url),
-                        timeout=getattr(client, "timeout", cfg.github_timeout),
+                        timeout=cfg.github_timeout,
                         restricted_repo=getattr(client, "restricted_repo", None),
                         principal=getattr(client, "principal", None),
                     )

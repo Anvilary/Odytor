@@ -82,12 +82,19 @@ class GitHubClient:
         parsed = urlsplit(base_url)
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise SecurityError("GitHub API URL must be HTTPS without credentials, query or fragment.")
-        if timeout <= 0 or max_retries < 1 or max_response_bytes <= 0:
+        if max_retries < 1 or max_response_bytes <= 0:
             raise ValidationError("Timeout and attempt count must be positive.")
+        if isinstance(timeout, (tuple, list)):
+            if any(t <= 0 for t in timeout):
+                raise ValidationError("Timeout and attempt count must be positive.")
+            self.timeout = tuple(timeout)
+        else:
+            if timeout <= 0:
+                raise ValidationError("Timeout and attempt count must be positive.")
+            # (connect, read): GitHub can take a long time to build the diff or file list of a very large PR.
+            self.timeout = (min(10.0, timeout), timeout)
         self.token = token
         self.base_url = base_url.rstrip("/")
-        # (connect, read): GitHub can take a long time to build the diff or file list of a very large PR.
-        self.timeout = (min(10.0, timeout), timeout)
         self.max_response_bytes = max_response_bytes
         self.max_retries = max_retries
         self.session = session or requests.Session()
