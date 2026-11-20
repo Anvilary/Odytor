@@ -326,11 +326,13 @@ class WorkspaceService:
         prefixes = ["/".join(parts[:i]) for i in range(1, len(parts))]
         if not prefixes:
             return
+        prefix_set = set(prefixes)
         out = repository.git("ls-tree", "-z", tree, "--", *prefixes)
         for raw in filter(None, out.split(b"\0")):
             meta, _, name = raw.partition(b"\t")
-            if meta.split()[1] != b"tree":
-                raise ValidationError(f"{name.decode('utf-8', errors='replace')} is a file or link, so nothing can be created beneath it.",
+            name_str = name.decode("utf-8", errors="replace")
+            if name_str in prefix_set and meta.split()[1] != b"tree":
+                raise ValidationError(f"{name_str} is a file or link, so nothing can be created beneath it.",
                                       {"stage": "path", "path": path})
 
     # --- reads -----------------------------------------------------------------------------
