@@ -28,6 +28,42 @@ try:  # inside the container the modules sit beside this file; on the host they 
 except ImportError:  # pragma: no cover - exercised by the host-side unit tests
     from odytor import browser_spec, harness
 
+try:
+    from odytor.artifacts import normalize_artifact_name
+except ImportError:
+    try:
+        from artifacts import normalize_artifact_name
+    except ImportError:
+        _SAFE_NAME_CHARS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,255}$")
+        _EXT_BY_MIME: dict[str, str] = {
+            "image/png": ".png",
+            "image/jpeg": ".jpg",
+            "image/webp": ".webp",
+            "application/zip": ".zip",
+            "text/plain": ".txt",
+            "application/octet-stream": ".bin",
+            "application/json": ".json",
+        }
+
+        def normalize_artifact_name(name: str, *, mime: str | None = None, kind: str | None = None) -> str:
+            if not isinstance(name, str) or not _SAFE_NAME_CHARS.fullmatch(name):
+                return "artifact"
+            clean = name
+            while True:
+                m = re.search(r"(\.[a-zA-Z0-9]+)\1+$", clean, re.IGNORECASE)
+                if m:
+                    clean = clean[:m.start(0)] + m.group(1)
+                else:
+                    break
+            target_ext = _EXT_BY_MIME.get(mime or "")
+            if not target_ext and kind == "screenshot":
+                target_ext = ".png"
+            if target_ext:
+                base, ext = os.path.splitext(clean)
+                if ext.lower() != target_ext.lower():
+                    clean = base + target_ext
+            return clean
+
 MARK = harness.MARK
 WORK = harness.WORK
 MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
@@ -279,7 +315,6 @@ def execute_step(run, page, step, index, expect):
         data = (page.locator(step["selector"]).screenshot(**options) if "selector" in step
                 else page.screenshot(full_page=step.get("full_page", False), **options))
         mime = "image/jpeg" if kind == "jpeg" else "image/png"
-        from odytor.artifacts import normalize_artifact_name
         artifact_name = normalize_artifact_name(step["name"], mime=mime, kind="screenshot")
         stored = run.add_artifact(artifact_name, "screenshot", data)
         return {"artifact": artifact_name, "bytes": len(data), "stored": stored}
