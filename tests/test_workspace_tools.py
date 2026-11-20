@@ -5,7 +5,7 @@ import contextlib
 import pytest
 from fastmcp import Client
 
-from odytor.config import Settings, WorkspaceSettings
+from odytor.config import RunSettings, Settings, WorkspaceSettings
 from odytor.server import create_server
 from test_git_workspace import client_for, local_fetch, repository, run  # noqa: F401
 
@@ -137,3 +137,50 @@ def test_publish_apply_refuses_when_disabled_by_server_config(stack):
     result = data(server, 'publish_apply', plan_id='pp-' + '0' * 32, confirm='any', user_authorized=True)
     assert result['error_type'] == 'SecurityError'
     assert 'Publication apply is disabled on this server deployment' in result['error']
+
+
+def test_validation_campaign_async_wait_false_and_idempotency(tmp_path, monkeypatch, local_fetch):
+    repo, sha = local_fetch
+    (repo / 'tests').mkdir()
+    (repo / 'tests/test_a.py').write_text('def test_ok():\n    assert True\n')
+    run(repo, 'add', '.')
+    run(repo, 'commit', '-qm', 'tests')
+    head = run(repo, 'rev-parse', 'HEAD').decode().strip()
+    client = client_for(head)
+
+    @contextlib.contextmanager
+    def fake_client(cfg, remote=False, *, repo=None):
+        yield client
+
+    monkeypatch.setattr('odytor.server.github_client', fake_client)
+    (tmp_path / "req.txt").write_text("pytest==8.3.5\n")
+    (tmp_path / "policies.toml").write_text('[repos."owner/repo"]\nrequirements = "req.txt"\ntest_dirs = ["tests"]\n')
+    cfg = Settings(github_token='t', github_api_url='https://api.github.com', auth_token=None, default_max_diff_lines=500,
+                   default_max_diff_bytes=1048576, allowed_repositories=('owner/repo',),
+                   workspaces=WorkspaceSettings(data_dir=str(tmp_path / 'ws'), min_free_bytes=64 * 1024 * 1024),
+                   testing=RunSettings(runner_command=('mock_runner',), policies_path=str(tmp_path / "policies.toml"),
+                                       data_dir=str(tmp_path / 'runs')))
+    server = create_server(cfg)
+    monkeypatch.setattr(
+        'odytor.server.run_validation_campaign',
+        lambda *args, **kwargs: {'campaign_id': kwargs.get('campaign_id'), 'status': 'passed', 'steps': []},
+    )
+    # 1. Dispatch with wait=False
+    res1 = data(server, 'validation_campaign', repo='owner/repo', number=1, expected_head=head,
+                wait=False, idempotency_key='key-async-lost-resp')
+    assert res1.get('status') == 'running'
+    cid = res1['campaign_id']
+    assert cid.startswith('cmp-')
+    assert res1['idempotency_key'] == 'key-async-lost-resp'
+
+    # 2. Simulate re-request (lost response recovery)
+    res2 = data(server, 'validation_campaign', repo='owner/repo', number=1, expected_head=head,
+                wait=False, idempotency_key='key-async-lost-resp')
+    assert res2['campaign_id'] == cid
+
+    # 3. Poll campaign_status
+    st = data(server, 'campaign_status', campaign_id=cid)
+    assert st['campaign_id'] == cid
+    assert st['owner'] == 'local'
+
+

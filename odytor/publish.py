@@ -453,6 +453,13 @@ def _finish(plans: PlanStore, plan: dict[str, Any], new_sha: str, target: dict[s
                       "reconciled_from_uncertain_attempt": reconciled, "remote_verified": True, "force_push": False, "history_rewritten": False,
                       "validation_at_apply": {"tests_run_by_this_call": False, **plan["validation"]}}
     plans.save(plan)
+    ws_id = plan.get("workspace_id")
+    owner = plan.get("owner")
+    if ws_id and owner and hasattr(workspaces, "close"):
+        try:
+            workspaces.close(ws_id, owner)
+        except Exception:
+            pass
     return public_plan(plan)
 
 

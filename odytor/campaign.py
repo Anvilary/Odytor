@@ -13,9 +13,11 @@ human confirmations:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import time
@@ -29,6 +31,7 @@ from odytor.github import GitHubClient
 from odytor.git_workspace import pr_context
 from odytor.jobs import JobService, new_run_id
 from odytor.profile import PROFILE_NAME, PROFILES, REGISTRY, RepoPolicy
+from odytor.publish import PlanStore, plan_publication
 from odytor.run_tests import cancel_test_run, submit_workspace_run
 from odytor.workspace import open_workspace
 
@@ -53,6 +56,8 @@ class CampaignRecord:
     tested_tree: str | None = None
     workspace_id: str | None = None
     current_run_id: str | None = None
+    idempotency_key: str | None = None
+    push_plan: dict[str, Any] | None = None
     steps: list[dict[str, Any]] = field(default_factory=list)
     results: dict[str, Any] = field(default_factory=dict)
     browser: dict[str, Any] | None = None
@@ -77,6 +82,8 @@ class CampaignRecord:
             "tested_head": self.tested_head,
             "tested_base": self.tested_base,
             "tested_tree": self.tested_tree,
+            "idempotency_key": self.idempotency_key,
+            "push_plan": self.push_plan,
             "steps": self.steps,
             "results": self.results,
             "browser": self.browser,
@@ -97,11 +104,21 @@ class CampaignStore:
     def _path(self, campaign_id: str) -> Path:
         return self.root / f"{campaign_id}.json"
 
+    def _idempotency_path(self, owner: str, repo: str, number: int, idempotency_key: str) -> Path:
+        clean_repo = repo.strip().casefold().replace("/", "__")
+        clean_key = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:32]
+        return self.root / f"idx_{owner}_{clean_repo}_{number}_{clean_key}.id"
+
     def save(self, record: CampaignRecord) -> None:
         p = self._path(record.campaign_id)
         tmp = p.with_suffix(".tmp")
         tmp.write_text(json.dumps(record.to_dict(), indent=2), encoding="utf-8")
         tmp.replace(p)
+        if record.idempotency_key:
+            idx_p = self._idempotency_path(record.owner, record.repo, record.number, record.idempotency_key)
+            idx_tmp = idx_p.with_suffix(".tmp")
+            idx_tmp.write_text(record.campaign_id, encoding="utf-8")
+            idx_tmp.replace(idx_p)
 
     def load(self, campaign_id: str, owner: str) -> CampaignRecord | None:
         p = self._path(campaign_id)
@@ -111,9 +128,34 @@ class CampaignStore:
             data = json.loads(p.read_text(encoding="utf-8"))
             if data.get("owner") != owner:
                 return None
-            return CampaignRecord(**data)
+            valid_keys = {
+                "campaign_id", "owner", "repo", "number", "mode", "status",
+                "created_at", "updated_at", "finished_at", "requested_head",
+                "requested_base", "tested_head", "tested_base", "tested_tree",
+                "workspace_id", "current_run_id", "idempotency_key", "push_plan",
+                "steps", "results", "browser", "artifacts", "failure",
+                "workspace_cleaned", "github_mutations",
+            }
+            filtered = {k: v for k, v in data.items() if k in valid_keys}
+            return CampaignRecord(**filtered)
         except Exception:
             return None
+
+    def find_by_idempotency_key(self, owner: str, repo: str, number: int, idempotency_key: str) -> CampaignRecord | None:
+        idx_p = self._idempotency_path(owner, repo, number, idempotency_key)
+        if idx_p.is_file():
+            try:
+                cid = idx_p.read_text(encoding="utf-8").strip()
+                rec = self.load(cid, owner)
+                if rec and rec.repo.casefold() == repo.casefold() and rec.number == number and rec.idempotency_key == idempotency_key:
+                    return rec
+            except Exception:
+                pass
+        for f in self.root.glob("cmp-*.json"):
+            rec = self.load(f.stem, owner)
+            if rec and rec.repo.casefold() == repo.casefold() and rec.number == number and rec.idempotency_key == idempotency_key:
+                return rec
+        return None
 
     def cancel(self, campaign_id: str, owner: str, *, service: JobService, workspaces: Any) -> dict[str, Any]:
         record = self.load(campaign_id, owner)
@@ -169,11 +211,28 @@ def run_validation_campaign(
     owner: str,
     cfg: Any,
     campaign_store: CampaignStore | None = None,
+    campaign_id: str | None = None,
+    idempotency_key: str | None = None,
+    propose_push: bool = False,
+    commit_message: str | None = None,
+    plans: PlanStore | None = None,
 ) -> dict[str, Any]:
     """Execute the bounded disposable validation campaign."""
     now = time.time()
-    campaign_id = f"cmp-{secrets.token_hex(16)}"
+    cid = campaign_id or f"cmp-{secrets.token_hex(16)}"
     requested_profiles = ["python-pytest"] if profiles is None else list(profiles)
+
+    if idempotency_key is not None:
+        if not isinstance(idempotency_key, str) or not (1 <= len(idempotency_key) <= 128) or not re.match(r"^[a-zA-Z0-9_.-]+$", idempotency_key):
+            raise ValidationError("idempotency_key must be 1-128 alphanumeric, underscore, dot, or hyphen characters.")
+
+    if propose_push:
+        if mode != "pr_head":
+            raise ValidationError("propose_push requires mode='pr_head'.")
+        if not commit_message or not isinstance(commit_message, str) or not commit_message.strip():
+            raise ValidationError("commit_message is required when propose_push=True.")
+        if plans is None:
+            raise ValidationError("Plan storage is not configured on this server.")
 
     # Validate profiles
     for prof in requested_profiles:
@@ -215,22 +274,49 @@ def run_validation_campaign(
                 if isinstance(exc, ValidationError):
                     raise
 
-    record = CampaignRecord(
-        campaign_id=campaign_id,
-        owner=owner,
-        repo=repo,
-        number=number,
-        mode=mode,
-        status="running",
-        created_at=now,
-        updated_at=now,
-        requested_head=live_head,
-        requested_base=expected_base if mode == "prospective_merge" else None,
-        tested_head=None,
-        tested_base=None,
-    )
-    if campaign_store:
-        campaign_store.save(record)
+    if campaign_store and campaign_id:
+        existing_rec = campaign_store.load(campaign_id, owner)
+        if existing_rec:
+            record = existing_rec
+            record.requested_head = live_head
+            record.requested_base = expected_base if mode == "prospective_merge" else None
+            record.updated_at = now
+            campaign_store.save(record)
+        else:
+            record = CampaignRecord(
+                campaign_id=cid,
+                owner=owner,
+                repo=repo,
+                number=number,
+                mode=mode,
+                status="running",
+                created_at=now,
+                updated_at=now,
+                idempotency_key=idempotency_key,
+                requested_head=live_head,
+                requested_base=expected_base if mode == "prospective_merge" else None,
+                tested_head=None,
+                tested_base=None,
+            )
+            campaign_store.save(record)
+    else:
+        record = CampaignRecord(
+            campaign_id=cid,
+            owner=owner,
+            repo=repo,
+            number=number,
+            mode=mode,
+            status="running",
+            created_at=now,
+            updated_at=now,
+            idempotency_key=idempotency_key,
+            requested_head=live_head,
+            requested_base=expected_base if mode == "prospective_merge" else None,
+            tested_head=None,
+            tested_base=None,
+        )
+        if campaign_store:
+            campaign_store.save(record)
 
     ws_id = None
     b_session_id = None
@@ -238,14 +324,17 @@ def run_validation_campaign(
     deadline = now + timeout_seconds
 
     try:
-        # Step 1: Create disposable workspace (NO 'publish' operation in scope)
+        # Step 1: Create disposable workspace
         step_t0 = time.monotonic()
         ws_source = "pr_head" if mode == "pr_head" else "prospective_merge"
+        ws_operations = ["read", "search", "edit", "diff", "execute", "artifacts", "manage"]
+        if propose_push:
+            ws_operations.append("publish")
         ws_kwargs: dict[str, Any] = {
             "source": ws_source,
             "number": number,
             "expected_head": live_head,
-            "operations": ["read", "search", "edit", "diff", "execute", "artifacts", "manage"],
+            "operations": ws_operations,
         }
         if mode == "prospective_merge":
             ws_kwargs["expected_base"] = expected_base
@@ -413,6 +502,33 @@ def run_validation_campaign(
             if campaign_store:
                 campaign_store.save(record)
 
+        # Step 5: If propose_push requested and all tests passed, plan publication
+        if propose_push and all_passed:
+            step_t0 = time.monotonic()
+            plan_res = plan_publication(
+                client,
+                repo,
+                ws_id,
+                expected_version,
+                commit_message,
+                workspaces=workspaces,
+                plans=plans,
+                jobs=service,
+                owner=owner,
+                max_files=getattr(cfg, "quick_fix_max_files", 10),
+                max_changed_lines=getattr(cfg, "quick_fix_max_changed_lines", 1000),
+                max_patch_bytes=getattr(cfg, "quick_fix_max_patch_bytes", 262144),
+            )
+            record.push_plan = plan_res
+            record.steps.append({
+                "name": "publish_plan",
+                "status": "passed",
+                "duration_seconds": round(time.monotonic() - step_t0, 3),
+                "plan_id": plan_res.get("plan_id"),
+            })
+            if campaign_store:
+                campaign_store.save(record)
+
     except TimeoutError as exc:
         record.status = "timeout"
         record.failure = {"kind": "timeout", "message": str(exc)}
@@ -426,20 +542,24 @@ def run_validation_campaign(
         record.failure = {"kind": "unexpected", "message": str(exc)}
         all_passed = False
     finally:
-        # Step 5: Clean up disposable workspace (guaranteed under all outcomes)
+        # Step 6: Clean up disposable workspace (guaranteed under all outcomes except when preserved for publish)
         if b_session_id and sessions:
             try:
                 sessions.close(b_session_id, owner)
             except Exception:
                 pass
         if ws_id:
-            try:
-                workspaces.close(ws_id, owner)
-                record.workspace_cleaned = True
-                record.steps.append({"name": "workspace_cleanup", "status": "passed", "closed": True})
-            except Exception as exc:
-                logger.error("Failed to dispose workspace %s: %s", ws_id, exc)
-                record.steps.append({"name": "workspace_cleanup", "status": "failed", "error": str(exc)})
+            if record.push_plan is not None and all_passed:
+                record.workspace_cleaned = False
+                record.steps.append({"name": "workspace_cleanup", "status": "preserved_for_publish", "workspace_id": ws_id})
+            else:
+                try:
+                    workspaces.close(ws_id, owner)
+                    record.workspace_cleaned = True
+                    record.steps.append({"name": "workspace_cleanup", "status": "passed", "closed": True})
+                except Exception as exc:
+                    logger.error("Failed to dispose workspace %s: %s", ws_id, exc)
+                    record.steps.append({"name": "workspace_cleanup", "status": "failed", "error": str(exc)})
 
         record.finished_at = time.time()
         record.updated_at = time.time()

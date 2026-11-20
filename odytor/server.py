@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+import secrets
+import threading
+import time
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from fastmcp import FastMCP
@@ -22,13 +25,13 @@ from odytor.pr_evidence import get_pr_evidence
 from odytor.pr_rebase import rebase_pr
 from odytor.quick_fix import apply_quick_fix
 from odytor.errors import ValidationError
-from odytor.github import validate_repo
+from odytor.github import GitHubClient, validate_repo
 from odytor.jobs import JobService
 from odytor.profile import PROFILE_NAME, load_policies
 from odytor.run_tests import cancel_test_run, fetch_test_result, submit_test_run, submit_workspace_run
 from odytor.artifacts import ArtifactLimits, ArtifactStore
 from odytor.browser import SessionStore, submit_browser_run, wait_for_run
-from odytor.campaign import CampaignStore, run_validation_campaign
+from odytor.campaign import CampaignRecord, CampaignStore, run_validation_campaign
 from odytor.publish import PlanStore, apply_pr_body, apply_publication, plan_pr_body, plan_publication
 from odytor.workspace import SOURCES, WorkspaceService, open_workspace
 
@@ -345,6 +348,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
 
     sessions = SessionStore(Path(cfg.workspaces.data_dir) / "sessions") if cfg.workspaces else None
     campaigns = CampaignStore(Path(cfg.workspaces.data_dir) / "campaigns") if cfg.workspaces else None
+    plans = PlanStore(Path(cfg.workspaces.data_dir) / "plans") if cfg.workspaces else None
 
     def as_result(payload: dict[str, Any], images: list[tuple[str, bytes]] | None = None, *, limit: int | None = None) -> ToolResult:
         """Structured evidence plus native MCP image content; images never travel as base64 inside JSON.
@@ -398,7 +402,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             return as_result(err.to_dict())
 
     @tool(annotations={"readOnlyHint": True, "openWorldHint": True},
-          description="Execute a bounded disposable validation campaign for a pull request without requiring human confirmation for intermediate steps. Pins PR head/base revisions, provisions an isolated disposable workspace without publication authority, optionally applies an overlay patch or edits, executes specified test profiles (e.g. python-pytest, node-test) and headless browser scenarios, collects all evidence/artifacts/network metrics, and deterministically cleans up the disposable workspace. Leaves zero GitHub mutations. Safe, isolated, and completely read-only to external systems.")
+          description="Execute a bounded disposable validation campaign for a pull request without requiring human confirmation for intermediate steps. Pins PR head/base revisions, provisions an isolated disposable workspace without publication authority, optionally applies an overlay patch or edits, executes specified test profiles (e.g. python-pytest, node-test) and headless browser scenarios, collects all evidence/artifacts/network metrics, and deterministically cleans up the disposable workspace (or prepares a push preview when propose_push=true and tests pass). Leaves zero GitHub mutations. Safe, isolated, and completely read-only to external systems.")
     def validation_campaign(
         repo: str,
         number: Number,
@@ -413,14 +417,105 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         app_profile: str | None = None,
         overlay_patch: str | None = None,
         timeout_seconds: Annotated[int, Field(ge=10, le=900)] = 300,
+        idempotency_key: Annotated[str | None, Field(pattern=r"^[a-zA-Z0-9_.-]{1,128}$")] = None,
+        wait: bool = True,
+        propose_push: bool = False,
+        commit_message: str | None = None,
     ) -> dict[str, Any]:
         if service is None or workspaces is None or campaigns is None:
             return safe_payload(ValidationError("Workspaces or runner execution are disabled on this server.").to_dict())
         if not cfg.is_repo_allowed(repo):
             raise SecurityError(f"Repository '{repo}' is not permitted by Odytor configuration.")
+        if propose_push:
+            if mode != "pr_head":
+                raise ValidationError("propose_push requires mode='pr_head'.")
+            if not commit_message or not commit_message.strip():
+                raise ValidationError("commit_message is required when propose_push=True.")
+            if plans is None:
+                raise ValidationError("Plan storage is disabled on this server.")
         try:
             with github_client(cfg, remote, repo=repo) as client:
                 owner = getattr(client, "principal", None) or ("service" if remote else "local")
+
+                if idempotency_key:
+                    existing = campaigns.find_by_idempotency_key(owner, repo, number, idempotency_key)
+                    if existing is not None:
+                        if not wait and existing.status == "running":
+                            return safe_payload(existing.to_dict())
+                        if existing.status != "running":
+                            return safe_payload(existing.to_dict(), limit=262144)
+                        deadline = time.time() + timeout_seconds
+                        rec = existing
+                        while time.time() < deadline:
+                            rec = campaigns.load(existing.campaign_id, owner) or existing
+                            if rec.status != "running":
+                                return safe_payload(rec.to_dict(), limit=262144)
+                            time.sleep(0.5)
+                        return safe_payload(rec.to_dict(), limit=262144)
+
+                if not wait:
+                    now = time.time()
+                    cid = f"cmp-{secrets.token_hex(16)}"
+                    init_rec = CampaignRecord(
+                        campaign_id=cid,
+                        owner=owner,
+                        repo=repo,
+                        number=number,
+                        mode=mode,
+                        status="running",
+                        created_at=now,
+                        updated_at=now,
+                        idempotency_key=idempotency_key,
+                        requested_head=expected_head,
+                        requested_base=expected_base,
+                    )
+                    campaigns.save(init_rec)
+
+                    bg_client = GitHubClient(
+                        token=getattr(client, "token", cfg.github_token),
+                        base_url=getattr(client, "base_url", cfg.github_api_url),
+                        timeout=getattr(client, "timeout", cfg.github_timeout),
+                        restricted_repo=getattr(client, "restricted_repo", None),
+                        principal=getattr(client, "principal", None),
+                    )
+
+                    def _run_bg() -> None:
+                        try:
+                            run_validation_campaign(
+                                bg_client,
+                                repo,
+                                number,
+                                expected_head=expected_head,
+                                expected_base=expected_base,
+                                mode=mode,
+                                profiles=profiles,
+                                profile_selectors=profile_selectors,
+                                browser_scenario=browser_scenario,
+                                browser_mocks=browser_mocks,
+                                browser_video=browser_video,
+                                app_profile=app_profile,
+                                overlay_patch=overlay_patch,
+                                timeout_seconds=timeout_seconds,
+                                workspaces=workspaces,
+                                service=service,
+                                sessions=sessions,
+                                policies=policies,
+                                owner=owner,
+                                cfg=cfg,
+                                campaign_store=campaigns,
+                                campaign_id=cid,
+                                idempotency_key=idempotency_key,
+                                propose_push=propose_push,
+                                commit_message=commit_message,
+                                plans=plans,
+                            )
+                        finally:
+                            bg_client.session.close()
+
+                    t = threading.Thread(target=_run_bg, daemon=True, name=f"campaign-{cid}")
+                    t.start()
+                    return safe_payload(init_rec.to_dict())
+
                 return safe_payload(run_validation_campaign(
                     client,
                     repo,
@@ -443,6 +538,10 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                     owner=owner,
                     cfg=cfg,
                     campaign_store=campaigns,
+                    idempotency_key=idempotency_key,
+                    propose_push=propose_push,
+                    commit_message=commit_message,
+                    plans=plans,
                 ), limit=262144)
         except GitPlusError as err:
             return safe_payload(err.to_dict())
@@ -494,8 +593,6 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             return as_result(err.to_dict())
         image = delivered.pop("image", None)
         return as_result(delivered, [image] if image else None, limit=70000)
-
-    plans = PlanStore(Path(cfg.workspaces.data_dir) / "plans") if cfg.workspaces else None
 
     @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
           description="Prepare, without performing, the publication of a workspace's changes as ONE additive commit on its PR's head branch. Requires a workspace opened with source='pr_head' and the 'publish' operation in its scope. Binds the exact workspace version and tree, the complete patch (patch_sha256, inline when small), the expected remote head, your commit message, the validation runs recorded for that very tree and the known limitations. Changed paths must pass the same write policy as quick_fix (no CI or workflow files, dependency manifests, scripts, key material, sensitive names). Nothing is written to GitHub. Show the plan to the user; apply it only with publish_apply after their explicit approval.")

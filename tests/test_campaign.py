@@ -5,10 +5,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from odytor.campaign import CampaignStore, run_validation_campaign
+from odytor.campaign import CampaignRecord, CampaignStore, run_validation_campaign
 from odytor.config import RunSettings, Settings, WorkspaceSettings
 from odytor.errors import SecurityError, ValidationError
 from odytor.profile import RepoPolicy
+from odytor.publish import PlanStore, apply_publication
 from odytor.workspace import WorkspaceService
 from test_git_workspace import client_for, local_fetch, repository, run  # noqa: F401
 
@@ -30,6 +31,7 @@ def test_env(tmp_path, local_fetch):
         WorkspaceSettings(data_dir=str(tmp_path / "ws"), min_free_bytes=64 * 1024 * 1024)
     )
     store = CampaignStore(tmp_path / "campaigns")
+    plans = PlanStore(tmp_path / "plans")
 
     policies = {
         "owner/repo": RepoPolicy(
@@ -68,6 +70,7 @@ def test_env(tmp_path, local_fetch):
         "head": head,
         "ws_service": ws_service,
         "store": store,
+        "plans": plans,
         "policies": policies,
         "job_service": mock_job_service,
         "cfg": cfg,
@@ -248,3 +251,224 @@ def test_setup_error_does_not_label_requested_revisions_as_tested(test_env):
     for camp_file in store.root.glob("cmp-*.json"):
         data = json.loads(camp_file.read_text())
         assert data.get("tested_head") is None
+
+
+def test_campaign_idempotency_store_and_lookup(test_env):
+    store = test_env["store"]
+    rec = CampaignRecord(
+        campaign_id="cmp-1234567890abcdef1234567890abcdef",
+        owner=OWNER,
+        repo="owner/repo",
+        number=1,
+        mode="pr_head",
+        status="passed",
+        created_at=100.0,
+        updated_at=105.0,
+        idempotency_key="key-smoke-1",
+    )
+    store.save(rec)
+
+    # Lookup succeeds by exact key, owner, repo, and number
+    found = store.find_by_idempotency_key(OWNER, "owner/repo", 1, "key-smoke-1")
+    assert found is not None
+    assert found.campaign_id == rec.campaign_id
+
+    # Lookup fails for mismatched fields
+    assert store.find_by_idempotency_key("other-owner", "owner/repo", 1, "key-smoke-1") is None
+    assert store.find_by_idempotency_key(OWNER, "owner/other", 1, "key-smoke-1") is None
+    assert store.find_by_idempotency_key(OWNER, "owner/repo", 2, "key-smoke-1") is None
+    assert store.find_by_idempotency_key(OWNER, "owner/repo", 1, "key-other") is None
+
+
+def test_campaign_propose_push_flow(test_env, monkeypatch):
+    client = test_env["client"]
+    head = test_env["head"]
+    ws_service = test_env["ws_service"]
+    store = test_env["store"]
+    plans = test_env["plans"]
+    policies = test_env["policies"]
+    service = test_env["job_service"]
+    cfg = test_env["cfg"]
+
+    monkeypatch.setattr(
+        "odytor.campaign.wait_for_run",
+        lambda svc, run_id, timeout: {
+            "status": "passed",
+            "failure": None,
+            "counts": {"passed": 1, "failed": 0},
+            "artifacts": [],
+        },
+    )
+
+    overlay = (
+        "diff --git a/tests/test_demo.py b/tests/test_demo.py\n"
+        "--- a/tests/test_demo.py\n"
+        "+++ b/tests/test_demo.py\n"
+        "@@ -1,2 +1,3 @@\n"
+        " def test_ok():\n"
+        "     assert True\n"
+        "+    assert 1 == 1\n"
+    )
+
+    result = run_validation_campaign(
+        client,
+        "owner/repo",
+        1,
+        expected_head=head,
+        mode="pr_head",
+        profiles=["python-pytest"],
+        overlay_patch=overlay,
+        propose_push=True,
+        commit_message="test: add assertion to demo test",
+        plans=plans,
+        workspaces=ws_service,
+        service=service,
+        sessions=None,
+        policies=policies,
+        owner=OWNER,
+        cfg=cfg,
+        campaign_store=store,
+    )
+
+    assert result["status"] == "passed"
+    assert result["workspace_cleaned"] is False
+    assert result["push_plan"] is not None
+
+    plan = result["push_plan"]
+    assert plan["state"] == "pending"
+    assert "publish pp-" in plan["confirmation"]
+    assert plan["patch_sha256"]
+    assert plan["tree"] == result["tested_tree"]
+
+    # The workspace remains open for publish_apply
+    ws_id = plan["workspace_id"]
+    ws_rec = ws_service.get(ws_id, OWNER, operation="publish")
+    assert ws_rec["tree"] == plan["tree"]
+
+    # Publish apply can commit it using the plan
+    client.graphql.return_value = {
+        "createCommitOnBranch": {
+            "commit": {
+                "oid": "1" * 40,
+                "url": "https://github.com/owner/repo/commit/1111111111111111111111111111111111111111",
+                "tree": {"oid": plan["tree"]},
+                "parents": {"totalCount": 1, "nodes": [{"oid": head}]},
+            }
+        }
+    }
+    applied = apply_publication(
+        client,
+        "owner/repo",
+        plan["plan_id"],
+        plan["confirmation"],
+        user_authorized=True,
+        workspaces=ws_service,
+        plans=plans,
+        jobs=service,
+        owner=OWNER,
+    )
+    assert applied["state"] == "applied"
+    assert applied["result"]["new_sha"] == "1" * 40
+
+    # After apply, workspace was cleaned up
+    with pytest.raises(ValidationError):
+        ws_service.get(ws_id, OWNER, operation="read")
+
+
+def test_campaign_propose_push_validation_errors(test_env):
+    client = test_env["client"]
+    head = test_env["head"]
+    ws_service = test_env["ws_service"]
+    store = test_env["store"]
+    plans = test_env["plans"]
+    policies = test_env["policies"]
+    service = test_env["job_service"]
+    cfg = test_env["cfg"]
+
+    # propose_push requires mode='pr_head'
+    with pytest.raises(ValidationError, match="requires mode='pr_head'"):
+        run_validation_campaign(
+            client,
+            "owner/repo",
+            1,
+            expected_head=head,
+            expected_base=head,
+            mode="prospective_merge",
+            profiles=["python-pytest"],
+            propose_push=True,
+            commit_message="test",
+            plans=plans,
+            workspaces=ws_service,
+            service=service,
+            sessions=None,
+            policies=policies,
+            owner=OWNER,
+            cfg=cfg,
+            campaign_store=store,
+        )
+
+    # propose_push requires commit_message
+    with pytest.raises(ValidationError, match="commit_message is required"):
+        run_validation_campaign(
+            client,
+            "owner/repo",
+            1,
+            expected_head=head,
+            mode="pr_head",
+            profiles=["python-pytest"],
+            propose_push=True,
+            commit_message="",
+            plans=plans,
+            workspaces=ws_service,
+            service=service,
+            sessions=None,
+            policies=policies,
+            owner=OWNER,
+            cfg=cfg,
+            campaign_store=store,
+        )
+
+
+def test_campaign_propose_push_cleans_up_on_failure(test_env, monkeypatch):
+    client = test_env["client"]
+    head = test_env["head"]
+    ws_service = test_env["ws_service"]
+    store = test_env["store"]
+    plans = test_env["plans"]
+    policies = test_env["policies"]
+    service = test_env["job_service"]
+    cfg = test_env["cfg"]
+
+    # Mock failing test run
+    monkeypatch.setattr(
+        "odytor.campaign.wait_for_run",
+        lambda svc, run_id, timeout: {
+            "status": "failed",
+            "failure": {"message": "assertion failed"},
+            "counts": {"passed": 0, "failed": 1},
+            "artifacts": [],
+        },
+    )
+
+    result = run_validation_campaign(
+        client,
+        "owner/repo",
+        1,
+        expected_head=head,
+        mode="pr_head",
+        profiles=["python-pytest"],
+        propose_push=True,
+        commit_message="test: failing test",
+        plans=plans,
+        workspaces=ws_service,
+        service=service,
+        sessions=None,
+        policies=policies,
+        owner=OWNER,
+        cfg=cfg,
+        campaign_store=store,
+    )
+
+    assert result["status"] == "failed"
+    assert result["push_plan"] is None
+    assert result["workspace_cleaned"] is True
