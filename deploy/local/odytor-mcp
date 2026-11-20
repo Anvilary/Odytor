@@ -65,4 +65,13 @@ unset TOKEN
 # only reads the old one, and an empty allowlist means unrestricted access. Equal values are accepted by Odytor.
 export ODYTOR_ALLOWED_REPOSITORIES="$ALLOWED_REPOSITORIES" GIT_PLUS_ALLOWED_REPOSITORIES="$ALLOWED_REPOSITORIES"
 
+if [ -f "$REAL_HOME/.local/share/odytor/runner-ssh/runner_key" ] && [ -f "$REAL_HOME/.local/share/odytor/policies/policy.toml" ]; then
+  export ODYTOR_TEST_RUNNER_COMMAND='["ssh","-F","/home/alteixeira20/.ssh/config","-T","-i","'"$REAL_HOME"'/.local/share/odytor/runner-ssh/runner_key","-o","IdentitiesOnly=yes","-o","BatchMode=yes","-o","StrictHostKeyChecking=no","-o","ConnectTimeout=10","-o","ServerAliveInterval=15","-o","ServerAliveCountMax=3","-J","hosting-bay","-p","2222","gp-runner@172.30.77.2"]'
+  export ODYTOR_TEST_POLICIES="$REAL_HOME/.local/share/odytor/policies/policy.toml"
+fi
+export ODYTOR_TEST_DATA_DIR="$REAL_HOME/.local/share/odytor/test-data"
+export ODYTOR_WORKSPACE_DIR="$REAL_HOME/.local/share/odytor/workspaces"
+export ODYTOR_ARTIFACT_DIR="$REAL_HOME/.local/share/odytor/artifacts"
+export ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY="true"
+
 exec "$EXE" --transport stdio "$@"
