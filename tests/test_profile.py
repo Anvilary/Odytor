@@ -161,3 +161,77 @@ def test_load_policies_publish_exemptions():
     assert "frontend/src/features/notes/application/noteSession.js" in exemptions
     assert "static/js/features/notes/application/noteSession.js" in exemptions
 
+
+def test_playwright_spec_selector_validation():
+    from odytor.profile import (
+        ProfileError, validate_playwright_spec_selector, validate_playwright_spec_selectors,
+    )
+    allowed = ("tests/e2e/notes-qa/notes-qa-regressions.spec.mjs", "tests/e2e/notes-qa/notes-edge-cases.spec.mjs")
+    allowed_dirs = ("tests/e2e/notes-qa",)
+
+    # Valid full selector with literal title
+    canon, parsed = validate_playwright_spec_selector(
+        "tests/e2e/notes-qa/notes-qa-regressions.spec.mjs::typing during a checklist request survives the response and the next save",
+        allowed_specs=allowed, allowed_dirs=allowed_dirs,
+    )
+    assert canon == "tests/e2e/notes-qa/notes-qa-regressions.spec.mjs::typing during a checklist request survives the response and the next save"
+    assert parsed["spec_path"] == "tests/e2e/notes-qa/notes-qa-regressions.spec.mjs"
+    assert parsed["test_title"] == "typing during a checklist request survives the response and the next save"
+
+    # Valid selector without title
+    canon2, parsed2 = validate_playwright_spec_selector(
+        "tests/e2e/notes-qa/notes-qa-regressions.spec.mjs",
+        allowed_specs=allowed, allowed_dirs=allowed_dirs,
+    )
+    assert canon2 == "tests/e2e/notes-qa/notes-qa-regressions.spec.mjs"
+    assert parsed2["test_title"] is None
+
+    # Rejection of traversal
+    with pytest.raises(ProfileError, match="traversal"):
+        validate_playwright_spec_selector("../evil.spec.mjs", allowed_specs=allowed, allowed_dirs=allowed_dirs)
+
+    # Rejection of flags / options
+    with pytest.raises(ProfileError, match="dash"):
+        validate_playwright_spec_selector("-g", allowed_specs=allowed, allowed_dirs=allowed_dirs)
+    with pytest.raises(ProfileError, match="dash"):
+        validate_playwright_spec_selector("tests/e2e/notes-qa/notes-qa-regressions.spec.mjs::-g", allowed_specs=allowed, allowed_dirs=allowed_dirs)
+
+    # Rejection of non-spec extensions
+    with pytest.raises(ProfileError, match=r"\.spec\.mjs"):
+        validate_playwright_spec_selector("tests/test_app.py", allowed_specs=allowed, allowed_dirs=allowed_dirs)
+
+    # Rejection of shell metacharacters in title
+    with pytest.raises(ProfileError, match="invalid characters"):
+        validate_playwright_spec_selector("tests/e2e/notes-qa/notes-qa-regressions.spec.mjs::test; rm -rf /", allowed_specs=allowed, allowed_dirs=allowed_dirs)
+    with pytest.raises(ProfileError, match="invalid characters"):
+        validate_playwright_spec_selector("tests/e2e/notes-qa/notes-qa-regressions.spec.mjs::test | cat", allowed_specs=allowed, allowed_dirs=allowed_dirs)
+
+    # Rejection of unapproved spec path
+    with pytest.raises(ProfileError, match="maintainer-approved"):
+        validate_playwright_spec_selector("tests/unapproved/evil.spec.mjs", allowed_specs=allowed, allowed_dirs=allowed_dirs)
+
+    # validate_playwright_spec_selectors list handling
+    canons, parsed_list = validate_playwright_spec_selectors(
+        ["tests/e2e/notes-qa/notes-qa-regressions.spec.mjs::typing during a checklist request survives the response and the next save"],
+        allowed_specs=allowed, allowed_dirs=allowed_dirs,
+    )
+    assert len(canons) == 1
+    assert len(parsed_list) == 1
+
+    # Empty selectors falls back to allowed_specs
+    canons_def, _ = validate_playwright_spec_selectors(None, allowed_specs=allowed)
+    assert canons_def == allowed
+
+
+def test_load_policies_playwright_spec():
+    from pathlib import Path
+    from odytor.profile import PLAYWRIGHT_SPEC_PROFILE, load_policies
+    policies = load_policies(Path(__file__).resolve().parents[1] / 'deploy' / 'policies' / 'policy.toml')
+    ody_policy = policies['odysseus-dev/odysseus']
+    assert PLAYWRIGHT_SPEC_PROFILE in ody_policy.profiles
+    assert PLAYWRIGHT_SPEC_PROFILE in ody_policy.extra
+    cfg = ody_policy.extra[PLAYWRIGHT_SPEC_PROFILE]
+    assert "tests/e2e/notes-qa/notes-qa-regressions.spec.mjs" in cfg["specs"]
+    assert cfg["launcher"] == "tests/e2e/notes-qa/run_notes_qa.py"
+
+

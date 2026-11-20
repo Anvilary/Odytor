@@ -5,6 +5,7 @@ credentials. Everything this module reports is evidence from inside the sandbox,
 the code under test can influence, and is validated by the host before use.
 """
 import collections
+import glob
 import json
 import os
 import platform
@@ -450,6 +451,203 @@ def _run_cmd(spec):
     return report
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text) if text else ""
+
+
+def _parse_playwright_json(data: dict) -> dict:
+    stats = data.get("stats") or {}
+    counts = {
+        "collected": 0,
+        "executed": 0,
+        "passed": int(stats.get("expected", 0) or 0),
+        "failed": int(stats.get("unexpected", 0) or 0),
+        "skipped": int(stats.get("skipped", 0) or 0),
+        "flaky": int(stats.get("flaky", 0) or 0),
+        "errors": len(data.get("errors") or []),
+    }
+    specs_list: list[str] = []
+    tests_list: list[dict] = []
+
+    def visit_suite(suite: dict) -> None:
+        file_path = suite.get("file") or ""
+        for spec in suite.get("specs") or []:
+            counts["collected"] += 1
+            spec_title = spec.get("title") or ""
+            spec_file = spec.get("file") or file_path
+            if spec_file and spec_file not in specs_list:
+                specs_list.append(spec_file)
+            for t in spec.get("tests") or []:
+                for r in t.get("results") or []:
+                    counts["executed"] += 1
+                    err_obj = r.get("error") or (r.get("errors")[0] if r.get("errors") else None)
+                    err_msg = ""
+                    if isinstance(err_obj, dict):
+                        err_msg = _strip_ansi(err_obj.get("message") or "")
+                    test_entry = {
+                        "id": f"{spec_file}::{spec_title}" if spec_file else spec_title,
+                        "title": spec_title,
+                        "file": spec_file,
+                        "outcome": "passed" if r.get("status") == "passed" else ("skipped" if r.get("status") == "skipped" else "failed"),
+                        "status": r.get("status"),
+                        "duration_seconds": round(_num(r.get("duration"), 1e6) / 1000.0, 3),
+                        "error": err_msg[:500] if err_msg else None,
+                    }
+                    tests_list.append(test_entry)
+        for child in suite.get("suites") or []:
+            visit_suite(child)
+
+    for top_suite in data.get("suites") or []:
+        visit_suite(top_suite)
+
+    raw_errors = data.get("errors") or []
+    return {
+        "counts": counts,
+        "specs": specs_list,
+        "tests": tests_list[:MAX_TESTS],
+        "tests_total": len(tests_list),
+        "errors": [_strip_ansi(e.get("message", ""))[:400] for e in raw_errors if isinstance(e, dict)],
+    }
+
+
+def _run_playwright_spec(spec):
+    report = {"harness": 1, "kind": "playwright_spec", "profile": spec.get("profile", "playwright-spec"), "extract": {"ok": False}}
+    os.makedirs("/tmp/home", exist_ok=True)
+    try:
+        files, size, skipped = _extract(spec["limits"]["files"], spec["limits"]["bytes"])
+        report["extract"] = {"ok": True, "members": files, "bytes": size, "skipped_unsafe_links": skipped[:20],
+                             "skipped_unsafe_link_count": len(skipped)}
+    except Exception as exc:
+        report["error"] = {"stage": "extract", "message": f"{type(exc).__name__}: {exc}"[:400]}
+        return report
+
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "HOME": "/tmp/home",
+        "TMPDIR": "/tmp",
+        "LANG": "C.UTF-8",
+        "CI": "1",
+        "NO_COLOR": "1",
+        "PLAYWRIGHT_BROWSERS_PATH": os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/ms-playwright"),
+        "NODE_PATH": "/usr/local/lib/node_modules",
+        "NODE_ENV": "test",
+    }
+    if os.path.exists(ENV_SITE):
+        env["PYTHONPATH"] = ENV_SITE
+
+    # Write .pth into user site packages so even if run_notes_qa.py pops PYTHONPATH,
+    # child Python processes (uvicorn, openai_stub) can import from ENV_SITE and WORK
+    py_ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    user_site = f"/tmp/home/.local/lib/{py_ver}/site-packages"
+    os.makedirs(user_site, exist_ok=True)
+    with open(os.path.join(user_site, "odytor_paths.pth"), "w") as pth_file:
+        pth_file.write(f"{ENV_SITE}\n{WORK}\n")
+
+    # Link global node_modules into WORK if node_modules is not in WORK
+    if not os.path.exists(os.path.join(WORK, "node_modules")) and os.path.isdir("/usr/local/lib/node_modules"):
+        try:
+            os.symlink("/usr/local/lib/node_modules", os.path.join(WORK, "node_modules"))
+        except OSError:
+            pass
+
+    pw_cfg = spec.get("playwright_spec") or {}
+    launcher_rel = pw_cfg.get("launcher", "tests/e2e/notes-qa/run_notes_qa.py")
+    launcher = os.path.join(WORK, launcher_rel)
+    if not os.path.isfile(launcher):
+        report["error"] = {"stage": "startup", "message": f"Launcher script not found in repository: {launcher_rel}"}
+        return report
+
+    report_dir = "/tmp/playwright-results"
+    os.makedirs(report_dir, exist_ok=True)
+    report_json = os.path.join(report_dir, "report.json")
+    env["PLAYWRIGHT_JSON_OUTPUT_FILE"] = report_json
+    env["NOTES_QA_OUTPUT_DIR"] = report_dir
+
+    argv = [sys.executable, launcher]
+    parsed_selectors = pw_cfg.get("parsed_selectors") or []
+    if parsed_selectors:
+        sel = parsed_selectors[0]
+        spec_path = sel.get("spec_path")
+        if spec_path:
+            argv.append(spec_path)
+        title = sel.get("test_title")
+        if title:
+            argv += ["-g", f"^{re.escape(title)}$"]
+    argv.append("--reporter=json")
+
+    log, started = _Log(), time.monotonic()
+    report["argv"] = argv
+    try:
+        proc = subprocess.Popen(argv, cwd=WORK, env=env, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    except OSError as exc:
+        report["error"] = {"stage": "spawn", "message": str(exc)[:400]}
+        return report
+
+    def pump():
+        for chunk in iter(lambda: proc.stdout.read(8192), b""):
+            log.feed(chunk)
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+    timed_out = False
+    try:
+        proc.wait(timeout=spec["timeout"])
+    except subprocess.TimeoutExpired:
+        timed_out = True
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    proc.wait()
+    reader.join(timeout=5)
+
+    rendered_log = log.render()
+    log_text = rendered_log.get("tail", "") + "\n" + rendered_log.get("head", "")
+
+    # Find server log if created by run_notes_qa.py
+    server_log = ""
+    for s_log in glob.glob("/tmp/odysseus-notes-qa-*/server.log"):
+        try:
+            with open(s_log, "r", errors="replace") as f:
+                server_log = f.read()[-8192:]
+        except OSError:
+            pass
+
+    report.update({
+        "exit": proc.returncode,
+        "timed_out": timed_out,
+        "duration_seconds": round(time.monotonic() - started, 3),
+        "log": rendered_log,
+        "server_log": server_log if server_log else None,
+    })
+
+    # Parse JSON report
+    if os.path.isfile(report_json):
+        try:
+            with open(report_json, "r", encoding="utf-8") as f:
+                pw_data = json.load(f)
+            report["playwright"] = _parse_playwright_json(pw_data)
+        except Exception as exc:
+            report["error"] = {"stage": "collection", "message": f"Malformed Playwright report: {exc}"}
+    else:
+        # Check why report.json was not generated
+        if "Scratch server exited during startup" in log_text or "did not become ready" in log_text:
+            report["error"] = {"stage": "startup", "message": "Application server failed during startup or readiness wait."}
+        elif "No module named" in log_text or "Cannot find module" in log_text:
+            report["error"] = {"stage": "dependency", "message": "Missing dependency required for test execution."}
+        elif timed_out:
+            pass
+        elif proc.returncode != 0:
+            report["error"] = {"stage": "execution", "message": f"Playwright runner exited with status {proc.returncode} before creating report."}
+
+    return report
+
+
 def main(argv):
     with open(os.path.join(INPUT, "job.json"), "r", encoding="utf-8") as handle:
         spec = json.load(handle)
@@ -457,6 +655,8 @@ def main(argv):
         report = _prep(spec)
     elif spec.get("kind") == "node_test":
         report = _run_node(spec)
+    elif spec.get("kind") == "playwright_spec":
+        report = _run_playwright_spec(spec)
     elif spec.get("kind") in {"linter", "typechecker", "builder", "c_test"}:
         report = _run_cmd(spec)
     else:

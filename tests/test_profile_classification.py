@@ -6,7 +6,7 @@ import pytest
 
 from odytor.artifacts import ArtifactLimits, ArtifactStore
 from odytor.config import RunSettings
-from odytor.jobs import JobService, classify_browser, classify_job, classify_node
+from odytor.jobs import JobService, classify_browser, classify_job, classify_node, classify_playwright_spec
 
 SEL = ('tests',)
 HEAD = {'harness': 1, 'kind': 'node_test', 'extract': {'ok': True}, 'argv': ['node', '--test', '--test-reporter=tap', 'tests'],
@@ -219,3 +219,80 @@ def test_intake_without_a_store_discards_and_says_so(tmp_path):
     cfg = RunSettings(runner_command=('true',), policies_path='x', data_dir=str(tmp_path / 'data'))
     out = JobService(cfg)._intake_artifacts({'run_id': 'r', 'owner': 'a', 'repo': 'o/r'}, {'report': {'artifacts': [{'name': 'a', 'kind': 'log', 'b64': 'eA=='}]}})
     assert out == [{'error': 'Artifact storage is not configured; the runner\'s artifacts were discarded.', 'discarded': 1}]
+
+
+def test_classify_playwright_spec_cases():
+    sel = ("tests/e2e/notes-qa/notes-qa-regressions.spec.mjs",)
+
+    def pw_payload(exit_code=0, counts=None, errors=None, tests=None, timed_out=False, report_err=None, log_tail="", server_log=None):
+        c = {"collected": 1, "executed": 1, "passed": 1, "failed": 0, "skipped": 0, "flaky": 0, "errors": 0}
+        if counts:
+            c.update(counts)
+        pw = {
+            "counts": c,
+            "specs": ["tests/e2e/notes-qa/notes-qa-regressions.spec.mjs"],
+            "tests": tests or [{"id": "t1", "outcome": "passed" if c["passed"] else "failed", "error": None}],
+            "tests_total": c["collected"],
+            "errors": errors or [],
+        }
+        report = {
+            "harness": 1,
+            "kind": "playwright_spec",
+            "exit": exit_code,
+            "timed_out": timed_out,
+            "duration_seconds": 1.2,
+            "log": {"head": "", "tail": log_tail, "total_bytes": len(log_tail), "truncated": False},
+            "server_log": server_log,
+            "playwright": pw,
+        }
+        if report_err:
+            report["error"] = report_err
+        return {
+            "schema": 1,
+            "runner": {"image": "i"},
+            "sandbox": {"timed_out": timed_out, "container_seconds": 2.0, "limits": {}},
+            "report": report,
+        }
+
+    # 1. Passed test
+    out = classify_playwright_spec(pw_payload(), sel)
+    assert out["status"] == "passed"
+    assert out["failure"] is None
+    assert out["counts"]["passed"] == 1
+
+    # 2. Failed test (assertion failure)
+    out = classify_playwright_spec(pw_payload(exit_code=1, counts={"passed": 0, "failed": 1},
+                                              tests=[{"id": "t1", "outcome": "failed", "error": "expected 2 to be 3"}]), sel)
+    assert out["status"] == "failed"
+    assert out["failure"]["kind"] == "assertion_failure"
+    assert "expected 2 to be 3" in out["failure"]["message"]
+
+    # 3. Playwright collection error
+    out = classify_playwright_spec(pw_payload(exit_code=1, counts={"errors": 1, "passed": 0}, errors=["SyntaxError in spec"]), sel)
+    assert out["status"] == "failed"
+    assert out["failure"]["kind"] == "collection_failure"
+
+    # 4. App startup failure (scratch server exited during startup)
+    out = classify_playwright_spec(pw_payload(exit_code=1, log_tail="RuntimeError: Scratch server exited during startup",
+                                              report_err={"stage": "startup", "message": "App server failed to start"}), sel)
+    assert out["status"] == "setup_error"
+    assert out["failure"]["kind"] == "app_startup_failure"
+
+    # 5. Dependency failure
+    out = classify_playwright_spec(pw_payload(exit_code=1, log_tail="ModuleNotFoundError: No module named 'uvicorn'",
+                                              report_err={"stage": "dependency", "message": "Missing uvicorn"}), sel)
+    assert out["status"] == "setup_error"
+    assert out["failure"]["kind"] == "dependency_failure"
+
+    # 6. Zero collected tests
+    out = classify_playwright_spec(pw_payload(exit_code=0, counts={"collected": 0, "executed": 0, "passed": 0}), sel)
+    assert out["status"] == "no_tests_collected"
+
+    # 7. Skipped-only tests
+    out = classify_playwright_spec(pw_payload(exit_code=0, counts={"collected": 1, "executed": 0, "passed": 0, "skipped": 1}), sel)
+    assert out["status"] == "no_tests_executed"
+
+    # 8. Timeout
+    out = classify_playwright_spec(pw_payload(timed_out=True), sel)
+    assert out["status"] == "timeout"
+

@@ -350,6 +350,27 @@ def validate_header(cfg: RunnerConfig, header: object) -> dict:
             job["selectors"] = validate_node_selectors(header.get("selectors"), tuple(dirs))
             job["requirements"], job["overlay_paths"] = "", ()
             return job
+        if spec.kind == "playwright_spec":
+            from odytor.profile import validate_playwright_spec_selectors, validate_repo_path
+            pw_cfg = header.get("playwright_spec") if isinstance(header.get("playwright_spec"), dict) else {}
+            selected, parsed = validate_playwright_spec_selectors(
+                header.get("selectors"),
+                allowed_specs=tuple(pw_cfg.get("specs") or ()),
+                allowed_dirs=tuple(pw_cfg.get("spec_dirs") or ()),
+                test_dirs=tuple(dirs),
+            )
+            job["selectors"] = list(selected)
+            launcher = pw_cfg.get("launcher", "tests/e2e/notes-qa/run_notes_qa.py")
+            config = pw_cfg.get("config", "tests/e2e/notes-qa/playwright.config.js")
+            job["playwright_spec"] = {
+                "launcher": validate_repo_path(launcher),
+                "config": validate_repo_path(config),
+                "parsed_selectors": parsed,
+            }
+            req = header.get("requirements")
+            job["requirements"] = validate_requirements(req) if req else ""
+            job["overlay_paths"] = ()
+            return job
         if spec.kind in ("linter", "typechecker", "builder", "c_test"):
             from odytor.profile import validate_path_selectors
             job["selectors"] = validate_path_selectors(header.get("selectors"))
@@ -449,6 +470,10 @@ def _run_plain(cfg: RunnerConfig, job: dict, image: ImageInfo, source: Path, job
     elif job["kind"] == "node_test":
         spec = {"kind": "node_test", "argv": build_node_argv(job["selectors"]), "selectors": list(job["selectors"]), "timeout": job["timeout"],
                 "limits": limits}
+        scripts, command, ceiling = ("harness.py",), [f"{INPUT_DIR}/harness.py", "test"], MAX_REPORT_BYTES
+    elif job["kind"] == "playwright_spec":
+        spec = {"kind": "playwright_spec", "profile": job["profile"], "timeout": job["timeout"], "limits": limits,
+                "selectors": list(job.get("selectors") or ()), "playwright_spec": job.get("playwright_spec", {})}
         scripts, command, ceiling = ("harness.py",), [f"{INPUT_DIR}/harness.py", "test"], MAX_REPORT_BYTES
     else:
         from odytor.profile import build_profile_argv

@@ -345,3 +345,76 @@ def test_unconfigured_runner_explains_how_to_enable_it_and_that_other_tools_are_
         assert 'do not need a runner' in result['error'] and 'workspace' in result['error']
     names = {t.name for t in asyncio.run(plain.list_tools())}
     assert {'test_run', 'test_result'} <= names and len(names) == 28  # still discoverable; never silently removed
+
+
+def test_submit_workspace_run_playwright_spec(tmp_path):
+    from odytor.profile import PLAYWRIGHT_SPEC_PROFILE, load_policies
+    from odytor.run_tests import submit_workspace_run
+
+    pol_file = tmp_path / "policy.toml"
+    pol_file.write_text(
+        f'[repos."{REPO}"]\n'
+        'requirements = "reqs.txt"\n'
+        'test_dirs = ["tests"]\n'
+        '\n'
+        f'[repos."{REPO}".playwright-spec]\n'
+        'specs = ["tests/e2e/sample.spec.mjs"]\n'
+        'spec_dirs = ["tests/e2e"]\n'
+        'launcher = "tests/e2e/run_qa.py"\n'
+        'config = "tests/e2e/playwright.config.js"\n'
+    )
+    (tmp_path / "reqs.txt").write_text("pytest==8.3.5\nuvicorn==0.54.0\n")
+    policies = load_policies(pol_file)
+
+    enqueued_job = None
+    class FakeService:
+        def reserve(self): pass
+        def release(self): pass
+        def spool_dir(self, run_id):
+            p = tmp_path / "spool" / run_id
+            p.mkdir(parents=True, exist_ok=True)
+            return p
+        def clock(self): return 1000.0
+        def enqueue(self, record, job):
+            nonlocal enqueued_job
+            enqueued_job = job
+
+    tree_sha = "9" * 40
+    class FakeWorkspaces:
+        def get(self, ws_id, owner, operation):
+            return {"repo": REPO, "version": 2}
+        def snapshot(self, ws_id, owner, expected_version, destination, max_bytes, attach_run):
+            destination.write_bytes(b"dummy tar")
+            return {
+                "record": {"repo": REPO, "version": 2, "source": "head", "pr": 7342,
+                           "source_tree": "0" * 40, "tree": tree_sha},
+                "artifact": {"artifact_id": "art-1", "name": "source.tar", "kind": "source_tar", "sha256": "0" * 64, "size_bytes": 9},
+            }
+
+    from odytor.config import RunSettings
+    cfg = RunSettings(runner_command=("echo",), policies_path=str(pol_file), data_dir=str(tmp_path / "runs"), default_timeout=60, max_timeout=300)
+
+    res = submit_workspace_run(
+        REPO,
+        "ws-123",
+        expected_version=2,
+        workspaces=FakeWorkspaces(),
+        service=FakeService(),
+        policies=policies,
+        owner="alice",
+        cfg=cfg,
+        profile=PLAYWRIGHT_SPEC_PROFILE,
+        selectors=["tests/e2e/sample.spec.mjs::my test title"],
+    )
+
+    assert res["profile"] == PLAYWRIGHT_SPEC_PROFILE
+    assert res["selectors"] == ["tests/e2e/sample.spec.mjs::my test title"]
+    assert res["trees"]["effective_tree"] == tree_sha
+    assert enqueued_job is not None
+    assert enqueued_job.header["requirements"] == "pytest==8.3.5\nuvicorn==0.54.0\n"
+    pw_hdr = enqueued_job.header["playwright_spec"]
+    assert pw_hdr["launcher"] == "tests/e2e/run_qa.py"
+    assert pw_hdr["config"] == "tests/e2e/playwright.config.js"
+    assert pw_hdr["parsed_selectors"][0]["spec_path"] == "tests/e2e/sample.spec.mjs"
+    assert pw_hdr["parsed_selectors"][0]["test_title"] == "my test title"
+

@@ -11,6 +11,7 @@ PROFILE_NAME = "python-pytest"
 PROFILE_VERSION = "1"
 NODE_PROFILE = "node-test"
 BROWSER_PROFILE = "browser-playwright"
+PLAYWRIGHT_SPEC_PROFILE = "playwright-spec"
 
 PYTHON_LINT_PROFILE = "python-lint"
 PYTHON_TYPECHECK_PROFILE = "python-typecheck"
@@ -82,6 +83,11 @@ REGISTRY: dict[str, ProfileSpec] = {
         ("python", "playwright", "chromium"), produces_artifacts=True,
         commands=("goto", "click", "fill", "type", "press", "select", "check", "uncheck", "hover", "wait_for", "wait_ms", "screenshot",
                   "snapshot", "assert_visible", "assert_hidden", "assert_text", "assert_count", "assert_requests", "wait_requests")),
+    PLAYWRIGHT_SPEC_PROFILE: ProfileSpec(
+        PLAYWRIGHT_SPEC_PROFILE, "1", "playwright_spec", "browser",
+        "Repository-owned Playwright end-to-end specs against an isolated in-sandbox app",
+        ("python", "node", "playwright", "chromium"), needs_env=True, produces_artifacts=False,
+        commands=("playwright", "test")),
 }
 PROFILES = {name: spec.version for name, spec in REGISTRY.items()}
 
@@ -96,6 +102,8 @@ INPUT_DIR = "/in"
 
 _PATH_COMPONENT = r"[A-Za-z0-9_][A-Za-z0-9_.+@-]*"
 _SELECTOR_PATH = re.compile(rf"{_PATH_COMPONENT}(?:/{_PATH_COMPONENT})*")
+_SPEC_FILE = re.compile(r".+\.(?:spec|test)\.(?:mjs|cjs|js|ts)")
+_TITLE_DISALLOWED = re.compile(r"[\x00-\x1f\x7f;&|`$<>\r\n]")
 # Printable ASCII only, so parametrized IDs work but control characters never reach argv.
 _NODE_ID = re.compile(r"[\x20-\x5b\x5d-\x7e]+")
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
@@ -104,6 +112,94 @@ _JOB_ID = re.compile(r"test-[0-9a-f]{32}")
 
 class ProfileError(ValueError):
     """A request violates the maintainer-defined profile."""
+
+
+def validate_repo_path(path: object) -> str:
+    """Validate a safe repository-relative path without traversal or option syntax."""
+    if not isinstance(path, str) or not path.strip():
+        raise ProfileError("Path must be a non-empty string.")
+    p = path.strip().rstrip("/")
+    if p.startswith("-"):
+        raise ProfileError("Path cannot start with a dash.")
+    if _SELECTOR_PATH.fullmatch(p) is None or any(part in {".", ".."} for part in p.split("/")):
+        raise ProfileError(f"Invalid repository path: {path!r}")
+    return p
+
+
+def validate_playwright_spec_selector(
+    selector: object,
+    allowed_specs: tuple[str, ...] = (),
+    allowed_dirs: tuple[str, ...] = (),
+    test_dirs: tuple[str, ...] = (),
+) -> tuple[str, dict[str, Any]]:
+    """Accept repository-relative Playwright spec paths and optional literal test titles.
+
+    Syntax: '<spec_path>' or '<spec_path>::<test_title>'
+    """
+    if not isinstance(selector, str) or not selector.strip():
+        raise ProfileError("Playwright spec selector must be a non-empty string.")
+    if len(selector.encode("utf-8", errors="replace")) > MAX_SELECTOR_BYTES:
+        raise ProfileError("Selector exceeds the length limit.")
+    path_part, sep, title_part = selector.partition("::")
+    path_part = path_part.strip()
+    if not path_part:
+        raise ProfileError("Spec path cannot be empty.")
+    if path_part.startswith("-"):
+        raise ProfileError("Spec path cannot start with a dash.")
+    if _SELECTOR_PATH.fullmatch(path_part) is None or any(part in {".", ".."} for part in path_part.split("/")):
+        raise ProfileError("Spec path must be a repository-relative path without traversal.")
+    if not _SPEC_FILE.fullmatch(path_part):
+        raise ProfileError(f"Spec path must end with .spec.mjs, .spec.js, .test.mjs, etc.: {path_part!r}")
+
+    roots = tuple(allowed_dirs) or tuple(test_dirs)
+    if allowed_specs and path_part not in allowed_specs:
+        if not any(path_part == root or path_part.startswith(root + "/") for root in roots):
+            raise ProfileError(f"Spec path {path_part!r} is not in the maintainer-approved specs list or directories.")
+    elif roots and not any(path_part == root or path_part.startswith(root + "/") for root in roots):
+        raise ProfileError(f"Spec path {path_part!r} is outside the approved test directories.")
+
+    title = None
+    if sep:
+        title_part = title_part.strip()
+        if not title_part:
+            raise ProfileError("Test title cannot be empty when '::' is used.")
+        if title_part.startswith("-"):
+            raise ProfileError("Test title cannot start with a dash.")
+        if len(title_part.encode("utf-8", errors="replace")) > 256:
+            raise ProfileError("Test title exceeds 256 bytes.")
+        if _TITLE_DISALLOWED.search(title_part):
+            raise ProfileError("Test title contains invalid characters or shell metacharacters.")
+        title = title_part
+
+    canonical = f"{path_part}::{title}" if title else path_part
+    parsed = {"spec_path": path_part, "test_title": title}
+    return canonical, parsed
+
+
+def validate_playwright_spec_selectors(
+    selectors: object,
+    allowed_specs: tuple[str, ...] = (),
+    allowed_dirs: tuple[str, ...] = (),
+    test_dirs: tuple[str, ...] = (),
+) -> tuple[tuple[str, ...], list[dict[str, Any]]]:
+    if selectors is None or (isinstance(selectors, (list, tuple)) and not selectors):
+        if allowed_specs:
+            return allowed_specs, [{"spec_path": s, "test_title": None} for s in allowed_specs]
+        raise ProfileError("selectors must be specified or allowed specs defined in policy.")
+    if not isinstance(selectors, (list, tuple)):
+        raise ProfileError("selectors must be a list of spec selectors or omitted.")
+    if len(selectors) > MAX_SELECTORS:
+        raise ProfileError(f"At most {MAX_SELECTORS} selectors are allowed.")
+    canonical_list: list[str] = []
+    parsed_list: list[dict[str, Any]] = []
+    for item in selectors:
+        canonical, parsed = validate_playwright_spec_selector(
+            item, allowed_specs=allowed_specs, allowed_dirs=allowed_dirs, test_dirs=test_dirs,
+        )
+        if canonical not in canonical_list:
+            canonical_list.append(canonical)
+            parsed_list.append(parsed)
+    return tuple(canonical_list), parsed_list
 
 
 def is_job_id(value: object) -> bool:
@@ -364,7 +460,7 @@ def load_policies(path: str | Path) -> dict[str, RepoPolicy]:
             if p in PROFILES and p != profile:
                 extra.setdefault(p, {})
         for p_name in PROFILES:
-            if p_name in entry and p_name not in {NODE_PROFILE, BROWSER_PROFILE} and p_name != profile:
+            if p_name in entry and p_name not in {NODE_PROFILE, BROWSER_PROFILE, PLAYWRIGHT_SPEC_PROFILE} and p_name != profile:
                 val = entry[p_name]
                 extra[p_name] = val if isinstance(val, dict) else {}
         if NODE_PROFILE in entry:
@@ -400,6 +496,20 @@ def load_policies(path: str | Path) -> dict[str, RepoPolicy]:
                 extra[BROWSER_PROFILE] = {"serve": default_serve, "profiles": app_profiles}
             except SpecError as exc:
                 raise ProfileError(f"Invalid {BROWSER_PROFILE} settings for {repo}: {exc}") from exc
+        if PLAYWRIGHT_SPEC_PROFILE in entry:
+            table = entry[PLAYWRIGHT_SPEC_PROFILE]
+            if not isinstance(table, dict):
+                raise ProfileError(f"Invalid {PLAYWRIGHT_SPEC_PROFILE} settings for {repo}.")
+            specs_val = table.get("specs") or ()
+            dirs_val = table.get("spec_dirs") or ()
+            launcher_val = table.get("launcher", "tests/e2e/notes-qa/run_notes_qa.py")
+            config_val = table.get("config", "tests/e2e/notes-qa/playwright.config.js")
+            extra[PLAYWRIGHT_SPEC_PROFILE] = {
+                "specs": tuple(specs_val) if isinstance(specs_val, (list, tuple)) else (),
+                "spec_dirs": tuple(d.rstrip("/") for d in dirs_val) if isinstance(dirs_val, (list, tuple)) else (),
+                "launcher": launcher_val,
+                "config": config_val,
+            }
         if "publish" in entry and isinstance(entry["publish"], dict):
             pub = entry["publish"]
             exemptions = pub.get("exempt_paths") or pub.get("allowed_paths")

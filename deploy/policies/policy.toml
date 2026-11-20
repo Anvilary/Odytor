@@ -24,6 +24,15 @@ requirements = "odysseus-dev-odysseus.requirements.txt"
 [repos."odysseus-dev/odysseus".node-test]
 test_dirs = ["tests"]
 
+[repos."odysseus-dev/odysseus".playwright-spec]
+specs = [
+    "tests/e2e/notes-qa/notes-qa-regressions.spec.mjs",
+    "tests/e2e/notes-qa/notes-edge-cases.spec.mjs",
+]
+spec_dirs = ["tests/e2e/notes-qa"]
+launcher = "tests/e2e/notes-qa/run_notes_qa.py"
+config = "tests/e2e/notes-qa/playwright.config.js"
+
 [repos."odysseus-dev/odysseus".browser-playwright]
 kind = "static"
 root = "static"

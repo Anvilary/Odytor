@@ -17,8 +17,8 @@ from odytor.github import GitHubClient, validate_repo, validate_sha
 from odytor.jobs import TERMINAL, JobService, QueuedJob, new_run_id
 from odytor.overlay import apply_overlay, validate_overlay
 from odytor.pr_conflicts import inspect_merge
-from odytor.profile import (NODE_PROFILE, PROFILE_NAME, PROFILES, REGISTRY, ProfileError, RepoPolicy, validate_node_selectors,
-                            validate_selectors)
+from odytor.profile import (NODE_PROFILE, PLAYWRIGHT_SPEC_PROFILE, PROFILE_NAME, PROFILES, REGISTRY, ProfileError, RepoPolicy, validate_node_selectors,
+                            validate_playwright_spec_selectors, validate_selectors)
 
 MODES = ("head", "prospective_merge")
 SCHEMA = 1
@@ -171,9 +171,19 @@ def submit_workspace_run(repo: str, workspace_id: str, expected_version: int, *,
     if profile not in policy.profiles:
         raise ValidationError(f"The maintainer policy for this repository enables: {', '.join(policy.profiles)}.")
     try:
+        parsed_selectors = []
         if spec.kind == "node_test":
             test_dirs = policy.extra.get(NODE_PROFILE, {}).get("test_dirs", policy.test_dirs)
             selected = validate_node_selectors(selectors, test_dirs)
+        elif spec.kind == "playwright_spec":
+            cfg_table = policy.extra.get(PLAYWRIGHT_SPEC_PROFILE, {})
+            selected, parsed_selectors = validate_playwright_spec_selectors(
+                selectors,
+                allowed_specs=cfg_table.get("specs", ()),
+                allowed_dirs=cfg_table.get("spec_dirs", ()),
+                test_dirs=policy.test_dirs,
+            )
+            test_dirs = cfg_table.get("spec_dirs", policy.test_dirs)
         elif spec.kind == "pytest":
             test_dirs = policy.test_dirs
             selected = validate_selectors(selectors, test_dirs)
@@ -205,12 +215,23 @@ def submit_workspace_run(repo: str, workspace_id: str, expected_version: int, *,
             "overlay": {"supplied": False, "applied": False, "sha256": None, "paths": [], "patch_status": "none",
                         "committed": False, "pushed": False},
             "selectors": list(selected), "test_dirs": list(test_dirs), "timeout_seconds": cfg.default_timeout,
-            "requirements_sha256": policy.requirements_sha256 if spec.kind == "pytest" else "", "artifact": taken["artifact"],
+            "requirements_sha256": policy.requirements_sha256 if spec.needs_env else "", "artifact": taken["artifact"],
             "timestamps": {"created_at": now, "started_at": None, "finished_at": None},
             "expires_at": now + cfg.retention_hours * 3600, "result": None}
         header = {"schema": 1, "job_id": run_id, "repo": repo, "profile": profile, "profile_version": PROFILES[profile],
                   "test_dirs": list(test_dirs), "selectors": list(selected), "overlay_paths": [],
-                  "requirements": policy.requirements if spec.kind == "pytest" else "", "timeout_seconds": cfg.default_timeout}
+                  "requirements": policy.requirements if spec.needs_env else "", "timeout_seconds": cfg.default_timeout}
+        if spec.kind == "playwright_spec":
+            cfg_table = policy.extra.get(PLAYWRIGHT_SPEC_PROFILE, {})
+            pw_header = {
+                "launcher": cfg_table.get("launcher", "tests/e2e/notes-qa/run_notes_qa.py"),
+                "config": cfg_table.get("config", "tests/e2e/notes-qa/playwright.config.js"),
+                "specs": list(cfg_table.get("specs", ())),
+                "spec_dirs": list(cfg_table.get("spec_dirs", ())),
+                "parsed_selectors": parsed_selectors,
+            }
+            header["playwright_spec"] = pw_header
+            record["playwright_spec"] = pw_header
         service.enqueue(record, QueuedJob(run_id, spool, header, cfg.default_timeout))
         reserved = False
         return public_view(record)
@@ -290,7 +311,7 @@ def public_view(record: dict[str, Any], currency: dict[str, Any] | None = None) 
                                                   "selector_coverage", "overlay_coverage", "log", "execution", "runner",
                                                   "environment", "reports", "conflict", "storage", "steps", "steps_total",
                                                   "replayed_steps", "browser", "serve", "console", "page_errors", "page_errors_total",
-                                                  "network", "snapshots", "events", "artifacts") if k in result})
+                                                  "network", "snapshots", "events", "artifacts", "playwright", "server_log") if k in result})
         view["green"] = status == "passed"
         view["evidence_complete"] = status in {"passed", "failed", "completed", "no_tests_executed", "no_tests_collected"} and bool(result.get("counts") is not None)
     else:

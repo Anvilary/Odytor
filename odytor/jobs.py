@@ -598,6 +598,128 @@ def classify_command(payload: dict[str, Any], profile: str) -> dict[str, Any]:
                    exit_code=exit_code)
 
 
+def classify_playwright_spec(payload: dict[str, Any], selectors: tuple[str, ...]) -> dict[str, Any]:
+    """playwright-spec: evaluates execution of repository-owned Playwright specs against the local app."""
+    outcome = _base_outcome(payload)
+
+    def end(status: str, kind: str | None = None, message: str | None = None, **extra: Any) -> dict[str, Any]:
+        outcome["status"] = status
+        if kind:
+            outcome["failure"] = {"kind": kind, "message": message or kind, **extra}
+        return outcome
+
+    early = _common_runner_failures(payload, outcome, "playwright_spec")
+    if early:
+        status, args = early
+        kind, msg, extra = args
+        report_err = payload.get("report", {}).get("error", {}) if isinstance(payload.get("report"), dict) else {}
+        stage = report_err.get("stage") if isinstance(report_err, dict) else None
+        if kind == "startup_failure" or stage == "startup":
+            kind = "app_startup_failure"
+        elif stage == "dependency":
+            kind = "dependency_failure"
+        elif stage == "collection":
+            status = "failed"
+            kind = "collection_failure"
+        return end(status, kind, msg, **extra)
+
+    report = payload["report"]
+    argv = report.get("argv")
+    outcome["execution"]["invocation"] = [_str(a, 300) for a in argv[:60]] if isinstance(argv, list) else []
+
+    code = report.get("exit") if type(report.get("exit")) is int else None
+    outcome["execution"].update(
+        exit_code=code,
+        duration_seconds=round(_num(report.get("duration_seconds"), 1e6), 3),
+    )
+
+    log = report.get("log") if isinstance(report.get("log"), dict) else {}
+    outcome["log"] = {
+        "head": _log_part(log.get("head"), 4096),
+        "tail": _log_part(log.get("tail"), 8192),
+        "total_bytes": _int(log.get("total_bytes"), 10**13),
+        "truncated": bool(log.get("truncated")),
+    }
+    if report.get("server_log"):
+        outcome["server_log"] = _log_part(report["server_log"], 8192)
+
+    pw = report.get("playwright") if isinstance(report.get("playwright"), dict) else {}
+    raw_counts = pw.get("counts") if isinstance(pw.get("counts"), dict) else {}
+    c = {
+        "collected": _int(raw_counts.get("collected")),
+        "executed": _int(raw_counts.get("executed")),
+        "passed": _int(raw_counts.get("passed")),
+        "failed": _int(raw_counts.get("failed")),
+        "skipped": _int(raw_counts.get("skipped")),
+        "flaky": _int(raw_counts.get("flaky")),
+        "errors": _int(raw_counts.get("errors")),
+    }
+    outcome["counts"] = c
+    raw_tests = pw.get("tests") or []
+    sanitized_tests = []
+    for t in raw_tests[:200] if isinstance(raw_tests, list) else []:
+        if isinstance(t, dict):
+            entry = {
+                "id": _str(t.get("id"), 250),
+                "title": _str(t.get("title"), 200),
+                "outcome": _str(t.get("outcome"), 20),
+                "duration_seconds": round(_num(t.get("duration_seconds"), 1e6), 3),
+            }
+            if t.get("error"):
+                entry["error"] = _str(t.get("error"), 500)
+            sanitized_tests.append(entry)
+    outcome["tests"] = sanitized_tests
+    outcome["tests_total"] = _int(pw.get("tests_total", len(raw_tests)))
+    outcome["tests_truncated"] = outcome["tests_total"] > len(outcome["tests"])
+    outcome["playwright"] = {
+        "specs": [_str(s, 300) for s in pw.get("specs", [])[:20]],
+        "errors": [_str(e, 500) for e in pw.get("errors", [])[:10]],
+    }
+
+    if report.get("timed_out"):
+        return end("timeout", "timeout", "Playwright spec run exceeded execution deadline.")
+
+    err = report.get("error")
+    if isinstance(err, dict):
+        stage = err.get("stage") or "sandbox"
+        msg = err.get("message") or "Error during spec execution"
+        kind_map = {
+            "startup": "app_startup_failure",
+            "dependency": "dependency_failure",
+            "collection": "collection_failure",
+        }
+        kind = kind_map.get(stage, f"{stage}_failure")
+        return end("setup_error" if stage in {"startup", "dependency"} else "failed", kind, msg)
+
+    if c["errors"] > 0:
+        err_msg = outcome["playwright"]["errors"][0] if outcome["playwright"]["errors"] else "Playwright collection error"
+        return end("failed", "collection_failure", err_msg)
+
+    if c["failed"] > 0:
+        failing_test = next((t for t in raw_tests if t.get("outcome") == "failed"), None)
+        detail = failing_test.get("error") if failing_test else None
+        msg = f"{c['failed']} test(s) failed."
+        if detail:
+            msg += f" First failure: {detail[:200]}"
+        return end("failed", "assertion_failure", msg, failing_tests=c["failed"])
+
+    if code is not None and code != 0:
+        log_tail = outcome["log"]["tail"]
+        if "Scratch server exited during startup" in log_tail or "did not become ready" in log_tail:
+            return end("setup_error", "app_startup_failure", "Application scratch server failed during startup.")
+        if "No module named" in log_tail or "Cannot find module" in log_tail:
+            return end("setup_error", "dependency_failure", "Missing module or dependency during execution.")
+        return end("failed", "unexpected_exit", f"Launcher exited with code {code}.")
+
+    if c["collected"] == 0:
+        return end("no_tests_collected", "no_tests_collected", "The selectors matched no tests in the Playwright spec.")
+
+    if c["passed"] == 0:
+        return end("no_tests_executed", "no_tests_executed", "Tests were collected but none executed or passed (all skipped).")
+
+    return end("passed")
+
+
 def classify_job(record: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     """Dispatch on the profile's kind: each profile has its own evidence rules; none falls through to pytest's."""
     from odytor.profile import REGISTRY
@@ -605,6 +727,8 @@ def classify_job(record: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
     kind = spec.kind if spec else "pytest"
     if kind == "node_test":
         return classify_node(payload, tuple(record["selectors"]))
+    if kind == "playwright_spec":
+        return classify_playwright_spec(payload, tuple(record.get("selectors") or ()))
     if kind == "browser":
         return classify_browser(payload, record["browser"]["steps_total"], record["browser"]["replay"])
     if kind in {"linter", "typechecker", "builder", "c_test"}:
