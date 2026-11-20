@@ -182,6 +182,12 @@ def submit_browser_run(repo: str, workspace_id: str, expected_version: int, step
             available = ", ".join(sorted(profiles_map.keys())) or "none"
             raise ValidationError(f"Unknown application launch profile '{app_profile}'. Approved profiles: {available}.")
         serve = profiles_map[app_profile]
+    if isinstance(serve, dict):
+        serve = dict(serve)
+        if app_profile is not None:
+            serve["profile"] = app_profile
+        elif "profile" not in serve:
+            serve["profile"] = "default"
     if not isinstance(steps, list):
         raise ValidationError("steps must be a list.")
     if len(steps) > browser_spec.MAX_STEPS:
@@ -241,13 +247,16 @@ def submit_browser_run(repo: str, workspace_id: str, expected_version: int, step
             "revisions": {"workspace_id": workspace_id, "workspace_version": ws["version"], "source": ws["source"]},
             "trees": {"source_tree": ws["source_tree"], "effective_tree": ws["tree"]},
             "overlay": {"supplied": False, "applied": False, "sha256": None, "paths": [], "patch_status": "none", "committed": False, "pushed": False},
-            "selectors": [], "test_dirs": [], "timeout_seconds": cfg.default_timeout, "requirements_sha256": "",
+            "selectors": [], "test_dirs": [], "timeout_seconds": cfg.default_timeout,
+            "requirements_sha256": policy.requirements_sha256 if serve.get("kind") == "command" and policy.requirements else "",
             "browser": {"session_id": session["session_id"], "steps_total": len(combined["steps"]), "replay": len(history),
                         "new_steps": len(new_steps)},
             "artifact": taken["artifact"], "timestamps": {"created_at": now, "started_at": None, "finished_at": None},
             "expires_at": now + cfg.retention_hours * 3600, "result": None}
         header = {"schema": 1, "job_id": run_id, "repo": repo, "profile": BROWSER_PROFILE, "profile_version": PROFILES[BROWSER_PROFILE],
                   "timeout_seconds": cfg.default_timeout, "serve": serve, "scenario": scenario}
+        if serve.get("kind") == "command" and policy.requirements:
+            header["requirements"] = policy.requirements
         service.enqueue(record, QueuedJob(run_id, spool, header, cfg.default_timeout, max_output=ARTIFACT_OUTPUT_BYTES))
         reserved = False
         sessions.add_pending(session, run_id, new_steps)

@@ -16,6 +16,7 @@ import http.server
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -152,9 +153,50 @@ class StaticHandler(http.server.SimpleHTTPRequestHandler):
 
 # --- server -----------------------------------------------------------------------------------------------------
 
+class AppPreflightError(RuntimeError):
+    def __init__(self, message: str, *, profile: str, interpreter: str, missing_module: str):
+        super().__init__(message)
+        self.profile = profile
+        self.interpreter = interpreter
+        self.missing_module = missing_module
+
+
 class Server:
     def __init__(self, serve):
         self.serve, self.proc, self.httpd, self.log = serve, None, None, bytearray()
+
+    def _preflight(self, env):
+        argv = self.serve.get("argv") or []
+        if not argv:
+            return
+        cmd = argv[0]
+        cmd_base = os.path.basename(cmd)
+        profile = self.serve.get("profile", "app")
+        resolved_interp = shutil.which(cmd, path=env.get("PATH")) or cmd
+        if not shutil.which(cmd, path=env.get("PATH")) and not os.path.isfile(cmd):
+            raise AppPreflightError(
+                f"Application launch profile '{profile}' failed preflight: executable '{cmd}' not found.",
+                profile=profile, interpreter=resolved_interp, missing_module=cmd)
+        work_dir = WORK if os.path.isdir(WORK) else None
+        if cmd_base in ("python", "python3", "python3.11", "python3.12", "python3.13") or "python" in cmd_base:
+            if "-m" in argv:
+                idx = argv.index("-m")
+                if idx + 1 < len(argv):
+                    module = argv[idx + 1]
+                    res = subprocess.run(
+                        [resolved_interp, "-c", f"import {module}"],
+                        cwd=work_dir, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, timeout=10)
+                    if res.returncode != 0:
+                        out = (res.stderr or res.stdout or b"").strip()
+                        if out and len(self.log) < SERVER_LOG_BYTES:
+                            self.log += out[:SERVER_LOG_BYTES - len(self.log)]
+                        out_text = out.decode("utf-8", "replace")
+                        m = re.search(r"No module named\s+['\"]?([A-Za-z0-9_.]+)['\"]?", out_text)
+                        missing = m.group(1) if m else module
+                        raise AppPreflightError(
+                            f"Application launch profile '{profile}' failed preflight: missing module '{missing}' for interpreter '{resolved_interp}'.",
+                            profile=profile, interpreter=resolved_interp, missing_module=missing)
 
     def start(self):
         port = self.serve["port"]
@@ -165,7 +207,10 @@ class Server:
             self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", port), functools.partial(StaticHandler, directory=root))
             threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
         else:
-            self.proc = subprocess.Popen(self.serve["argv"], cwd=WORK, env=_clean_env(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            env = _clean_env()
+            self._preflight(env)
+            work_dir = WORK if os.path.isdir(WORK) else None
+            self.proc = subprocess.Popen(self.serve["argv"], cwd=work_dir, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                          stderr=subprocess.STDOUT, start_new_session=True)
             threading.Thread(target=self._pump, daemon=True).start()
         self._wait_ready()
@@ -178,11 +223,19 @@ class Server:
     def _wait_ready(self):
         deadline = time.monotonic() + self.serve["ready_timeout"]
         url_path = self.serve["ready_path"]
+        env = _clean_env()
         while time.monotonic() < deadline:
             if self.proc is not None and self.proc.poll() is not None:
                 time.sleep(0.1)
                 log_snippet = self.log.decode("latin-1", "replace").strip()[-400:] if self.log else ""
                 detail = f": {log_snippet}" if log_snippet else ""
+                m = re.search(r"No module named\s+['\"]?([A-Za-z0-9_.]+)['\"]?", log_snippet)
+                if m:
+                    profile = self.serve.get("profile", "app")
+                    resolved_interp = shutil.which(self.serve["argv"][0], path=env.get("PATH")) or self.serve["argv"][0]
+                    raise AppPreflightError(
+                        f"Application launch profile '{profile}' exited before readiness: missing module '{m.group(1)}' for interpreter '{resolved_interp}'.",
+                        profile=profile, interpreter=resolved_interp, missing_module=m.group(1))
                 raise RuntimeError(f"the application exited with status {self.proc.returncode} before it was ready{detail}")
             try:
                 with socket.create_connection(("127.0.0.1", self.serve["port"]), timeout=1) as conn:
@@ -208,8 +261,13 @@ class Server:
 
 
 def _clean_env():
-    return {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": "/tmp/home", "TMPDIR": "/tmp", "LANG": "C.UTF-8",
+    env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": "/tmp/home", "TMPDIR": "/tmp", "LANG": "C.UTF-8",
             "NODE_ENV": "test", "CI": "1", "NO_COLOR": "1"}
+    if os.path.exists(harness.ENV_SITE):
+        env["PYTHONPATH"] = harness.ENV_SITE
+    elif "PYTHONPATH" in os.environ:
+        env["PYTHONPATH"] = os.environ["PYTHONPATH"]
+    return env
 
 
 # --- browser run -------------------------------------------------------------------------------------------------
@@ -413,6 +471,15 @@ def run_browser(spec, report):
     try:
         try:
             server.start()
+        except AppPreflightError as exc:
+            report["error"] = {
+                "stage": "startup",
+                "message": str(exc)[:300],
+                "profile": exc.profile,
+                "interpreter": exc.interpreter,
+                "missing_module": exc.missing_module,
+            }
+            return
         except Exception as exc:
             report["error"] = {"stage": "startup", "message": str(exc)[:300]}
             return

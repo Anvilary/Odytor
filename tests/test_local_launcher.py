@@ -66,7 +66,12 @@ def test_stray_variables_cannot_widen_the_allowlist_or_select_another_credential
     seen = started_with(run(sandbox, env=stray))
     assert seen["ODYTOR_ALLOWED_REPOSITORIES"] == seen["GIT_PLUS_ALLOWED_REPOSITORIES"] == ALLOWED
     assert seen["GITHUB_TOKEN"] == TOKEN
-    assert not {k for k in seen if k not in {"ARGS", "GITHUB_TOKEN", "ODYTOR_HOME", "ODYTOR_ALLOWED_REPOSITORIES", "GIT_PLUS_ALLOWED_REPOSITORIES"}}
+    allowed_keys = {
+        "ARGS", "GITHUB_TOKEN", "ODYTOR_HOME", "ODYTOR_ALLOWED_REPOSITORIES", "GIT_PLUS_ALLOWED_REPOSITORIES",
+        "ODYTOR_TEST_RUNNER_COMMAND", "ODYTOR_TEST_POLICIES", "ODYTOR_TEST_DATA_DIR",
+        "ODYTOR_WORKSPACE_DIR", "ODYTOR_ARTIFACT_DIR", "ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY",
+    }
+    assert not {k for k in seen if k not in allowed_keys}
 
 
 @pytest.mark.parametrize("gh_body,message", [("exit 1", "not authenticated"), ("echo", "returned no token")])

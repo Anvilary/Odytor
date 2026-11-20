@@ -339,6 +339,9 @@ def validate_header(cfg: RunnerConfig, header: object) -> dict:
                 job["scenario"] = browser_spec.validate_scenario(header.get("scenario"), max_steps=browser_spec.MAX_SESSION_STEPS)
             except browser_spec.SpecError as exc:
                 raise ProfileError(str(exc)) from exc
+            req = header.get("requirements")
+            if req:
+                job["requirements"] = validate_requirements(req)
             return job
         dirs = header.get("test_dirs")
         if not isinstance(dirs, list) or not dirs or not all(isinstance(d, str) for d in dirs):
@@ -431,8 +434,9 @@ def profile_availability(tools: dict) -> dict:
             for name, spec in REGISTRY.items()}
 
 
-def _run_plain(cfg: RunnerConfig, job: dict, image: ImageInfo, source: Path, job_dir: Path, result: dict) -> None:
-    """Node and browser jobs: no dependency environment, no network, only the validated invocation over the source tar."""
+def _run_plain(cfg: RunnerConfig, job: dict, image: ImageInfo, source: Path, job_dir: Path, result: dict,
+               env: dep_cache.EnvHandle | None = None) -> None:
+    """Node and browser jobs: no network, only the validated invocation over the source tar (with optional env mount)."""
     run = job_dir / "run"
     run.mkdir(mode=0o755)
     os.chmod(run, 0o755)
@@ -456,8 +460,11 @@ def _run_plain(cfg: RunnerConfig, job: dict, image: ImageInfo, source: Path, job
     for name in scripts:
         _write(run / name, Path(__file__).with_name(name).read_bytes())
     name = f"gp-run-{job_dir.name[4:]}"
+    mounts = [f"{run}:{INPUT_DIR}:ro"]
+    if env is not None:
+        mounts.append(f"{env.path}:{ENV_DIR}:ro")
     args = _container_args(
-        cfg, name, image, test=True, workspace=job_dir.name, mounts=[f"{run}:{INPUT_DIR}:ro"], timeout=job["timeout"] + 60,
+        cfg, name, image, test=True, workspace=job_dir.name, mounts=mounts, timeout=job["timeout"] + 60,
         memory_mib=cfg.memory_mib, env={}, tmpfs=[f"/tmp:rw,nosuid,nodev,exec,size={cfg.tmp_mib}m",
                                                   f"{WORK_DIR}:rw,nosuid,nodev,exec,size={cfg.work_mib}m"], command=command)
     outcome, seconds = _run_container(cfg, name, args, job["timeout"] + 90, max_stdout=ceiling)
@@ -474,22 +481,19 @@ def execute(cfg: RunnerConfig, job: dict, source: Path, job_dir: Path) -> dict:
     image = resolve_image(cfg)
     reap_orphan_containers(cfg)
     _sweep_active(cfg)
-    if job["kind"] != "pytest":
-        tools = image_tools(cfg, image)
-        needed = REGISTRY[job["profile"]].tools
-        if not all(tools.get(t) for t in needed):
-            raise SetupError("profile_unavailable", f"The runner image lacks the tools profile '{job['profile']}' needs.",
-                             {"missing_tools": [t for t in needed if not tools.get(t)]})
-        result = {"schema": SCHEMA, "job_id": job["job_id"],
-                  "runner": {"image": image.ref, "image_id": image.image_id, "image_digest": image.digest,
-                             "platform": image.platform, "python": image.python, "engine": cfg.engine}}
+    tools = image_tools(cfg, image)
+    needed = REGISTRY[job["profile"]].tools
+    if not all(tools.get(t) for t in needed):
+        raise SetupError("profile_unavailable", f"The runner image lacks the tools profile '{job['profile']}' needs.",
+                         {"missing_tools": [t for t in needed if not tools.get(t)]})
+    result: dict = {"schema": SCHEMA, "job_id": job["job_id"],
+                    "runner": {"image": image.ref, "image_id": image.image_id, "image_digest": image.digest,
+                               "platform": image.platform, "python": image.python, "engine": cfg.engine}}
+    if not job.get("requirements"):
         _run_plain(cfg, job, image, source, job_dir, result)
         return result
     spec_sha = requirements_digest(job["requirements"])
     identity = dep_cache.EnvIdentity(job["repo"], spec_sha, image.python, image.image_id, PROFILE_VERSION, image.platform)
-    result: dict = {"schema": SCHEMA, "job_id": job["job_id"],
-                    "runner": {"image": image.ref, "image_id": image.image_id, "image_digest": image.digest,
-                               "platform": image.platform, "python": image.python, "engine": cfg.engine}}
     try:
         result["storage"] = dep_cache.collect(cfg.root, ttl_seconds=cfg.env_ttl_days * 86400,
                                               budget_bytes=cfg.env_budget_bytes, min_free_bytes=cfg.min_free_bytes,
@@ -503,7 +507,10 @@ def execute(cfg: RunnerConfig, job: dict, source: Path, job_dir: Path) -> dict:
                                      "prepare_seconds": env.prepare_seconds, "prepared_at": env.prepared_at,
                                      "size_bytes": env.size_bytes}
             result["cache_totals"] = {k: int(v) for k, v in stats.items()}
-            _run_job(cfg, job, image, env, source, job_dir, result)
+            if job["kind"] == "pytest":
+                _run_job(cfg, job, image, env, source, job_dir, result)
+            else:
+                _run_plain(cfg, job, image, source, job_dir, result, env=env)
     except dep_cache.EnvPreparationError as exc:
         dep_cache.bump_stats(cfg.root, prepare_failures=1)
         raise SetupError("prepare", exc.args[0], exc.detail) from exc

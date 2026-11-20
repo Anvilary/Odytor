@@ -406,8 +406,9 @@ def _common_runner_failures(payload: dict[str, Any], outcome: dict[str, Any], ex
                                 "stderr": safe_text(_str(sandbox.get("engine_stderr_tail"), 600), 600)})
     if isinstance(report.get("error"), dict):
         err = report["error"]
+        extra = {k: v for k, v in err.items() if k not in ("stage", "message")}
         return "setup_error", ("startup_failure" if err.get("stage") == "startup" else _str(err.get("stage"), 40) or "sandbox",
-                               _str(err.get("message"), 300), {})
+                               _str(err.get("message"), 300), extra)
     return None
 
 

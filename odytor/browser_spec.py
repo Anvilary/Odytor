@@ -194,6 +194,8 @@ def validate_serve(serve: Any, *, allowed_kinds: tuple[str, ...] = _SERVE_KINDS)
     out: dict[str, Any] = {"kind": serve["kind"], "port": _int(serve.get("port", 8765), "serve.port", *PORT_RANGE),
                            "ready_path": _path(serve.get("ready_path", "/"), "serve.ready_path"),
                            "ready_timeout": _int(serve.get("ready_timeout", 30), "serve.ready_timeout", 1, 120)}
+    if isinstance(serve.get("profile"), str) and serve["profile"]:
+        out["profile"] = serve["profile"]
     if serve["kind"] == "static":
         root = serve.get("root", ".")
         if (not isinstance(root, str) or not root or len(root) > 200 or root.startswith("/") or "\\" in root

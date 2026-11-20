@@ -386,7 +386,10 @@ def load_policies(path: str | Path) -> dict[str, RepoPolicy]:
                     for prof_name, prof_cfg in raw_profiles.items():
                         if not isinstance(prof_name, str) or not prof_name:
                             raise SpecError("application launch profile names must be non-empty strings.")
-                        app_profiles[prof_name] = validate_serve(prof_cfg)
+                        prof_dict = dict(prof_cfg) if isinstance(prof_cfg, dict) else prof_cfg
+                        if isinstance(prof_dict, dict):
+                            prof_dict.setdefault("profile", prof_name)
+                        app_profiles[prof_name] = validate_serve(prof_dict)
                 default_serve = validate_serve(table) if table.get("kind") else (
                     app_profiles.get("default") or (next(iter(app_profiles.values())) if app_profiles else None)
                 )
