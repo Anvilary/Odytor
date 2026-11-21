@@ -23,7 +23,7 @@ from odytor import browser_spec
 from odytor.profile import BROWSER_PROFILE, REGISTRY, RepoPolicy
 
 # Tools that cannot work without a configured runner; the server registers them either way and explains why.
-RUNNER_TOOLS = ("test_run", "test_result", "workspace_run", "test_cancel", "browser_run", "validation_campaign")
+RUNNER_TOOLS = ("test_run", "test_result", "test_run_list", "workspace_run", "test_cancel", "browser_run", "validation_campaign")
 WORKSPACE_TOOLS = ("workspace_create", "workspace_read", "workspace_search", "workspace_edit", "workspace_diff",
                    "workspace_run", "workspace_manage", "workspace_list", "workspace_status",
                    "publish_plan", "publish_apply", "validation_campaign")

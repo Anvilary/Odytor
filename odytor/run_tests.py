@@ -146,9 +146,9 @@ def submit_test_run(client: GitHubClient, repo: str, number: int, expected_head:
         return public_view(record)
     finally:
         if reserved:
-            service.release()
             if spool is not None:
                 shutil.rmtree(spool, ignore_errors=True)
+            service.release()
 
 
 def workspace_playwright_selectors(policy: RepoPolicy, selectors: Any, test_title: str | None = None):
@@ -161,9 +161,30 @@ def workspace_playwright_selectors(policy: RepoPolicy, selectors: Any, test_titl
                                               allowed_dirs=table.get("spec_dirs", ()), test_dirs=policy.test_dirs)
 
 
+def list_test_runs(client: GitHubClient, repo: str, number: int, expected_head: str, *,
+                   service: JobService, owner: str, limit: int = 10) -> dict[str, Any]:
+    """Recover retained direct run identities without submitting execution."""
+    validate_repo(repo)
+    head = validate_sha(expected_head, "expected_head")
+    _require_pull_access(client, repo)
+    service.start()
+    now = service.clock()
+    matches = [record for record in service.store.records()
+               if record.get("owner") == owner and record.get("repo", "").casefold() == repo.casefold()
+               and record.get("pr") == number and record.get("mode") in MODES
+               and (record.get("requested") or {}).get("head") == head
+               and (record["status"] not in TERMINAL or record.get("expires_at", 0) > now)]
+    matches.sort(key=lambda record: (record["timestamps"]["created_at"], record["run_id"]), reverse=True)
+    runs = [{"run_id": record["run_id"], "status": record["status"], "mode": record["mode"],
+             "profile": record["profile"], "requested_head": head, "requested_base": record["requested"].get("base"),
+             "trees": record["trees"], "selectors": record["selectors"], "created_at": _iso(record["timestamps"]["created_at"]),
+             "overlay_sha256": record["overlay"].get("sha256")} for record in matches[:limit]]
+    return {"runs": runs, "has_more": len(matches) > limit}
+
+
 def submit_workspace_run(repo: str, workspace_id: str, expected_version: int, *, workspaces: Any, service: JobService,
                          policies: dict[str, RepoPolicy], owner: str, cfg: RunSettings, profile: str = PROFILE_NAME,
-                         selectors: Any = None, test_title: str | None = None) -> dict[str, Any]:
+                         selectors: Any = None, test_title: str | None = None, admitted_campaign: bool = False) -> dict[str, Any]:
     """Queue an isolated pytest run on the exact current tree of a workspace.
 
     The tree is exported while the workspace lock is held and the job carries only that tar, so a later edit can
@@ -201,7 +222,7 @@ def submit_workspace_run(repo: str, workspace_id: str, expected_version: int, *,
     current = workspaces.get(workspace_id, owner, operation="execute")
     if current["repo"].casefold() != repo.casefold():
         raise ValidationError("Unknown workspace_id.")
-    service.reserve()
+    service.reserve(admitted_campaign=admitted_campaign)
     run_id = new_run_id()
     reserved = True
     spool: Path | None = None
@@ -242,9 +263,9 @@ def submit_workspace_run(repo: str, workspace_id: str, expected_version: int, *,
         return public_view(record)
     finally:
         if reserved:
-            service.release()
             if spool is not None:
                 shutil.rmtree(spool, ignore_errors=True)
+            service.release()
 
 
 def cancel_test_run(run_id: str, *, service: JobService, owner: str) -> dict[str, Any]:

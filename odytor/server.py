@@ -29,7 +29,7 @@ from odytor.errors import ValidationError
 from odytor.github import GitHubClient, validate_repo
 from odytor.jobs import JobService
 from odytor.profile import PROFILE_NAME, load_policies
-from odytor.run_tests import cancel_test_run, fetch_test_result, submit_test_run, submit_workspace_run
+from odytor.run_tests import cancel_test_run, fetch_test_result, list_test_runs, submit_test_run, submit_workspace_run
 from odytor.artifacts import ArtifactLimits, ArtifactStore
 from odytor.browser import SessionStore, submit_browser_run, wait_for_run
 from odytor.campaign import CampaignRecord, CampaignStore, preflight_campaign, request_digest, run_validation_campaign
@@ -192,8 +192,17 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
     def test_run(repo: str, number: Number, expected_head: SHA, profile: str = PROFILE_NAME,
                  selectors: list[str] | None = None, mode: str = "head", expected_base: SHA | None = None,
                  test_overlay: str | None = None) -> dict[str, Any]:
-        return invoke_runs(repo, submit_test_run, number, expected_head, cfg=runs, policies=current_policies(), profile=profile,
-                           selectors=selectors, mode=mode, expected_base=expected_base, test_overlay=test_overlay)
+        try:
+            return invoke_runs(repo, submit_test_run, number, expected_head, cfg=runs, policies=current_policies(), profile=profile,
+                               selectors=selectors, mode=mode, expected_base=expected_base, test_overlay=test_overlay)
+        except ValidationError as err:
+            return safe_payload(err.to_dict())
+
+    @tool(annotations={"readOnlyHint": True, "openWorldHint": True},
+          description="Recover recent direct test_run IDs you submitted for this exact pull request head, including their mode, base, selectors, overlay digest and status. This lookup submits no work. If a test_run response was lost, use this before deciding whether to retry.")
+    def test_run_list(repo: str, number: Number, expected_head: SHA,
+                      limit: Annotated[int, Field(ge=1, le=25)] = 10) -> dict[str, Any]:
+        return invoke_runs(repo, list_test_runs, number, expected_head, limit=limit)
 
     @tool(annotations={"readOnlyHint": True, "openWorldHint": True},
           description="Retrieve status, live progress, and evidence for a test_run or workspace_run: verified revisions, tested tree, overlay digest, runner image, dependency cache status, live phase, test counts, structured events, per-test outcomes, and bounded logs. Supports bounded server-side waiting (wait_seconds, capped at 60s) to wait for new progress events or completion without client-side busy-looping. Use after_event_id to paginate the replayable event log.")
@@ -453,29 +462,37 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         """The record as the caller sees it: bounded server-side waiting, plus the running child run's identity and progress."""
         owner = owner or record.owner
         deadline = time.monotonic() + max(0.0, min(float(wait_seconds), CAMPAIGN_WAIT_CAP))
-        start_status, start_run, start_steps = record.status, record.current_run_id, len(record.steps)
+
+        def child_progress():
+            if record.current_run_id and service is not None:
+                _, progress = service.get_progress_or_wait(record.current_run_id, owner, 0.0, 0, 1)
+                return progress
+            return None
+
+        prog = child_progress()
+        initial = (record.status, record.current_run_id, len(record.steps), (prog or {}).get("latest_event_id"))
         while record.status in {"running", "canceling"} and time.monotonic() < deadline:
-            time.sleep(0.5)
+            time.sleep(min(0.5, max(0, deadline - time.monotonic())))
             fresh = campaigns.load(record.campaign_id, owner)
             if fresh is None:
                 break
             record = fresh
-            if (record.status, record.current_run_id, len(record.steps)) != (start_status, start_run, start_steps):
+            prog = child_progress()
+            if (record.status, record.current_run_id, len(record.steps), (prog or {}).get("latest_event_id")) != initial:
                 break
         view = record.to_dict()
         view["monitoring"] = {"note": "Waiting or disconnecting never cancels a campaign; only campaign_cancel does.",
                               "max_wait_seconds": CAMPAIGN_WAIT_CAP}
         if record.current_run_id and service is not None:
-            _, prog = service.get_progress_or_wait(record.current_run_id, owner, 0.0, 0, 1)
             if prog is not None:
                 view["child_run"] = {"run_id": record.current_run_id, "phase": prog["phase"], "live_counts": prog["counts"],
                                      "latest_event_id": prog["latest_event_id"], "last_progress_ago_seconds": prog["last_progress_ago_seconds"],
-                                     "next": "test_result(run_id, wait_seconds=30, after_event_id=<latest_event_id>) streams its live events"}
+                                     "next": "Use test_result with this run_id and your last next_cursor. Start with after_event_id=0."}
             else:
                 view["child_run"] = {"run_id": record.current_run_id}
         return view
 
-    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
           description="Start a bounded disposable validation campaign for a pull request and return its campaign_id immediately (add wait=true to wait up to 45 s for a quick result; the campaign never stops because a wait ends or the client disconnects). Pins the PR head/base, creates an isolated disposable workspace without publication authority, optionally applies overlay_patch, runs the requested profiles (default python-pytest; each selector or one playwright-spec selector per run) and an optional headless browser scenario, collects evidence, and releases the workspace when finished (or keeps it for publication when propose_push=true and everything passed; that only prepares a plan). It executes code on the isolated runner and writes local campaign state, so a host may ask you to approve it once; it makes no GitHub write. A campaign in which nothing ran is reported as 'completed', never 'passed'. Poll campaign_status; it names the running child run, whose live events test_result streams. idempotency_key (scoped to you and the repository) replays the same campaign for an identical request and refuses a changed request.")
     def validation_campaign(
         repo: str,
@@ -517,46 +534,63 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                                               {"campaign_id": existing.campaign_id, "classification": "idempotency_key_conflict"})
                     return safe_payload({**campaign_view(existing, wait_seconds=wait_for, owner=owner), "idempotent_replay": True}, limit=262144)
             with github_client(cfg, remote, repo=repo) as client:
+                policies_now = current_policies()
                 pre = preflight_campaign(client, repo, number, expected_head=expected_head, expected_base=expected_base, mode=mode,
-                                         profiles=profiles, policies=current_policies(), propose_push=propose_push,
+                                         profiles=profiles, policies=policies_now, propose_push=propose_push,
                                          commit_message=commit_message, plans=plans, idempotency_key=idempotency_key,
                                          profile_selectors=profile_selectors)
-                now = time.time()
-                fresh = CampaignRecord(campaign_id=f"cmp-{secrets.token_hex(16)}", owner=owner, repo=repo, number=number, mode=mode,
-                                       status="running", created_at=now, updated_at=now, idempotency_key=idempotency_key,
-                                       request_digest=digest, instance=service.instance, requested_head=pre["live_head"],
-                                       requested_base=expected_base if mode == "prospective_merge" else None)
-                record, created = campaigns.claim(fresh)
-                if not created:
-                    return safe_payload({**campaign_view(record, wait_seconds=wait_for, owner=owner), "idempotent_replay": True}, limit=262144)
-                bg_client = GitHubClient(token=getattr(client, "token", cfg.github_token),
-                                         base_url=getattr(client, "base_url", cfg.github_api_url), timeout=cfg.github_timeout,
-                                         restricted_repo=getattr(client, "restricted_repo", None), principal=getattr(client, "principal", None))
-                policies_now = current_policies()
-                cid = record.campaign_id
+                service.begin_campaign()
+                worker_started = False
+                try:
+                    now = time.time()
+                    fresh = CampaignRecord(campaign_id=f"cmp-{secrets.token_hex(16)}", owner=owner, repo=repo, number=number, mode=mode,
+                                           status="running", created_at=now, updated_at=now, idempotency_key=idempotency_key,
+                                           request_digest=digest, instance=service.instance, requested_head=pre["live_head"],
+                                           requested_base=expected_base if mode == "prospective_merge" else None)
+                    record, created = campaigns.claim(fresh)
+                    if not created:
+                        return safe_payload({**campaign_view(record, wait_seconds=wait_for, owner=owner), "idempotent_replay": True}, limit=262144)
+                    bg_client = GitHubClient(token=getattr(client, "token", cfg.github_token),
+                                             base_url=getattr(client, "base_url", cfg.github_api_url), timeout=cfg.github_timeout,
+                                             restricted_repo=getattr(client, "restricted_repo", None), principal=getattr(client, "principal", None))
+                    cid = record.campaign_id
 
-                def _run_bg() -> None:
+                    def _run_bg() -> None:
+                        try:
+                            run_validation_campaign(
+                                bg_client, repo, number, expected_head=expected_head, expected_base=expected_base, mode=mode, profiles=profiles,
+                                profile_selectors=profile_selectors, browser_scenario=browser_scenario, browser_mocks=browser_mocks,
+                                browser_video=browser_video, app_profile=app_profile, overlay_patch=overlay_patch, timeout_seconds=timeout_seconds,
+                                workspaces=workspaces, service=service, sessions=sessions, policies=policies_now, owner=owner, cfg=cfg,
+                                campaign_store=campaigns, campaign_id=cid, idempotency_key=idempotency_key, propose_push=propose_push,
+                                commit_message=commit_message, plans=plans, digest=digest)
+                        except BaseException as exc:
+                            def fail(rec):
+                                if rec.status in {"running", "canceling"}:
+                                    rec.status = "canceled" if rec.cancel_requested else "setup_error"
+                                    rec.failure = {"kind": "setup_error", "message": str(exc)[:300]}
+                                    rec.finished_at = time.time()
+                                    rec.steps.append({"name": "campaign_worker", "status": "failed", "error": str(exc)[:300]})
+                            campaigns.update(cid, owner, fail)
+                        finally:
+                            try:
+                                bg_client.session.close()
+                            finally:
+                                service.end_campaign()
+
                     try:
-                        run_validation_campaign(
-                            bg_client, repo, number, expected_head=expected_head, expected_base=expected_base, mode=mode, profiles=profiles,
-                            profile_selectors=profile_selectors, browser_scenario=browser_scenario, browser_mocks=browser_mocks,
-                            browser_video=browser_video, app_profile=app_profile, overlay_patch=overlay_patch, timeout_seconds=timeout_seconds,
-                            workspaces=workspaces, service=service, sessions=sessions, policies=policies_now, owner=owner, cfg=cfg,
-                            campaign_store=campaigns, campaign_id=cid, idempotency_key=idempotency_key, propose_push=propose_push,
-                            commit_message=commit_message, plans=plans, digest=digest)
-                    except BaseException as exc:
-                        def fail(rec):
-                            if rec.status in {"running", "canceling"}:
-                                rec.status = "canceled" if rec.cancel_requested else "setup_error"
-                                rec.failure = {"kind": "setup_error", "message": str(exc)[:300]}
-                                rec.finished_at = time.time()
-                                rec.steps.append({"name": "campaign_worker", "status": "failed", "error": str(exc)[:300]})
-                        campaigns.update(cid, owner, fail)
-                    finally:
+                        threading.Thread(target=_run_bg, daemon=True, name=f"campaign-{cid}").start()
+                    except RuntimeError as exc:
                         bg_client.session.close()
-
-                threading.Thread(target=_run_bg, daemon=True, name=f"campaign-{cid}").start()
-                return safe_payload(campaign_view(record, wait_seconds=wait_for, owner=owner), limit=262144)
+                        record.status = "setup_error"
+                        record.failure = {"kind": "worker_start", "message": "The campaign worker could not start."}
+                        campaigns.finalize(record)
+                        raise ValidationError(record.failure["message"]) from exc
+                    worker_started = True
+                    return safe_payload(campaign_view(record, wait_seconds=wait_for, owner=owner), limit=262144)
+                finally:
+                    if not worker_started:
+                        service.end_campaign()
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 

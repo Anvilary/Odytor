@@ -164,7 +164,7 @@ def submit_browser_run(repo: str, workspace_id: str, expected_version: int, step
                        service: JobService, policies: dict[str, RepoPolicy], owner: str, cfg: RunSettings,
                        session_id: str | None = None, mocks: Any = None, viewport: Any = None, locale: str | None = None,
                        timezone: str | None = None, color_scheme: str | None = None, trace: bool | None = None,
-                       video: bool | None = None, app_profile: str | None = None) -> dict[str, Any]:
+                       video: bool | None = None, app_profile: str | None = None, admitted_campaign: bool = False) -> dict[str, Any]:
     """Queue a browser run on the exact current tree of a workspace, continuing a session when one is named."""
     from odytor.run_tests import public_view  # local import: run_tests owns the shared result view
 
@@ -225,7 +225,7 @@ def submit_browser_run(repo: str, workspace_id: str, expected_version: int, step
     new_steps = combined["steps"][len(history):]
     if not new_steps:
         raise ValidationError("steps must contain at least one new step.")
-    service.reserve()
+    service.reserve(admitted_campaign=admitted_campaign)
     run_id = new_run_id()
     reserved = True
     spool: Path | None = None
@@ -263,9 +263,9 @@ def submit_browser_run(repo: str, workspace_id: str, expected_version: int, step
         return {**public_view(record), "session": sessions.public(session)}
     finally:
         if reserved:
-            service.release()
             if spool is not None:
                 shutil.rmtree(spool, ignore_errors=True)
+            service.release()
 
 
 def wait_for_run(service: JobService, run_id: str, seconds: float, *, poll: float = 0.4) -> dict[str, Any] | None:

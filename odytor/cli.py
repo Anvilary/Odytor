@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from odytor import __version__
@@ -59,8 +61,16 @@ def main(argv: list[str] | None = None) -> None:
         help="Port for HTTP/SSE transport (default: 8000).",
     )
 
+    parser.add_argument("--drain", choices=["start", "status", "resume"],
+                        help="Control execution admission on this instance's configured persistent data volume.")
     args = parser.parse_args(argv)
     settings = Settings.load()
+    if args.drain:
+        if settings.testing is None:
+            parser.error("--drain requires an isolated runner configuration")
+        from odytor.jobs import execution_drain
+        print(json.dumps(execution_drain(Path(settings.testing.data_dir), args.drain)))
+        return
     if args.transport == "stdio":
         for note in startup_notes(settings):
             print(f"odytor: {note}", file=sys.stderr)

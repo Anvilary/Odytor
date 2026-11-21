@@ -31,6 +31,8 @@ _CACHE_STATUS = {"hit", "miss", "hit_after_wait"}
 _RUNNER_PASSTHROUGH = ("PATH", "HOME", "LANG", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
 MAX_RUNNER_OUTPUT = 4 * 1024 * 1024
 TEST_ENTRY_BUDGET = 30000
+DRAIN_MARKER = "drain.requested"
+ADMISSION_LOCK = "execution-admission.lock"
 
 
 class QueueFullError(GitPlusError):
@@ -39,6 +41,26 @@ class QueueFullError(GitPlusError):
 
 def new_run_id() -> str:
     return "test-" + os.urandom(16).hex()
+
+
+def execution_drain(root: Path, action: str) -> dict[str, bool]:
+    """Operator-side drain control on the same persistent volume as the execution service."""
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    marker = root / DRAIN_MARKER
+    if action == "start":
+        marker.touch(mode=0o600, exist_ok=True)
+    elif action == "resume":
+        marker.unlink(missing_ok=True)
+    fd = os.open(root / ADMISSION_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {"draining": marker.exists(), "quiescent": False}
+        draining = marker.exists()
+        return {"draining": draining, "quiescent": draining}
+    finally:
+        os.close(fd)
 
 
 def _num(value: Any, high: float = 1e12) -> float:
@@ -886,7 +908,7 @@ class JobService:
                  artifacts: Any | None = None) -> None:
         self.cfg = cfg
         self.artifacts = artifacts  # an ArtifactStore, or None when artifacts are not configured
-        self.runner = runner or make_subprocess_runner(cfg.runner_command)
+        self.runner = runner or make_subprocess_runner(cfg.runner_command, cancel_grace=40.0)
         self.clock = clock
         self.root = Path(cfg.data_dir)
         self.store = RunStore(self.root / "results")
@@ -896,6 +918,8 @@ class JobService:
         self._cv = threading.Condition()
         self._queue: collections.deque[QueuedJob] = collections.deque()
         self._reserved = 0
+        self._campaigns = 0
+        self._admission_fd: int | None = None
         self._cancels: dict[str, threading.Event] = {}
         self._thread: threading.Thread | None = None
         self._stop = False
@@ -965,43 +989,79 @@ class JobService:
             self._stop = True
             for event in self._cancels.values():
                 event.set()
-            queued = list(self._queue)
-            self._queue.clear()
+            while self._queue:
+                job = self._queue.popleft()
+                shutil.rmtree(job.spool, ignore_errors=True)
+                record = self.store.load(job.run_id)
+                if record and record["status"] == "queued":
+                    self._finish(record, {"status": "canceled", "failure": {"kind": "shutdown", "message": "Service shut down."}})
+            self._release_idle_admission()
             self._cv.notify_all()
-        for job in queued:
-            record = self.store.load(job.run_id)
-            if record and record["status"] == "queued":
-                self._finish(record, {"status": "canceled", "failure": {"kind": "shutdown", "message": "Service shut down."}})
-            shutil.rmtree(job.spool, ignore_errors=True)
         if self._thread:
             self._thread.join(wait)
-        if self._instance_fd is not None:
+
+    # --- admission -------------------------------------------------------------------------
+    def _admit(self, *, admitted_campaign: bool = False) -> None:
+        if self._stop:
+            raise QueueFullError("The test service is shutting down.")
+        if self._admission_fd is None:
+            fd = os.open(self.root / ADMISSION_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH)
+            except BaseException:
+                os.close(fd)
+                raise
+            self._admission_fd = fd
+        if (self._draining or (self.root / DRAIN_MARKER).exists()) and not (admitted_campaign and self._campaigns):
+            self._release_idle_admission()
+            raise QueueFullError("The test service is draining and is not accepting new execution.")
+
+    def _release_idle_admission(self) -> None:
+        if self._reserved or self._campaigns or self._queue or self._cancels:
+            return
+        if self._stop and self._instance_fd is not None:
             self._lock_path(self.instance).unlink(missing_ok=True)
             shutil.rmtree(self.spool_root / self.instance, ignore_errors=True)
             os.close(self._instance_fd)
             self._instance_fd = None
+        if self._admission_fd is not None:
+            os.close(self._admission_fd)
+            self._admission_fd = None
+        self._cv.notify_all()
 
-    # --- admission -------------------------------------------------------------------------
-    def reserve(self) -> None:
+    def begin_campaign(self) -> None:
+        self.start()
+        with self._cv:
+            self._admit()
+            self._campaigns += 1
+
+    def end_campaign(self) -> None:
+        with self._cv:
+            self._campaigns -= 1
+            self._release_idle_admission()
+
+    def reserve(self, *, admitted_campaign: bool = False) -> None:
         self.start()
         self.purge()
         with self._cv:
-            if self._stop or self._draining:
-                raise QueueFullError("The test service is draining or shutting down.")
             if len(self._queue) + self._reserved >= self.cfg.max_queued:
                 raise QueueFullError("The test queue is full; retry later.", {"max_queued": self.cfg.max_queued})
             free = shutil.disk_usage(self.root).free
             if free < self.cfg.min_free_bytes + self.cfg.max_source_bytes:
                 raise QueueFullError("Insufficient disk space to stage a test run.", {"free_bytes": free})
+            self._admit(admitted_campaign=admitted_campaign)
             self._reserved += 1
 
     def release(self) -> None:
         with self._cv:
             self._reserved = max(self._reserved - 1, 0)
+            self._release_idle_admission()
 
     def enqueue(self, record: dict[str, Any], job: QueuedJob) -> None:
         """Convert a held reservation into a queued job."""
         with self._cv:
+            if self._stop:
+                raise QueueFullError("The test service is shutting down.")
             record["instance"] = self.instance
             tracker = RunTracker(record["run_id"])
             self._trackers[record["run_id"]] = tracker
@@ -1032,6 +1092,7 @@ class JobService:
                     record = self.store.load(run_id)
                     if record:
                         self._finish(record, {"status": "canceled", "failure": {"kind": "canceled", "message": "Canceled before execution."}})
+                    self._release_idle_admission()
                     return "canceled"
             event = self._cancels.get(run_id)
             if event:
@@ -1070,18 +1131,23 @@ class JobService:
                 job = self._queue.popleft()
                 cancel = self._cancels[job.run_id] = threading.Event()
             try:
-                self._run_one(job, cancel)
+                outcome = self._run_one(job, cancel)
             except BaseException as exc:  # a crashing run must never kill the worker
-                record = self.store.load(job.run_id)
-                if record and record["status"] not in TERMINAL:
-                    self._finish(record, {"status": "setup_error", "failure": {
-                        "kind": "worker_crash", "message": f"Internal worker failure: {type(exc).__name__}"}})
+                outcome = {"status": "setup_error", "failure": {
+                    "kind": "worker_crash", "message": f"Internal worker failure: {type(exc).__name__}"}}
             finally:
                 shutil.rmtree(job.spool, ignore_errors=True)
                 with self._cv:
                     self._cancels.pop(job.run_id, None)
+                    record = self.store.load(job.run_id)
+                    if outcome is not None and record and record["status"] not in TERMINAL:
+                        if cancel.is_set():
+                            outcome = {"status": "canceled", "failure": {"kind": "canceled", "message": "Canceled while running."}}
+                        self._finish(record, outcome)
+                    self._release_idle_admission()
+                    self._cv.notify_all()
 
-    def _run_one(self, job: QueuedJob, cancel: threading.Event) -> None:
+    def _run_one(self, job: QueuedJob, cancel: threading.Event) -> dict[str, Any] | None:
         record = self.store.load(job.run_id)
         if not record or record["status"] != "queued":
             return
@@ -1093,11 +1159,10 @@ class JobService:
             tracker.set_phase("running")
         payload = self.runner(job, cancel)
         if payload.get("canceled") or cancel.is_set():
-            outcome = {"status": "canceled", "failure": {"kind": "canceled", "message": "Canceled while running."}}
-        else:
-            outcome = classify_job(record, payload)
-            outcome["artifacts"] = self._intake_artifacts(record, payload)
-        self._finish(self.store.load(job.run_id) or record, outcome)
+            return {"status": "canceled", "failure": {"kind": "canceled", "message": "Canceled while running."}}
+        outcome = classify_job(record, payload)
+        outcome["artifacts"] = self._intake_artifacts(record, payload)
+        return outcome
 
     def get_progress_or_wait(self, run_id: str, owner: str, wait_seconds: float = 0.0, after_event_id: int = 0,
                              max_events: int = 50) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -1136,17 +1201,13 @@ class JobService:
         """Stop accepting new work, allow active runs to finish, return True if all finished."""
         with self._cv:
             self._draining = True
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            with self._cv:
-                if not self._cancels and not self._queue:
-                    return True
-            time.sleep(0.5)
-        return False
+            return self._cv.wait_for(lambda: self._admission_fd is None, timeout=timeout)
 
     def queue_depth(self) -> dict[str, int]:
         with self._cv:
-            return {"queued": len(self._queue), "running": len(self._cancels), "max_queued": self.cfg.max_queued}
+            return {"queued": len(self._queue), "running": len(self._cancels), "reserved": self._reserved,
+                    "campaigns": self._campaigns, "max_queued": self.cfg.max_queued,
+                    "draining": self._draining or (self.root / DRAIN_MARKER).exists()}
 
     # --- discovery -------------------------------------------------------------------------
     def probe_runner(self, *, max_age: float = 60.0, timeout: float = 45.0) -> dict[str, Any]:

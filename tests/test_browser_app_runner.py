@@ -169,7 +169,7 @@ def test_submit_browser_run_attaches_requirements_for_command_profiles(tmp_path,
 
     enqueued_job = None
     class FakeService:
-        def reserve(self): pass
+        def reserve(self, **kwargs): pass
         def release(self): pass
         def spool_dir(self, run_id):
             p = tmp_path / "spool" / run_id

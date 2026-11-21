@@ -311,3 +311,52 @@ def test_transport_cancellation_kills_the_runner(tmp_path):
     started = time.time()
     result = make_subprocess_runner(('sleep', '60'))(QueuedJob(new_run_id(), spool, {}, 60), cancel)
     assert result == {'canceled': True} and time.time() - started < 10
+
+
+def test_operator_drain_blocks_new_work_and_waits_for_reservations_and_campaigns(tmp_path):
+    from odytor.jobs import execution_drain
+
+    cfg = settings(tmp_path)
+    primary = JobService(cfg, runner=lambda job, cancel: payload())
+    sibling = JobService(cfg, runner=lambda job, cancel: payload())
+    primary.reserve()
+    primary.begin_campaign()
+    try:
+        assert execution_drain(primary.root, 'start') == {'draining': True, 'quiescent': False}
+        with pytest.raises(QueueFullError, match='draining'):
+            sibling.reserve()
+        with pytest.raises(QueueFullError, match='draining'):
+            sibling.begin_campaign()
+        primary.release()
+        assert execution_drain(primary.root, 'status')['quiescent'] is False
+        primary.reserve(admitted_campaign=True)
+        primary.release()
+        primary.end_campaign()
+        assert execution_drain(primary.root, 'status') == {'draining': True, 'quiescent': True}
+        assert execution_drain(primary.root, 'resume')['draining'] is False
+        sibling.reserve()
+        sibling.release()
+    finally:
+        primary.shutdown()
+        sibling.shutdown()
+
+
+def test_short_shutdown_retains_live_worker_ownership(tmp_path):
+    cfg = settings(tmp_path)
+    gate = threading.Event()
+    primary = JobService(cfg, runner=lambda job, cancel: (gate.wait(5), {'canceled': True})[1])
+    sibling = JobService(cfg, runner=lambda job, cancel: payload())
+    try:
+        rid, spool = _running_record(primary, gate)
+        wait_for(primary, rid, {'running'})
+        primary.shutdown(wait=0)
+        sibling.start()
+        assert sibling.store.load(rid)['status'] == 'running' and spool.is_dir()
+        gate.set()
+        assert wait_for(sibling, rid, {'canceled'})['result']['failure']['kind'] == 'canceled'
+        primary.shutdown()
+        assert not spool.exists() and primary._lock_path(primary.instance).exists() is False
+    finally:
+        gate.set()
+        primary.shutdown()
+        sibling.shutdown()

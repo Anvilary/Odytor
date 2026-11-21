@@ -118,7 +118,7 @@ def test_restart_reconciles_unfinished_campaigns_and_same_key_retry_is_not_stuck
     out = store.maintain(service=svc, workspaces=ws, force=True)
     assert out["reconciled"] == 1
     done = store.find_by_idempotency_key(OWNER, "owner/repo", "k1")
-    assert done.status == "failed" and done.failure["kind"] == "service_restarted" and done.workspace_cleaned
+    assert done.status == "setup_error" and done.failure["kind"] == "service_restarted" and done.workspace_cleaned
     assert ws.peek(handle["workspace_id"], OWNER) is None
     assert "new idempotency_key" in done.failure["message"]
     # a live sibling's campaign is never touched
@@ -171,9 +171,10 @@ def test_campaign_deadline_cancels_the_child_run_it_owns(test_env, monkeypatch):
     svc, canceled = _service(test_env), []
     monkeypatch.setattr("odytor.campaign.cancel_test_run", lambda run_id, **kw: canceled.append(run_id))
     monkeypatch.setattr("odytor.campaign.submit_workspace_run", lambda *a, **k: {"run_id": "test-" + "4" * 32})
-    monkeypatch.setattr("odytor.campaign.wait_for_run", lambda s, r, t: None)
+    outcomes = iter([None, {"status": "canceled"}])
+    monkeypatch.setattr("odytor.campaign.wait_for_run", lambda s, r, t: next(outcomes))
     result = _run(test_env, svc)
-    assert canceled == ["test-" + "4" * 32] and result["status"] == "failed" and result["results"]["python-pytest"]["status"] == "timeout"
+    assert canceled == ["test-" + "4" * 32] and result["status"] == "timeout" and result["results"]["python-pytest"]["status"] == "timeout"
     assert result["workspace_cleaned"] is True
 
 

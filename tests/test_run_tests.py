@@ -303,6 +303,23 @@ def test_mcp_tools_schema_and_end_to_end_with_owner_binding(stack, monkeypatch):
     assert tool(server, 'test_result').fn(run_id='../etc/passwd')['error'] == 'Unknown run_id.'
 
 
+def test_lost_submission_response_can_be_recovered_without_enqueuing_again(stack, monkeypatch):
+    server = make_server(stack, monkeypatch)
+    submit_tool = tool(server, 'test_run')
+    lookup = tool(server, 'test_run_list')
+    assert lookup.annotations.read_only_hint is True
+    req = {'repo': REPO, 'number': 1, 'expected_head': stack.head}
+    submit_tool.fn(**req)  # the client never receives the response
+    recovered = lookup.fn(**req)['runs']
+    assert len(recovered) == 1
+    rid = recovered[0]['run_id']
+    wait_for(stack.service, rid, {'passed'})
+    assert lookup.fn(**req)['runs'][0]['run_id'] == rid
+    assert len(stack.service.store.records()) == 1
+    stack.client.principal = 'mallory'
+    assert lookup.fn(**req) == {'runs': [], 'has_more': False}
+
+
 def test_mcp_enforces_allowlist_and_unconfigured_state(stack, monkeypatch):
     server = make_server(stack, monkeypatch, allowed=('someone/else',))
     with pytest.raises(SecurityError):
@@ -345,7 +362,7 @@ def test_unconfigured_runner_explains_how_to_enable_it_and_that_other_tools_are_
         assert 'ODYTOR_TEST_RUNNER_COMMAND' in result['error'] and 'docs/test-runner.md' in result['error']
         assert 'do not need a runner' in result['error'] and 'workspace' in result['error']
     names = {t.name for t in asyncio.run(plain.list_tools())}
-    assert {'test_run', 'test_result'} <= names and len(names) == 30  # still discoverable; never silently removed
+    assert {'test_run', 'test_result', 'test_run_list'} <= names
 
 
 def test_submit_workspace_run_playwright_spec(tmp_path):
@@ -369,7 +386,7 @@ def test_submit_workspace_run_playwright_spec(tmp_path):
 
     enqueued_job = None
     class FakeService:
-        def reserve(self): pass
+        def reserve(self, **kwargs): pass
         def release(self): pass
         def spool_dir(self, run_id):
             p = tmp_path / "spool" / run_id

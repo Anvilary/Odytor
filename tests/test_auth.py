@@ -113,7 +113,7 @@ def test_authenticated_streamable_http_tool_discovery():
         response = client.post('/mcp', headers=headers, json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'})
         assert response.status_code == 200
         tools = response.json()['result']['tools']
-        assert {t['name'] for t in tools} == {'pr_evidence', 'ci_diagnose', 'quick_fix', 'pr_conflicts', 'pr_rebase', 'pr_rebase_preview', 'ci_control', 'test_run', 'test_result',
+        assert {t['name'] for t in tools} == {'pr_evidence', 'ci_diagnose', 'quick_fix', 'pr_conflicts', 'pr_rebase', 'pr_rebase_preview', 'ci_control', 'test_run', 'test_result', 'test_run_list',
         'odytor_capabilities', 'browser_run', 'browser_close', 'artifact_get', 'publish_plan', 'publish_apply', 'workspace_create', 'workspace_read', 'workspace_search', 'workspace_edit', 'workspace_diff', 'workspace_run', 'workspace_manage', 'workspace_list', 'workspace_status', 'test_cancel', 'validation_campaign',
         'campaign_status', 'campaign_cancel', 'pr_body_plan', 'pr_body_apply'}
         rejected = client.post('/mcp', headers={**headers, 'Authorization': 'Bearer wrong'},

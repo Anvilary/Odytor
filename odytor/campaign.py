@@ -109,6 +109,18 @@ _PERSISTED = (
 
 def request_digest(**request: Any) -> str:
     """Canonical digest of the effective request; the idempotency key is bound to it."""
+    if request.get("profiles") is None:
+        request["profiles"] = [PROFILE_NAME]
+    profiles = request["profiles"]
+    request["profile_selectors"] = {profile: selectors for profile, selectors in (request.get("profile_selectors") or {}).items()
+                                    if profile in profiles and selectors}
+    for field in ("expected_head", "expected_base"):
+        if request.get(field):
+            request[field] = request[field].lower()
+    if request.get("mode") == "pr_head":
+        request["expected_base"] = None
+    if not request.get("propose_push"):
+        request["commit_message"] = None
     canonical = json.dumps(request, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -334,10 +346,13 @@ class CampaignStore:
                         except Exception:
                             pass
                     was_cancel = record.cancel_requested
-                    self._close_out(record, workspaces, "canceled" if was_cancel else "failed",
+                    if record.current_run_id:
+                        record.steps.append({"name": "child_reconciliation", "status": "service_restarted",
+                                             "run_id": record.current_run_id})
+                    self._close_out(record, workspaces, "canceled" if was_cancel else "setup_error",
                                     {"kind": "canceled" if was_cancel else "service_restarted",
                                      "message": "Campaign canceled by caller." if was_cancel else
-                                     "Odytor restarted or the campaign worker stopped before this campaign finished; nothing is still running for it. "
+                                     "Odytor restarted before this campaign finished. The runner reclaims disconnected execution. "
                                      "Use a new idempotency_key to run it again."})
                     record.updated_at = now
                     self._write(record)
@@ -441,6 +456,13 @@ def _cancel_child(service: JobService, run_id: str | None, owner: str) -> None:
             logger.warning("Failed to cancel child run %s: %s", run_id, exc)
 
 
+def _await_child_stop(service: JobService, run_id: str, owner: str) -> None:
+    _cancel_child(service, run_id, owner)
+    # Keep the workspace and child identity until the execution worker reports that it released the slot.
+    while wait_for_run(service, run_id, 30) is None:
+        logger.warning("Still waiting for child run %s to release its slot after cancellation", run_id)
+
+
 def run_validation_campaign(
     client: GitHubClient,
     repo: str,
@@ -507,7 +529,7 @@ def run_validation_campaign(
     b_session_id = None
     all_passed = True
     executed = 0
-    deadline = now + timeout_seconds
+    deadline = time.monotonic() + timeout_seconds
     stopped = False
 
     try:
@@ -547,27 +569,27 @@ def run_validation_campaign(
         for prof in requested_profiles:
             if canceled():
                 raise CampaignStopped("canceled")
-            if time.time() > deadline:
+            if time.monotonic() >= deadline:
                 raise TimeoutError("Validation campaign exceeded total execution timeout.")
             step_t0 = time.monotonic()
             selectors = (profile_selectors or {}).get(prof)
-            remaining_time = max(deadline - time.time(), 10)
             sub = submit_workspace_run(repo, ws_id, expected_version, workspaces=workspaces, service=service, policies=policies, owner=owner,
-                                       cfg=cfg.testing, profile=prof, selectors=selectors)
+                                       cfg=cfg.testing, profile=prof, selectors=selectors, admitted_campaign=True)
             run_id = sub["run_id"]
             record.current_run_id = run_id
             persist()  # the child run id is durable before waiting, so it can be monitored and canceled
             if canceled():
-                _cancel_child(service, run_id, owner)
+                _await_child_stop(service, run_id, owner)
                 raise CampaignStopped("canceled")
-            final = wait_for_run(service, run_id, remaining_time)
+            final = wait_for_run(service, run_id, deadline - time.monotonic())
             dur = round(time.monotonic() - step_t0, 3)
             if final is None:
-                _cancel_child(service, run_id, owner)  # the campaign owns this run: do not leave it holding the runner slot
+                _await_child_stop(service, run_id, owner)
                 record.steps.append({"name": f"profile:{prof}", "status": "timeout", "duration_seconds": dur, "run_id": run_id})
                 record.results[prof] = {"status": "timeout", "run_id": run_id}
-                all_passed = False
-                break
+                raise TimeoutError("Validation campaign exceeded total execution timeout.")
+            if canceled():
+                raise CampaignStopped("canceled")
             executed += 1
             status = final.get("status", "unknown")
             res = final.get("result") or {}
@@ -588,28 +610,29 @@ def run_validation_campaign(
         if browser_scenario and all_passed:
             if canceled():
                 raise CampaignStopped("canceled")
-            if time.time() > deadline:
+            if time.monotonic() >= deadline:
                 raise TimeoutError("Validation campaign exceeded total execution timeout before browser run.")
             step_t0 = time.monotonic()
-            remaining_time = max(deadline - time.time(), 15)
             sub_b = submit_browser_run(repo, ws_id, expected_version, browser_scenario, workspaces=workspaces, sessions=sessions,
                                        service=service, policies=policies, owner=owner, cfg=cfg.testing, mocks=browser_mocks,
-                                       video=browser_video, app_profile=app_profile)
+                                       video=browser_video, app_profile=app_profile, admitted_campaign=True)
             b_run_id = sub_b["run_id"]
             b_session_id = (sub_b.get("session") or {}).get("session_id")
             record.current_run_id = b_run_id
             persist()
             if canceled():
-                _cancel_child(service, b_run_id, owner)
+                _await_child_stop(service, b_run_id, owner)
                 raise CampaignStopped("canceled")
-            final_b = wait_for_run(service, b_run_id, remaining_time)
+            final_b = wait_for_run(service, b_run_id, deadline - time.monotonic())
             dur = round(time.monotonic() - step_t0, 3)
             if final_b is None:
-                _cancel_child(service, b_run_id, owner)
+                _await_child_stop(service, b_run_id, owner)
                 record.steps.append({"name": "browser-playwright", "status": "timeout", "duration_seconds": dur, "run_id": b_run_id})
                 record.browser = {"status": "timeout", "run_id": b_run_id}
-                all_passed = False
+                raise TimeoutError("Validation campaign exceeded total execution timeout during its browser run.")
             else:
+                if canceled():
+                    raise CampaignStopped("canceled")
                 executed += 1
                 b_status = final_b.get("status", "unknown")
                 res_b = final_b.get("result") or {}
@@ -662,7 +685,7 @@ def run_validation_campaign(
             except Exception:
                 pass
         # Cleanup runs under every outcome; the plan keeps its workspace only when the campaign succeeded and a plan exists.
-        keep = record.push_plan is not None and all_passed and not record.cancel_requested
+        keep = record.push_plan is not None and all_passed and not canceled()
         if ws_id:
             if keep:
                 record.workspace_cleaned = False
@@ -678,6 +701,8 @@ def run_validation_campaign(
                 except Exception as exc:
                     logger.error("Failed to dispose workspace %s: %s", ws_id, exc)
                     record.steps.append({"name": "workspace_cleanup", "status": "failed", "error": str(exc)})
+        if canceled() and record.current_run_id:
+            record.steps.append({"name": "child_cancellation", "status": "canceled", "run_id": record.current_run_id})
         record.current_run_id = None
         record.validation_executed = executed > 0
         if record.status in ACTIVE:

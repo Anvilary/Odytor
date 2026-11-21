@@ -228,3 +228,12 @@ Retrieves execution evidence, individual test outcomes, logs, and cache performa
 - Verifies continued repository read permissions through the GitHub API before returning data.
 - Returns status (`passed`, `failed`, `setup_error`, `timeout`, `canceled`, `no_tests_executed`).
 - Includes overlay digest, tested tree SHA, execution duration, and currency check (`currency.tested_head_is_current_pr_head`).
+- Use `wait_seconds` and pass each returned `next_cursor` as `after_event_id` to page live progress. Polling and disconnecting leave the job running. `structured_outcomes_complete` describes the test report, and `log_complete` describes the log window. A bounded retained `run.log` may be available through `artifact_get`.
+
+### `test_run_list`
+
+Recover a lost direct submission response with `test_run_list(repo, number, expected_head)`. Results are newest first and show only your runs on that exact head. Match the mode, base, selectors, overlay digest and creation time, then use `test_result` with the recovered ID. The lookup starts no execution.
+
+### `validation_campaign`
+
+Submit with `wait=false` (the default), keep the `campaign_id`, and monitor via `campaign_status`. While a child runs, use its `run_id` with `test_result` and start at cursor zero. Choose one explicit selector for `playwright-spec` when policy lists more than one spec. A campaign with no validation plans completes with `green=false`. An optional idempotency key binds the effective request to one campaign for its retention period.
