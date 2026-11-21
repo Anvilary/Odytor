@@ -575,7 +575,7 @@ def _run_playwright_spec(spec):
             argv.append(spec_path)
         title = sel.get("test_title")
         if title:
-            argv += ["-g", f"^{re.escape(title)}$"]
+            argv += ["-g", title]
     argv.append("--reporter=json")
 
     log, started = _Log(), time.monotonic()
