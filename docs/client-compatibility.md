@@ -42,6 +42,14 @@ Four layers can cause a prompt; Odytor controls only the first.
 * **External writes stay separate.** `publish` is not in the default scope, and `publish_apply` needs
   `user_authorized=true` plus a plan-bound confirmation. No amount of scratch-work consent grants a GitHub write.
 
+When the host supports per-tool allowlists, allow the connector's exact names for `workspace_create`,
+`workspace_edit`, `workspace_run`, `test_run`, `browser_run`, and `validation_campaign` if you want routine
+disposable preparation to proceed without repeated prompts. `publish_plan` and `pr_body_plan` also prepare
+local plans without writing to GitHub. Keep `publish_apply`, `pr_body_apply`, `quick_fix`, `pr_rebase`, and
+`ci_control` outside that allowlist so the host prompts for the exact consequential call. Hosts that require
+approval for every state-changing tool can use a single `validation_campaign` submission followed by read-only
+`campaign_status`, `test_result`, and `artifact_get` calls.
+
 No approval service was built: the client behavior in layers 2 and 3 is what actually produces the prompts, and a
 server-side service cannot change it.
 

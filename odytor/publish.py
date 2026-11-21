@@ -35,6 +35,7 @@ from odytor.diagnostics import safe_text
 from odytor.errors import APIError, GitOperationError, GitPlusError, RevisionMismatchError, SecurityError, ValidationError
 from odytor.git_workspace import pr_context
 from odytor.github import validate_repo, validate_sha
+from odytor.jobs import TERMINAL
 from odytor.quick_fix import PatchSummary, _CREATE_COMMIT, _commit_identity, _validate_path
 from odytor.workspace import WorkspaceRepo, WorkspaceService
 
@@ -183,11 +184,12 @@ def _changed_files(repository: WorkspaceRepo, base: str, tree: str) -> list[dict
     return files
 
 
-def _policy_violations(paths: list[str], repo: str | None = None) -> list[dict[str, str]]:
+def _policy_violations(paths: list[str], repo: str | None = None,
+                       path_exemptions: tuple[str, ...] | None = None) -> list[dict[str, str]]:
     found = []
     for path in paths:
         try:
-            _validate_path(path, repo=repo)
+            _validate_path(path, repo=repo, path_exemptions=path_exemptions)
         except GitPlusError as exc:
             found.append({"path": path, "reason": exc.message})
     return found
@@ -206,14 +208,16 @@ def _validation_evidence(jobs: Any | None, workspace: dict[str, Any], tree: str)
                             "workspace_version": (record.get("revisions") or {}).get("workspace_version")})
         else:
             other += 1
+    finished = [r for r in on_tree if r["status"] in TERMINAL and r["status"] != "completed"]
     return {"runs_on_this_tree": on_tree, "runs_on_other_trees": other,
             "any_green_on_this_tree": any(r["green"] for r in on_tree),
-            "all_finished_runs_green": bool(on_tree) and all(r["green"] for r in on_tree if r["status"] in {"passed", "failed", "setup_error", "timeout"}),
-            "runs_not_green": sum(1 for r in on_tree if r["status"] in {"failed", "setup_error", "timeout", "no_tests_collected", "no_tests_executed"})}
+            "all_finished_runs_green": bool(finished) and all(r["green"] for r in finished),
+            "runs_not_green": sum(not r["green"] for r in finished)}
 
 
 def plan_publication(client: Any, repo: str, workspace_id: str, expected_version: int, commit_message: str, *, workspaces: WorkspaceService,
-                     plans: PlanStore, jobs: Any | None, owner: str, max_files: int, max_changed_lines: int, max_patch_bytes: int) -> dict[str, Any]:
+                     plans: PlanStore, jobs: Any | None, owner: str, max_files: int, max_changed_lines: int, max_patch_bytes: int,
+                     path_exemptions: tuple[str, ...] | None = None) -> dict[str, Any]:
     """Prepare (never perform) a publication. Read-only: nothing is written anywhere."""
     validate_repo(repo)
     record = workspaces.get(workspace_id, owner, operation="publish")
@@ -239,7 +243,7 @@ def plan_publication(client: Any, repo: str, workspace_id: str, expected_version
     lines = sum(f["added"] + f["removed"] for f in files)
     if lines > max_changed_lines:
         raise ValidationError(f"The change touches {lines} lines; the publication limit is {max_changed_lines}.", {"stage": "limits"})
-    violations = _policy_violations([f["path"] for f in files], repo=repo)
+    violations = _policy_violations([f["path"] for f in files], repo=repo, path_exemptions=path_exemptions)
     if violations:
         raise SecurityError("Some changed paths are not publishable under the repository write policy.", {"stage": "path_policy", "violations": violations[:20]})
     patch = workspaces.canonical_patch(workspace_id, base_tree, tree)
@@ -339,7 +343,8 @@ def _reconcile(repository: WorkspaceRepo, plan: dict[str, Any]) -> dict[str, Any
 
 
 def apply_publication(client: Any, repo: str, plan_id: str, confirm: str, user_authorized: bool, *, workspaces: WorkspaceService,
-                      plans: PlanStore, jobs: Any | None, owner: str, approval_token: str | None = None) -> dict[str, Any]:
+                      plans: PlanStore, jobs: Any | None, owner: str, approval_token: str | None = None,
+                      path_exemptions: tuple[str, ...] | None = None) -> dict[str, Any]:
     """The only GitHub write in this module. Every precondition is re-checked against live state, not against the plan alone."""
     validate_repo(repo)
     plan = plans.get(plan_id, owner)
@@ -377,7 +382,7 @@ def apply_publication(client: Any, repo: str, plan_id: str, confirm: str, user_a
     files = _changed_files(repository, plan["base_tree"], plan["tree"])
     if files != plan["files"]:
         raise SecurityError("The changed-file list no longer matches the plan; refusing to publish.")
-    if _policy_violations([f["path"] for f in files], repo=repo):
+    if _policy_violations([f["path"] for f in files], repo=repo, path_exemptions=path_exemptions):
         raise SecurityError("The planned paths are no longer publishable under the repository write policy.")
     target = plan["target"]
     if plan["state"] == "unknown_outcome":

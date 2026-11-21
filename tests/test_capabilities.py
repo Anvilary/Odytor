@@ -1,6 +1,8 @@
 """Runtime capability discovery: honest states, no secrets, and a catalogue that matches what is registered."""
 import asyncio
 import json
+import os
+from pathlib import Path
 import sys
 import textwrap
 
@@ -114,3 +116,42 @@ def test_probe_requires_an_authorized_policy_for_available(tmp_path):
     run = report['capabilities'][0]
     assert run['available'] is True and run['operational'] is True and run['authorized'] is True
     assert report['limits']['runner'] == {'cpus': 2.0}
+
+
+def test_policy_reload_is_atomic_and_revokes_publication_exceptions(tmp_path, monkeypatch):
+    from odytor.quick_fix import _validate_path
+
+    cfg = settings(tmp_path, runner=['true'])
+    server = create_server(cfg)
+    policy = Path(cfg.testing.policies_path)
+    requirements = tmp_path / 'req.txt'
+    requirements.write_text('pytest==8.3.5\n')
+    base = '[repos."owner/repo"]\nrequirements = "req.txt"\n'
+    publish = '[repos."owner/repo".publish]\nexempt_paths = ["src/auth_client.py"]\n'
+    policy.write_text(base + publish)
+    original_mtime = policy.stat().st_mtime_ns
+    args = {'repo': 'owner/repo', 'number': 1, 'expected_head': 'a' * 40, 'patch': 'unused', 'commit_message': 'unused'}
+
+    def observe(client, repo, *args, path_exemptions, **kwargs):
+        _validate_path('src/auth_client.py', repo=repo, path_exemptions=path_exemptions)
+        return {'accepted': True}
+
+    monkeypatch.setattr('odytor.server.apply_quick_fix', observe)
+
+    def call(tool, payload):
+        return asyncio.run(server.call_tool(tool, payload)).structured_content
+
+    assert call('quick_fix', args)['accepted'] is True
+    assert call('odytor_capabilities', {'repo': 'owner/repo'})['caller']['test_policy_present'] is True
+    policy.write_text(base + publish + '[repos."other/invalid"]\nrequirements = "missing.txt"\n')
+    refused = call('quick_fix', args)
+    assert refused['diagnostic']['classification'] == 'invalid_policy'
+    assert 'other/invalid' in refused['error'] and 'approved requirements' in refused['error']
+    report = call('odytor_capabilities', {'repo': 'owner/repo'})
+    assert report['policy_reload']['state'] == 'invalid' and report['caller']['test_policy_present'] is False
+    policy.write_text(base)
+    os.utime(policy, ns=(original_mtime, original_mtime))
+    assert 'sensitive keyword' in call('quick_fix', args)['error']
+    assert call('odytor_capabilities', {'repo': 'owner/repo'})['policy_reload']['state'] == 'loaded'
+    requirements.write_text('invalid\n')
+    assert call('test_run', {k: args[k] for k in ('repo', 'number', 'expected_head')})['diagnostic']['classification'] == 'invalid_policy'

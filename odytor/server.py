@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import json
-import os
 import secrets
 import threading
 import time
+import tomllib
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from fastmcp import FastMCP
@@ -28,7 +28,7 @@ from odytor.quick_fix import apply_quick_fix
 from odytor.errors import ValidationError
 from odytor.github import GitHubClient, validate_repo
 from odytor.jobs import JobService
-from odytor.profile import PROFILE_NAME, load_policies
+from odytor.profile import PROFILE_NAME, ProfileError, load_policies
 from odytor.run_tests import cancel_test_run, fetch_test_result, list_test_runs, submit_test_run, submit_workspace_run
 from odytor.artifacts import ArtifactLimits, ArtifactStore
 from odytor.browser import SessionStore, submit_browser_run, wait_for_run
@@ -111,9 +111,11 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
     @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
               description="Apply an exact bounded unified diff as one additive commit to an open PR, including contributor-fork PRs when GitHub grants the caller maintainer push access. Requires current head SHA. Existing regular files only. Validates patch and file modes; does not run tests. No force push.")
     def quick_fix(repo: str, number: Number, expected_head: SHA, patch: str, commit_message: str) -> dict[str, Any]:
-        return invoke(repo, apply_quick_fix, number, expected_head, patch, commit_message,
-                      max_files=cfg.quick_fix_max_files, max_changed_lines=cfg.quick_fix_max_changed_lines,
-                      max_bytes=cfg.quick_fix_max_patch_bytes)
+        def apply(client, target):
+            return apply_quick_fix(client, target, number, expected_head, patch, commit_message,
+                                   max_files=cfg.quick_fix_max_files, max_changed_lines=cfg.quick_fix_max_changed_lines,
+                                   max_bytes=cfg.quick_fix_max_patch_bytes, path_exemptions=publication_exemptions(target))
+        return invoke(repo, apply)
 
     @tool(annotations={"readOnlyHint": True, "openWorldHint": True},
               description="Inspect an exact head/base merge using isolated Git. Returns conflicting paths, stages and text regions with completeness metadata. Executes no repository code. By default the merge uses the base SHA the PR API reports (merge_scope=captured_pr_base_sha), which can lag the branch; set merge_target=live_tip to merge against the live target-branch tip instead (expected_base, if given, must then equal that tip). The result always states which base was merged (merged_base_sha) and whether it is the current tip.")
@@ -148,23 +150,23 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                       user_authorized_fork_approval=user_authorized_fork_approval)
 
     runs = cfg.testing
-    _cached_policies: dict[str, Any] = {"mtime": 0.0, "data": {}}
 
     def current_policies():
         if not runs or not runs.policies_path:
             return {}
         try:
-            mtime = os.path.getmtime(runs.policies_path)
-            if mtime != _cached_policies["mtime"]:
-                _cached_policies["data"] = load_policies(runs.policies_path)
-                _cached_policies["mtime"] = mtime
-        except Exception:
-            if not _cached_policies["data"]:
-                try:
-                    _cached_policies["data"] = load_policies(runs.policies_path)
-                except Exception:
-                    pass
-        return _cached_policies["data"]
+            return load_policies(runs.policies_path)
+        except (OSError, UnicodeError, ValueError) as exc:
+            reason = str(exc) if isinstance(exc, (ProfileError, tomllib.TOMLDecodeError)) else type(exc).__name__
+            raise ValidationError(f"Cannot load ODYTOR_TEST_POLICIES ({Path(runs.policies_path).name}). "
+                                  f"Correct or restore the policy and its approved requirements. {reason[:350]}",
+                                  {"classification": "invalid_policy"}) from exc
+
+    def publication_exemptions(repo):
+        if not runs:
+            return None
+        policy = current_policies().get(repo.strip().casefold())
+        return policy.extra.get("publish", {}).get("exempt_paths", ()) if policy else ()
 
     artifact_store = (ArtifactStore(cfg.artifacts.data_dir, ArtifactLimits(
         max_artifact_bytes=cfg.artifacts.max_artifact_bytes, max_image_delivery_bytes=cfg.artifacts.max_image_delivery_bytes,
@@ -660,7 +662,8 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             with github_client(cfg, remote, repo=record["repo"]) as client:
                 return safe_payload(plan_publication(client, record["repo"], workspace_id, expected_version, commit_message, workspaces=workspaces,
                                                      plans=plans, jobs=service, owner=owner, max_files=cfg.quick_fix_max_files,
-                                                     max_changed_lines=cfg.quick_fix_max_changed_lines, max_patch_bytes=cfg.quick_fix_max_patch_bytes),
+                                                     max_changed_lines=cfg.quick_fix_max_changed_lines, max_patch_bytes=cfg.quick_fix_max_patch_bytes,
+                                                     path_exemptions=publication_exemptions(record["repo"])),
                                     limit=70000)
         except GitPlusError as err:
             return safe_payload(err.to_dict())
@@ -682,7 +685,8 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                 raise SecurityError("This plan's repository is no longer permitted by Odytor configuration.")
             with github_client(cfg, remote, repo=plan["repo"]) as client:
                 return safe_payload(apply_publication(client, plan["repo"], plan_id, confirm, user_authorized, approval_token=approval_token,
-                                                      workspaces=workspaces, plans=plans, jobs=service, owner=owner), limit=70000)
+                                                      workspaces=workspaces, plans=plans, jobs=service, owner=owner,
+                                                      path_exemptions=publication_exemptions(plan["repo"])), limit=70000)
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 
@@ -705,6 +709,8 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
     def pr_body_apply(plan_id: Annotated[str, Field(pattern=r"^pb-[0-9a-f]{32}$")], confirm: str, user_authorized: bool = False) -> dict[str, Any]:
         if plans is None:
             return safe_payload(ValidationError("Workspaces and plan storage are disabled on this server.").to_dict())
+        if not cfg.workspaces.allow_publish_apply:
+            return safe_payload(SecurityError("Publication apply is disabled (ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY).").to_dict())
         try:
             owner = caller_principal(cfg, remote)
             plan = plans.get(plan_id, owner)
@@ -723,9 +729,17 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             if repo is not None:
                 validate_repo(repo)
             facts = service.probe_runner() if (probe_runner and service is not None) else None
-            return safe_payload(describe_capabilities(cfg, policies=current_policies(), service=service, remote=remote, principal=principal,
-                                                      repo=repo, probe=probe_runner, runner_facts=facts,
-                                                      operations=tuple(registered), workspaces_enabled=workspaces is not None))
+            try:
+                policies = current_policies()
+                policy_status = {"state": "loaded" if runs else "not_configured"}
+            except ValidationError as err:
+                policies = {}
+                policy_status = {"state": "invalid", "message": err.message}
+            capabilities = describe_capabilities(cfg, policies=policies, service=service, remote=remote, principal=principal,
+                                                 repo=repo, probe=probe_runner, runner_facts=facts,
+                                                 operations=tuple(registered), workspaces_enabled=workspaces is not None)
+            capabilities["policy_reload"] = policy_status
+            return safe_payload(capabilities)
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 

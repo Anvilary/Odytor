@@ -421,7 +421,7 @@ def test_validate_patch_with_odysseus_notes_session_paths() -> None:
 
 
 def test_component_words_prevents_false_positives_on_common_words() -> None:
-    from odytor.quick_fix import _component_words, register_path_keyword_exemptions
+    from odytor.quick_fix import _component_words
 
     # Substring checks previously matched 'auth' in 'author' or 'token' in 'tokenizer'
     assert "auth" not in _component_words("author.py")
@@ -448,10 +448,9 @@ def test_component_words_prevents_false_positives_on_common_words() -> None:
     with pytest.raises(SecurityError, match="sensitive keyword pattern"):
         _validate_path("src/session_manager.py")
 
-    # Declarative registration allows new exemptions
+    # The active repository policy can supply exact exceptions.
     test_repo = "example-org/example-repo"
-    register_path_keyword_exemptions(test_repo, ["src/session_manager.py"])
-    assert _validate_path("src/session_manager.py", repo=test_repo) == "src/session_manager.py"
+    assert _validate_path("src/session_manager.py", repo=test_repo, path_exemptions=("src/session_manager.py",)) == "src/session_manager.py"
     # Other repos still reject it
     with pytest.raises(SecurityError, match="sensitive keyword pattern"):
         _validate_path("src/session_manager.py", repo="other-org/other-repo")

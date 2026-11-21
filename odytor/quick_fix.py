@@ -6,7 +6,7 @@ import hashlib
 import os
 import re
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 from odytor.errors import APIError, GitOperationError, RevisionMismatchError, SecurityError, ValidationError
 from odytor.github import GitHubClient, validate_repo, validate_sha
@@ -44,17 +44,6 @@ _REPO_PATH_KEYWORD_EXEMPTIONS: dict[str, frozenset[str]] = {
         "static/js/features/notes/application/noteSession.js",
     }),
 }
-
-
-def register_path_keyword_exemptions(repo: str, paths: Iterable[str]) -> frozenset[str]:
-    """Register declarative path exceptions for sensitive keyword matching."""
-    if not repo or not isinstance(repo, str):
-        return frozenset()
-    key = repo.casefold()
-    current = _REPO_PATH_KEYWORD_EXEMPTIONS.get(key, frozenset())
-    updated = current | frozenset(p for p in paths if isinstance(p, str) and p.strip())
-    _REPO_PATH_KEYWORD_EXEMPTIONS[key] = updated
-    return updated
 
 
 def _component_words(component: str) -> set[str]:
@@ -111,7 +100,7 @@ class PatchSummary:
     patch_bytes: int
 
 
-def _validate_path(path_str: str, repo: str | None = None) -> str:
+def _validate_path(path_str: str, repo: str | None = None, *, path_exemptions: tuple[str, ...] | None = None) -> str:
     """Enforce security policies on a file path in a patch."""
     if not path_str or not path_str.strip():
         raise ValidationError("File path cannot be empty.")
@@ -153,11 +142,7 @@ def _validate_path(path_str: str, repo: str | None = None) -> str:
     if re.match(r"^(docker-)?compose.*\.ya?ml$", filename):
         raise SecurityError(f"Docker Compose definitions are not permitted: '{path_str}'.")
 
-    repo_exemptions = (
-        _REPO_PATH_KEYWORD_EXEMPTIONS.get(repo.casefold(), frozenset())
-        if repo
-        else frozenset()
-    )
+    repo_exemptions = path_exemptions if path_exemptions is not None else _REPO_PATH_KEYWORD_EXEMPTIONS.get((repo or "").casefold(), ())
     if path_str not in repo_exemptions:
         for p in parts:
             words = _component_words(p)
@@ -186,6 +171,7 @@ def _validate_path(path_str: str, repo: str | None = None) -> str:
 def validate_patch(
     patch: str, *, repo: str | None = None, max_files: int = DEFAULT_MAX_FILES,
     max_changed_lines: int = DEFAULT_MAX_CHANGED_LINES, max_bytes: int = DEFAULT_MAX_BYTES,
+    path_exemptions: tuple[str, ...] | None = None,
 ) -> PatchSummary:
     """Accept matching unquoted Git paths and count every hunk line exactly."""
     if any(type(v) is not int or v <= 0 for v in (max_files, max_changed_lines, max_bytes)):
@@ -212,7 +198,7 @@ def validate_patch(
         match = re.fullmatch(r"diff --git a/([^\s\"]+) b/([^\s\"]+)", lines[i])
         if not match or match[1] != match[2]:
             raise ValidationError("Expected matching unquoted diff --git paths.")
-        path = _validate_path(match[1], repo=repo)
+        path = _validate_path(match[1], repo=repo, path_exemptions=path_exemptions)
         if path in files:
             raise ValidationError("Duplicate diff path.")
         files.append(path)
@@ -317,13 +303,15 @@ def apply_quick_fix(
     client: GitHubClient, repo: str, number: int, expected_head: str,
     patch: str, commit_message: str, *, max_files: int = DEFAULT_MAX_FILES,
     max_changed_lines: int = DEFAULT_MAX_CHANGED_LINES, max_bytes: int = DEFAULT_MAX_BYTES,
+    path_exemptions: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Validate locally, then append one commit with GitHub's atomic head check.
 
     GitHub attributes the commit to the authenticated identity. No repository
     code or tests run. A lost mutation response requires reconciliation.
     """
-    summary = validate_patch(patch, repo=repo, max_files=max_files, max_changed_lines=max_changed_lines, max_bytes=max_bytes)
+    summary = validate_patch(patch, repo=repo, max_files=max_files, max_changed_lines=max_changed_lines, max_bytes=max_bytes,
+                             path_exemptions=path_exemptions)
     if not commit_message.strip() or len(commit_message.encode()) > 1440 or "\0" in commit_message:
         raise ValidationError("Commit message must contain 1-1440 bytes without NUL.")
     context = pr_context(client, repo, number, expected_head, write=True, operation="quick_fix")

@@ -657,7 +657,8 @@ def run_validation_campaign(
             plan_res = plan_publication(client, repo, ws_id, expected_version, commit_message, workspaces=workspaces, plans=plans, jobs=service,
                                         owner=owner, max_files=getattr(cfg, "quick_fix_max_files", 10),
                                         max_changed_lines=getattr(cfg, "quick_fix_max_changed_lines", 1000),
-                                        max_patch_bytes=getattr(cfg, "quick_fix_max_patch_bytes", 262144))
+                                        max_patch_bytes=getattr(cfg, "quick_fix_max_patch_bytes", 262144),
+                                        path_exemptions=policies[repo.strip().casefold()].extra.get("publish", {}).get("exempt_paths", ()))
             record.push_plan = plan_res
             record.steps.append({"name": "publish_plan", "status": "passed", "duration_seconds": round(time.monotonic() - step_t0, 3),
                                  "plan_id": plan_res.get("plan_id")})

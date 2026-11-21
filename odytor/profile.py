@@ -409,7 +409,7 @@ class RepoPolicy:
     @property
     def profiles(self) -> tuple[str, ...]:
         """Every profile the maintainer enabled for this repository; nothing else may run."""
-        return (self.profile, *[n for n in self.extra if n != self.profile])
+        return (self.profile, *[n for n in self.extra if n in PROFILES and n != self.profile])
 
 
 def load_policies(path: str | Path) -> dict[str, RepoPolicy]:
@@ -417,11 +417,16 @@ def load_policies(path: str | Path) -> dict[str, RepoPolicy]:
     file = Path(path)
     with file.open("rb") as handle:
         data = tomllib.load(handle)
-    templates = data.get("templates") or {}
+    templates = data.get("templates", {})
+    repos = data.get("repos", {})
+    if not isinstance(templates, dict) or not isinstance(repos, dict):
+        raise ProfileError("Policy templates and repos must be TOML tables.")
     policies: dict[str, RepoPolicy] = {}
-    for repo, raw_entry in (data.get("repos") or {}).items():
+    for repo, raw_entry in repos.items():
         if not is_repo(repo) or not isinstance(raw_entry, dict):
             raise ProfileError(f"Invalid repository policy '{repo}'.")
+        if repo.casefold() in policies:
+            raise ProfileError(f"Duplicate repository policy for {repo}.")
         entry = dict(raw_entry)
         template_name = entry.get("template")
         if template_name:
@@ -446,12 +451,19 @@ def load_policies(path: str | Path) -> dict[str, RepoPolicy]:
             req_path = (file.parent / req_name).resolve()
             if file.parent.resolve() not in req_path.parents:
                 raise ProfileError("Requirements files must live beside the policy file.")
-            text = validate_requirements(req_path.read_text(encoding="utf-8"))
+            try:
+                text = validate_requirements(req_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, ProfileError) as exc:
+                raise ProfileError(f"Cannot load approved requirements for {repo} from {req_path.name} ({type(exc).__name__}). "
+                                   "Check the file and package pins.") from exc
         else:
             text = ""  # a profile without Python dependencies has nothing to approve
         extra: dict = {}
-        for p in entry.get("profiles", []):
-            if p in PROFILES and p != profile:
+        enabled = entry.get("profiles", [])
+        if not isinstance(enabled, list) or any(not isinstance(p, str) or p not in PROFILES for p in enabled):
+            raise ProfileError(f"Invalid enabled profiles for {repo}.")
+        for p in enabled:
+            if p != profile:
                 extra.setdefault(p, {})
         for p_name in PROFILES:
             if p_name in entry and p_name not in {NODE_PROFILE, BROWSER_PROFILE, PLAYWRIGHT_SPEC_PROFILE} and p_name != profile:
@@ -494,23 +506,30 @@ def load_policies(path: str | Path) -> dict[str, RepoPolicy]:
             table = entry[PLAYWRIGHT_SPEC_PROFILE]
             if not isinstance(table, dict):
                 raise ProfileError(f"Invalid {PLAYWRIGHT_SPEC_PROFILE} settings for {repo}.")
-            specs_val = table.get("specs") or ()
-            dirs_val = table.get("spec_dirs") or ()
+            specs_val = table.get("specs", [])
+            dirs_val = table.get("spec_dirs", [])
             launcher_val = table.get("launcher", "tests/e2e/notes-qa/run_notes_qa.py")
             config_val = table.get("config", "tests/e2e/notes-qa/playwright.config.js")
-            extra[PLAYWRIGHT_SPEC_PROFILE] = {
-                "specs": tuple(specs_val) if isinstance(specs_val, (list, tuple)) else (),
-                "spec_dirs": tuple(d.rstrip("/") for d in dirs_val) if isinstance(dirs_val, (list, tuple)) else (),
-                "launcher": launcher_val,
-                "config": config_val,
-            }
-        if "publish" in entry and isinstance(entry["publish"], dict):
+            try:
+                if not isinstance(specs_val, list) or not isinstance(dirs_val, list):
+                    raise ProfileError("specs and spec_dirs must be lists")
+                dirs_ = tuple(validate_repo_path(d) for d in dirs_val)
+                specs = tuple(validate_playwright_spec_selector(spec, allowed_dirs=dirs_)[1]["spec_path"] for spec in specs_val)
+                extra[PLAYWRIGHT_SPEC_PROFILE] = {"specs": specs, "spec_dirs": dirs_, "launcher": validate_repo_path(launcher_val),
+                                                 "config": validate_repo_path(config_val)}
+            except ProfileError as exc:
+                raise ProfileError(f"Invalid {PLAYWRIGHT_SPEC_PROFILE} settings for {repo}: {exc}.") from exc
+        if "publish" in entry:
             pub = entry["publish"]
-            exemptions = pub.get("exempt_paths") or pub.get("allowed_paths")
-            if isinstance(exemptions, (list, tuple)):
-                from odytor.quick_fix import register_path_keyword_exemptions
-                cleaned_exemptions = tuple(p for p in exemptions if isinstance(p, str) and p.strip())
-                register_path_keyword_exemptions(repo, cleaned_exemptions)
-                extra["publish"] = {"exempt_paths": cleaned_exemptions}
+            if not isinstance(pub, dict) or set(pub) - {"exempt_paths", "allowed_paths"} or len(pub) > 1:
+                raise ProfileError(f"Invalid publish policy for {repo}. Use only 'exempt_paths'.")
+            exemptions = pub.get("exempt_paths", pub.get("allowed_paths", []))
+            if not isinstance(exemptions, list) or len(exemptions) > 100:
+                raise ProfileError(f"Publish exemptions for {repo} must be a list of up to 100 exact paths.")
+            try:
+                paths = tuple(validate_repo_path(path) for path in exemptions)
+            except ProfileError as exc:
+                raise ProfileError(f"Invalid publish exemption path for {repo}.") from exc
+            extra["publish"] = {"exempt_paths": paths}
         policies[repo.casefold()] = RepoPolicy(repo, profile, tuple(roots), text, requirements_digest(text), extra)
     return policies
