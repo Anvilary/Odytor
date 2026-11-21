@@ -107,7 +107,7 @@ def test_runner_probe_observes_the_browser_profile_from_the_image_contents(stack
     server, _ = stack
     probe = server.test_service.probe_runner()
     facts = probe['facts']
-    assert facts['image']['tools'] == {'python': True, 'node': True, 'playwright': True, 'chromium': True}
+    assert all(facts['image']['tools'][name] is True for name in ('python', 'node', 'playwright', 'chromium'))
     assert facts['profiles']['browser-playwright']['installed'] is True and facts['profiles']['node-test']['installed'] is True
     report = data(server, 'odytor_capabilities', repo='owner/repo', probe_runner=True)
     profiles = {p['name']: p for p in report['execution_profiles']}

@@ -86,7 +86,7 @@ REGISTRY: dict[str, ProfileSpec] = {
     PLAYWRIGHT_SPEC_PROFILE: ProfileSpec(
         PLAYWRIGHT_SPEC_PROFILE, "1", "playwright_spec", "browser",
         "Repository-owned Playwright end-to-end specs against an isolated in-sandbox app",
-        ("python", "node", "playwright", "chromium"), needs_env=True, produces_artifacts=False,
+        ("python", "node", "playwright-test", "chromium"), needs_env=True, produces_artifacts=False,
         commands=("playwright", "test")),
 }
 PROFILES = {name: spec.version for name, spec in REGISTRY.items()}
@@ -183,23 +183,17 @@ def validate_playwright_spec_selectors(
     test_dirs: tuple[str, ...] = (),
 ) -> tuple[tuple[str, ...], list[dict[str, Any]]]:
     if selectors is None or (isinstance(selectors, (list, tuple)) and not selectors):
-        if allowed_specs:
-            return allowed_specs, [{"spec_path": s, "test_title": None} for s in allowed_specs]
-        raise ProfileError("selectors must be specified or allowed specs defined in policy.")
+        if len(allowed_specs) != 1:
+            raise ProfileError("Select one Playwright spec explicitly unless the policy defines a single default spec.")
+        selectors = allowed_specs
     if not isinstance(selectors, (list, tuple)):
         raise ProfileError("selectors must be a list of spec selectors or omitted.")
-    if len(selectors) > MAX_SELECTORS:
-        raise ProfileError(f"At most {MAX_SELECTORS} selectors are allowed.")
-    canonical_list: list[str] = []
-    parsed_list: list[dict[str, Any]] = []
-    for item in selectors:
-        canonical, parsed = validate_playwright_spec_selector(
-            item, allowed_specs=allowed_specs, allowed_dirs=allowed_dirs, test_dirs=test_dirs,
-        )
-        if canonical not in canonical_list:
-            canonical_list.append(canonical)
-            parsed_list.append(parsed)
-    return tuple(canonical_list), parsed_list
+    if len(selectors) != 1:
+        raise ProfileError("Playwright spec runs support one selector. Submit each spec or title in its own run.")
+    canonical, parsed = validate_playwright_spec_selector(
+        selectors[0], allowed_specs=allowed_specs, allowed_dirs=allowed_dirs, test_dirs=test_dirs,
+    )
+    return (canonical,), [parsed]
 
 
 def is_job_id(value: object) -> bool:

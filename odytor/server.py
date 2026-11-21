@@ -519,7 +519,8 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             with github_client(cfg, remote, repo=repo) as client:
                 pre = preflight_campaign(client, repo, number, expected_head=expected_head, expected_base=expected_base, mode=mode,
                                          profiles=profiles, policies=current_policies(), propose_push=propose_push,
-                                         commit_message=commit_message, plans=plans, idempotency_key=idempotency_key)
+                                         commit_message=commit_message, plans=plans, idempotency_key=idempotency_key,
+                                         profile_selectors=profile_selectors)
                 now = time.time()
                 fresh = CampaignRecord(campaign_id=f"cmp-{secrets.token_hex(16)}", owner=owner, repo=repo, number=number, mode=mode,
                                        status="running", created_at=now, updated_at=now, idempotency_key=idempotency_key,

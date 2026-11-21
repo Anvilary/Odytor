@@ -19,29 +19,23 @@ def _emit(**event):
                 handle.write(json.dumps(event, ensure_ascii=True) + "\n")
         except Exception:
             pass
+
+def _progress(**event):
     if _STREAM:
         try:
-            e = event.get("e")
-            if e == "collected":
-                sys.stderr.write("ODYTOR_PROGRESS:" + json.dumps({
-                    "type": "collection",
-                    "phase": "executing_tests",
-                    "total": event.get("n", 0)
-                }) + "\n")
-                sys.stderr.flush()
-            elif e == "report" and event.get("w") == "call":
-                sys.stderr.write("ODYTOR_PROGRESS:" + json.dumps({
-                    "type": "test_end",
-                    "phase": "executing_tests",
-                    "id": event.get("id"),
-                    "title": event.get("id"),
-                    "outcome": event.get("o"),
-                    "duration_ms": int(float(event.get("d", 0)) * 1000),
-                    "retry": 0
-                }) + "\n")
-                sys.stderr.flush()
+            sys.stderr.write("\nODYTOR_PROGRESS:" + json.dumps({"phase": "executing_tests", **event}) + "\n")
+            sys.stderr.flush()
         except Exception:
             pass
+
+
+_ACTIVE = {}
+
+
+def pytest_runtest_logstart(nodeid):
+    if _STREAM:
+        _ACTIVE[nodeid] = {"outcome": "passed", "duration_ms": 0}
+        _progress(type="test_start", id=nodeid, title=nodeid)
 
 
 def _text(report):
@@ -60,6 +54,7 @@ def _text(report):
 def pytest_collection_finish(session):
     ids = [item.nodeid for item in session.items]
     _emit(e="collected", n=len(ids), ids=ids[:_MAX_IDS])
+    _progress(type="collection", total=len(ids))
 
 
 def pytest_collectreport(report):
@@ -75,6 +70,17 @@ def pytest_runtest_logreport(report):
     if report.outcome != "passed" or event.get("xfail"):
         event["msg"] = _text(report)
     _emit(**event)
+    live = _ACTIVE.get(report.nodeid)
+    if live is not None:
+        live["duration_ms"] += int(report.duration * 1000)
+        if report.failed:
+            if live["outcome"] != "error":
+                live["outcome"] = "failed" if report.when == "call" else "error"
+        elif report.skipped and live["outcome"] == "passed":
+            live["outcome"] = "skipped"
+        if report.when == "teardown":
+            _ACTIVE.pop(report.nodeid)
+            _progress(type="test_end", id=report.nodeid, title=report.nodeid, **live)
 
 
 def pytest_sessionfinish(session, exitstatus):

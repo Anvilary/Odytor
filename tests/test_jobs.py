@@ -21,7 +21,7 @@ def payload(*, exit=0, finished=0, passed=2, failed=0, errors=0, skipped=0, coll
     body = {'harness': 1, 'kind': 'test', 'extract': {'ok': True}, 'argv': ['python', '-m', 'pytest', '--', 'tests'],
             'pytest_exit': exit, 'timed_out': timed_out, 'finished_event': finished, 'duration_seconds': 1.5,
             'counts': counts, 'tests': [{'id': 'tests/a.py::t', 'outcome': 'passed', 'duration': 0.1, 'message': ''}],
-            'tests_total': 1, 'selector_coverage': coverage if coverage is not None else
+            'tests_total': reported, 'selector_coverage': coverage if coverage is not None else
             [{'selector': 'tests', 'collected': counts['collected'], 'executed': counts['executed']}],
             'collect_errors': [], 'malformed_events': 0, 'log': {'head': 'h', 'tail': 't', 'total_bytes': 2, 'truncated': False}}
     body.update(report_overrides)
@@ -46,6 +46,8 @@ def test_green_requires_executed_passing_tests():
     (dict(exit=5, finished=5, passed=0, collected=0), 'no_tests_collected', 'no_tests_collected'),
     (dict(exit=0, passed=0, skipped=3, coverage=[{'selector': 'tests', 'collected': 3, 'executed': 0}]), 'no_tests_executed', 'no_tests_executed'),
     (dict(exit=0, finished=None), 'setup_error', 'missing_report'),
+    (dict(exit=0, malformed_events=1), 'setup_error', 'malformed_report'),
+    (dict(exit=0, collected=3), 'failed', 'incomplete_run'),
     (dict(report=False), 'setup_error', 'missing_report'),
     (dict(exit=4, finished=None, passed=0), 'setup_error', 'pytest_usage_error'),
     (dict(exit=3, finished=None, passed=0), 'setup_error', 'pytest_internal_error'),

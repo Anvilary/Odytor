@@ -33,9 +33,9 @@ from odytor.errors import GitPlusError, SecurityError, ValidationError
 from odytor.github import GitHubClient
 from odytor.git_workspace import pr_context
 from odytor.jobs import JobService, new_run_id
-from odytor.profile import PROFILE_NAME, PROFILES, REGISTRY, RepoPolicy
+from odytor.profile import PLAYWRIGHT_SPEC_PROFILE, PROFILE_NAME, PROFILES, REGISTRY, ProfileError, RepoPolicy
 from odytor.publish import PlanStore, plan_publication
-from odytor.run_tests import cancel_test_run, submit_workspace_run
+from odytor.run_tests import cancel_test_run, submit_workspace_run, workspace_playwright_selectors
 from odytor.workspace import open_workspace
 
 logger = logging.getLogger(__name__)
@@ -382,7 +382,8 @@ class CampaignStore:
 
 def preflight_campaign(client: GitHubClient, repo: str, number: int, *, expected_head: str | None, expected_base: str | None,
                        mode: str, profiles: list[str] | None, policies: dict[str, RepoPolicy], propose_push: bool,
-                       commit_message: str | None, plans: Any | None, idempotency_key: str | None) -> dict[str, Any]:
+                       commit_message: str | None, plans: Any | None, idempotency_key: str | None,
+                       profile_selectors: dict[str, list[str]] | None = None) -> dict[str, Any]:
     """Everything that can be refused before any state exists. Returns the resolved profiles and live revisions."""
     requested_profiles = ["python-pytest"] if profiles is None else list(profiles)
     if idempotency_key is not None:
@@ -406,6 +407,11 @@ def preflight_campaign(client: GitHubClient, repo: str, number: int, *, expected
     for prof in requested_profiles:
         if prof not in policy.profiles:
             raise ValidationError(f"Maintainer policy for '{repo}' does not enable profile '{prof}'. Enabled: {', '.join(policy.profiles)}.")
+        if prof == PLAYWRIGHT_SPEC_PROFILE:
+            try:
+                workspace_playwright_selectors(policy, (profile_selectors or {}).get(prof))
+            except ProfileError as exc:
+                raise ValidationError(str(exc)) from exc
     ctx = pr_context(client, repo, number, expected_head=expected_head, write=False)
     live_head, live_base = ctx["head_sha"], ctx["base_sha"]
     if expected_head and expected_head.lower() != live_head.lower():
@@ -470,7 +476,7 @@ def run_validation_campaign(
     cid = campaign_id or f"cmp-{secrets.token_hex(16)}"
     pre = preflight_campaign(client, repo, number, expected_head=expected_head, expected_base=expected_base, mode=mode, profiles=profiles,
                              policies=policies, propose_push=propose_push, commit_message=commit_message, plans=plans,
-                             idempotency_key=idempotency_key)
+                             idempotency_key=idempotency_key, profile_selectors=profile_selectors)
     requested_profiles, live_head = pre["profiles"], pre["live_head"]
     instance = getattr(service, "instance", None)
     instance = instance if isinstance(instance, str) else None

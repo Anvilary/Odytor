@@ -319,6 +319,11 @@ def read_job(stream, cfg: RunnerConfig, source: Path) -> dict:
     length = int.from_bytes(_read_exact(stream, 8), "big")
     if length > cfg.max_source_bytes:
         raise SetupError("validation", "Source artifact exceeds the runner limit.")
+    if length:
+        free = shutil.disk_usage(source.parent).free
+        if free < cfg.min_free_bytes + length:
+            raise SetupError("resources", "Insufficient free space to stage the source artifact.",
+                             {"free_bytes": free, "minimum_free_bytes": cfg.min_free_bytes, "source_bytes": length})
     remaining = length
     with source.open("wb") as handle:
         while remaining:
@@ -432,6 +437,7 @@ _TOOLS_SCRIPT = (
     "out={'python':True,'node':bool(shutil.which('node'))}\n"
     "try:\n import playwright\n out['playwright']=True\n"
     "except Exception:\n out['playwright']=False\n"
+    "out['playwright-test']=os.path.isfile('/usr/local/lib/node_modules/@playwright/test/package.json')\n"
     "out['chromium']=bool(glob.glob(os.environ.get('PLAYWRIGHT_BROWSERS_PATH','/ms-playwright')+'/chromium-*'))\n"
     "out['cmake']=bool(shutil.which('cmake'))\n"
     "out['make']=bool(shutil.which('make'))\n"
@@ -444,7 +450,9 @@ def image_tools(cfg: RunnerConfig, image: ImageInfo) -> dict:
     """What the pinned image can actually run (observed once per image, then cached); never guessed from configuration."""
     cache = cfg.root / f"image-{image.image_id}-tools.json"
     try:
-        return json.loads(cache.read_text())
+        observed = json.loads(cache.read_text())
+        if isinstance(observed, dict) and "playwright-test" in observed:
+            return observed
     except (OSError, ValueError):
         pass
     probe_run = _engine(cfg, "run", "--rm", "--pull=never", "--network=none", "--read-only", "--cap-drop=ALL",
@@ -454,7 +462,8 @@ def image_tools(cfg: RunnerConfig, image: ImageInfo) -> dict:
         tools = json.loads(probe_run.stdout.decode().strip().splitlines()[-1])
     except (ValueError, IndexError):
         return {"python": True, "node": False, "playwright": False, "chromium": False, "observed": False}
-    tools = {k: bool(v) for k, v in tools.items() if k in {"python", "node", "playwright", "chromium", "cmake", "make", "compiler", "clang"}}
+    tools = {k: bool(v) for k, v in tools.items()
+             if k in {"python", "node", "playwright", "playwright-test", "chromium", "cmake", "make", "compiler", "clang"}}
     cfg.root.mkdir(parents=True, exist_ok=True)
     cache.write_text(json.dumps(tools))
     return tools

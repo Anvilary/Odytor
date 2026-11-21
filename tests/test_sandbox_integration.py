@@ -20,7 +20,7 @@ from unittest import mock
 import pytest
 
 from odytor.jobs import QueuedJob, classify, make_subprocess_runner, new_run_id
-from odytor.profile import requirements_digest, validate_requirements
+from odytor.profile import REGISTRY, requirements_digest, validate_requirements
 
 IMAGE = os.environ.get('ODYTOR_TEST_RUNNER_IMAGE')
 pytestmark = pytest.mark.skipif(not (shutil.which('podman') and IMAGE),
@@ -185,10 +185,20 @@ def test_sandbox_boundary_from_inside(root, tmp_path, monkeypatch):
             assert sorted(os.listdir('/sys/class/net')) == ['lo']
 
         def test_no_host_mounts_or_sockets():
-            for path in ('/var/run/docker.sock', '/run/docker.sock', '/run/podman', '/run/user', '/var/run/secrets'):
+            for path in ('/var/run/docker.sock', '/run/docker.sock', '/run/podman', '/var/run/secrets'):
                 assert not os.path.exists(path), path
+            runtime = pathlib.Path('/run/user')
+            # Some pinned base images ship an empty /run/user directory.
+            assert not runtime.is_symlink()
+            assert not runtime.exists() or (runtime.is_dir() and not list(runtime.iterdir()))
             assert HOME_USER not in os.listdir('/home') if os.path.isdir('/home') else True
             mounts = pathlib.Path('/proc/self/mountinfo').read_text()
+            for line in mounts.splitlines():
+                fields, _, filesystem = line.partition(' - ')
+                root, point = fields.split()[3:5]
+                if point == '/run':
+                    assert root == '/' and filesystem.split()[:2] == ['tmpfs', 'tmpfs']
+                assert point != '/run/user' and not point.startswith('/run/user/')
             assert 'odytor-runner' not in mounts and 'git-plus-runner' not in mounts and '.local/state' not in mounts and '/.git' not in mounts
 
         def test_filesystem_is_read_only_except_tmpfs():
@@ -520,5 +530,5 @@ def test_real_runner_probe_observes_engine_image_and_limits(root):
     assert facts['operational'] == bool(facts['rootless'] and facts['cgroup_limits_delegated'] and facts['image']['ok'] and facts['storage_ok'])
     assert isinstance(facts['cgroup_limits_delegated'], bool) and facts['rootless'] and facts['image']['ok'] and facts['image']['python'].startswith('3.')
     assert facts['profiles']['python-pytest'] == {'version': '1', 'kind': 'pytest', 'installed': True, 'missing_tools': []}
-    assert set(facts['profiles']) == {'python-pytest', 'node-test', 'browser-playwright'} and facts['limits']['memory_mib'] == 4096
+    assert set(facts['profiles']) == set(REGISTRY) and facts['limits']['memory_mib'] == 4096
     assert 'path' not in json.dumps(facts).lower() and not containers()  # no job container was started

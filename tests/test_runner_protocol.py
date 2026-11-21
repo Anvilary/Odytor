@@ -40,6 +40,21 @@ def test_frame_reader_reassembles_split_writes_and_detects_truncation():
     os.close(r)
 
 
+def test_source_frame_respects_free_space_floor_before_writing(tmp_path, monkeypatch):
+    from io import BytesIO
+    from types import SimpleNamespace
+
+    cfg = sandbox.RunnerConfig(image='x', root=tmp_path, min_free_bytes=100)
+    monkeypatch.setattr(sandbox.shutil, 'disk_usage', lambda path: SimpleNamespace(free=103))
+    prefix = b'\x00\x00\x00\x02{}'
+    source = tmp_path / 'source.tar'
+    with pytest.raises(sandbox.SetupError, match='Insufficient free space') as caught:
+        sandbox.read_job(BytesIO(prefix + (4).to_bytes(8, 'big') + b'data'), cfg, source)
+    assert caught.value.stage == 'resources' and not source.exists()
+    assert sandbox.read_job(BytesIO(prefix + (3).to_bytes(8, 'big') + b'abc'), cfg, source) == {}
+    assert source.read_bytes() == b'abc'
+
+
 def test_config_file_must_be_root_owned_and_only_runner_keys(tmp_path):
     path = tmp_path / 'runner.env'
     path.write_text('ODYTOR_RUNNER_IMAGE=docker.io/library/python@sha256:' + 'a' * 64 + '\n')
@@ -59,15 +74,16 @@ def test_config_file_parsing_rejects_foreign_keys(tmp_path, monkeypatch):
     assert sandbox.load_config_file(str(path)) == {'ODYTOR_RUNNER_CPUS': '1', 'ODYTOR_RUNNER_PIDS': '64'}
 
 
-def test_held_stdin_signals_the_child_only_when_the_parent_is_gone():
-    """With hold_stdin the child sees EOF only after the parent closes it, which is what a lost SSH session looks like."""
+def test_held_stdin_signals_the_child_on_cancellation():
+    """Closing the frame on cancel gives the child time to finish cleanup before transport teardown."""
     code = "import sys\nsys.stdin.buffer.read(3)\nsys.stdout.write('got3\\n');sys.stdout.flush()\nsys.stdout.write('eof' if sys.stdin.buffer.read() == b'' else 'more')"
     cancel = threading.Event()
     threading.Timer(1.0, cancel.set).start()
     started = time.monotonic()
     result = run_bounded([sys.executable, '-c', code], env=os.environ, timeout=30, max_stdout=1000,
                          stdin_chunks=iter([b'abc']), cancel=cancel, hold_stdin=True)
-    assert result.canceled and b'got3' in result.stdout and b'eof' not in result.stdout and time.monotonic() - started < 10
+    assert result.canceled and result.returncode == 0 and result.stdout == b'got3\neof'
+    assert 1.0 <= time.monotonic() - started < 10
     done = run_bounded([sys.executable, '-c', code], env=os.environ, timeout=30, max_stdout=1000, stdin_chunks=iter([b'abc']))
     assert done.stdout.endswith(b'eof')  # the old behavior is still available
 

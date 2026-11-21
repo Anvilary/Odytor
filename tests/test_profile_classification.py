@@ -225,14 +225,16 @@ def test_classify_playwright_spec_cases():
     sel = ("tests/e2e/notes-qa/notes-qa-regressions.spec.mjs",)
 
     def pw_payload(exit_code=0, counts=None, errors=None, tests=None, timed_out=False, report_err=None, log_tail="", server_log=None):
-        c = {"collected": 1, "executed": 1, "passed": 1, "failed": 0, "skipped": 0, "flaky": 0, "errors": 0}
+        c = {"collected": 1, "executed": 1, "passed": 1, "failed": 0, "skipped": 0, "flaky": 0, "errors": 0,
+             "incomplete": 0, "timed_out": 0}
         if counts:
             c.update(counts)
         pw = {
             "counts": c,
             "specs": ["tests/e2e/notes-qa/notes-qa-regressions.spec.mjs"],
-            "tests": tests or [{"id": "t1", "outcome": "passed" if c["passed"] else "failed", "error": None}],
+            "tests": tests or [{"id": "t1", "outcome": "passed" if c["passed"] else "skipped"}] * c["collected"],
             "tests_total": c["collected"],
+            "selector_coverage": [{"selector": sel[0], "collected": c["collected"], "executed": c["executed"]}],
             "errors": errors or [],
         }
         report = {
@@ -295,4 +297,9 @@ def test_classify_playwright_spec_cases():
     # 8. Timeout
     out = classify_playwright_spec(pw_payload(timed_out=True), sel)
     assert out["status"] == "timeout"
+
+    assert classify_playwright_spec(pw_payload(exit_code=None), sel)["failure"]["kind"] == "missing_report"
+    assert classify_playwright_spec(pw_payload(counts={"incomplete": 1}), sel)["failure"]["kind"] == "incomplete_run"
+    assert classify_playwright_spec(pw_payload(counts={"timed_out": 1}), sel)["failure"]["kind"] == "test_timeout"
+    assert classify_playwright_spec(pw_payload(), sel + ("other/notes-qa-regressions.spec.mjs",))["status"] != "passed"
 

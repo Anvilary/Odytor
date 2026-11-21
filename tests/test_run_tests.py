@@ -185,6 +185,7 @@ def diverge(stack, conflict):
 def test_clean_prospective_merge_tests_the_exact_merge_tree(stack):
     base, head = diverge(stack, conflict=False)
     queued = submit(stack, expected_head=head, mode='prospective_merge', expected_base=base)
+    assert queued['tests_ran_against'] == 'prospective_merge_tree'
     merged = run(stack.repo, 'merge-tree', '--write-tree', base, head).decode().strip()
     assert queued['trees']['merge_tree'] == queued['trees']['effective_tree'] == merged
     assert queued['verified']['base_sha'] == base and queued['verified']['base_sha_role'] == 'live_target_branch_tip'

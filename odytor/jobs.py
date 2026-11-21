@@ -57,6 +57,16 @@ def _log_part(value: Any, limit: int) -> str:
     return _str(value, limit)
 
 
+def _sanitize_log(raw: Any) -> dict[str, Any]:
+    log = raw if isinstance(raw, dict) else {}
+    result = {"head": _log_part(log.get("head"), 4096), "tail": _log_part(log.get("tail"), 8192),
+              "total_bytes": _int(log.get("total_bytes"), 10**13), "truncated": log.get("truncated") is True}
+    if type(log.get("retained_complete")) is bool:
+        result["retained_complete"] = log["retained_complete"]
+        result["retained_bytes"] = _int(log.get("retained_bytes"), MAX_RUNNER_OUTPUT)
+    return result
+
+
 class RunStore:
     """One atomic JSON file per run; owner-only permissions."""
 
@@ -152,7 +162,7 @@ class RunTracker:
             }
 
             if "phase" in data and isinstance(data["phase"], str):
-                phase_val = _str(data["phase"], 50)
+                phase_val = safe_text(_str(data["phase"], 50), 50)
                 self.phase = phase_val
                 event["phase"] = phase_val
 
@@ -163,6 +173,8 @@ class RunTracker:
             elif ev_type == "test_start":
                 tid = safe_text(_str(data.get("id") or data.get("title") or "", 250), 250)
                 title = safe_text(_str(data.get("title", tid), 200), 200)
+                if tid not in self.active_tests and len(self.active_tests) >= self.max_events:
+                    self.active_tests.pop(next(iter(self.active_tests)))
                 self.active_tests[tid] = {"title": title, "started_at": now}
                 event["id"] = tid
                 event["title"] = title
@@ -198,6 +210,7 @@ class RunTracker:
             self.outcome = outcome
             self.last_progress = time.monotonic()
             self.phase = str(outcome.get("status", "completed"))
+            self.active_tests.clear()
             self.event_seq += 1
             self.events.append({
                 "event_id": self.event_seq,
@@ -212,7 +225,7 @@ class RunTracker:
         with self.cv:
             events_list = list(self.events)
             oldest_id = events_list[0]["event_id"] if events_list else 0
-            cursor_gap = bool(after_event_id > 0 and oldest_id > 0 and after_event_id < oldest_id)
+            cursor_gap = oldest_id > after_event_id + 1
 
             sliced = [e for e in events_list if e["event_id"] > after_event_id][:max_events]
             next_cursor = sliced[-1]["event_id"] if sliced else after_event_id
@@ -257,7 +270,7 @@ def runner_environment() -> dict[str, str]:
     return env
 
 
-def make_subprocess_runner(command: tuple[str, ...], *, extra_wait: int = 1500) -> Runner:
+def make_subprocess_runner(command: tuple[str, ...], *, extra_wait: int = 1500, cancel_grace: float = 5.0) -> Runner:
     def run(job: QueuedJob, cancel: threading.Event) -> dict[str, Any]:
         def on_err_line(line: str) -> None:
             if line.startswith("ODYTOR_PROGRESS:") and job.on_progress is not None:
@@ -271,7 +284,7 @@ def make_subprocess_runner(command: tuple[str, ...], *, extra_wait: int = 1500) 
                     pass
 
         result = run_bounded(command, env=runner_environment(), timeout=job.timeout + extra_wait,
-                             max_stdout=job.max_output, cancel=cancel,
+                             max_stdout=job.max_output, cancel=cancel, grace=cancel_grace,
                              stdin_chunks=_frame(job.header, job.spool / "source.tar"), hold_stdin=True,
                              on_stderr_line=on_err_line)
         if result.canceled:
@@ -372,6 +385,8 @@ def classify(payload: dict[str, Any], selectors: tuple[str, ...], expected_spec_
     report = payload.get("report")
     if sandbox.get("timed_out"):
         return end("timeout", "timeout", "The sandbox exceeded its execution deadline.")
+    if sandbox.get("output_overflow"):
+        return end("setup_error", "output_overflow", "The sandbox exceeded its report output limit.")
     if not isinstance(report, dict) or report.get("harness") != 1 or report.get("kind") != "test":
         return end("setup_error", "missing_report", "The sandbox produced no valid report.",
                    engine_exit_code=sandbox.get("engine_exit_code"),
@@ -387,9 +402,7 @@ def classify(payload: dict[str, Any], selectors: tuple[str, ...], expected_spec_
     outcome["tests"] = _sanitize_tests(report.get("tests"))
     outcome["tests_total"] = _int(report.get("tests_total"))
     outcome["tests_truncated"] = outcome["tests_total"] > len(outcome["tests"])
-    log = report.get("log") if isinstance(report.get("log"), dict) else {}
-    outcome["log"] = {"head": _log_part(log.get("head"), 4096), "tail": _log_part(log.get("tail"), 8192),
-                      "total_bytes": _int(log.get("total_bytes"), 10**13), "truncated": bool(log.get("truncated"))}
+    outcome["log"] = _sanitize_log(report.get("log"))
     outcome["execution"].update(pytest_exit_code=report.get("pytest_exit") if type(report.get("pytest_exit")) is int else None,
                                 pytest_seconds=round(_num(report.get("duration_seconds"), 1e6), 3))
     outcome["reports"] = {"collect_errors": [{"id": _str(e.get("id"), 200), "message": _str(e.get("message"), 200)}
@@ -426,16 +439,24 @@ def classify(payload: dict[str, Any], selectors: tuple[str, ...], expected_spec_
         return end("failed", "test_failures", "One or more tests failed or errored.")
     if code != 0:
         return end("failed", "unexpected_exit", f"pytest exited with status {code}.")
-    if finished != 0:
+    if type(finished) is not int or finished != 0:
         return end("setup_error", "missing_report", "pytest exited cleanly but produced no session report.")
+    if (type(report.get("malformed_events")) is not int or report["malformed_events"] != 0
+            or any(type(raw_counts.get(key)) is not int or raw_counts[key] < 0 for key in _COUNT_KEYS)):
+        return end("setup_error", "malformed_report", "The pytest event report or summary is malformed.")
+    if outcome["reports"]["collect_errors"]:
+        return end("setup_error", "collection_error", "The pytest event report recorded a collection failure.")
     if counts["collected"] == 0:
         return end("no_tests_collected", "no_tests_collected", "The selectors matched no tests.")
     if counts["reported"] == 0:
         return end("setup_error", "missing_report", "Tests were collected but no per-test results were reported.")
-    if counts["executed"] == 0:
-        return end("no_tests_executed", "no_tests_executed", "Tests were collected but none executed (all skipped).")
-    if counts["incomplete"] or counts["not_run"] or counts["passed"] < 1:
-        return end("failed", "incomplete_run", "Some collected tests did not complete.")
+    if (counts["incomplete"] or counts["not_run"] or counts["reported"] != counts["collected"]
+            or counts["reported"] != counts["executed"] + counts["skipped"]
+            or counts["executed"] != sum(counts[key] for key in ("passed", "failed", "errors", "xfailed", "xpassed"))
+            or counts["reported"] != outcome["tests_total"]):
+        return end("failed", "incomplete_run", "The pytest report does not account for all collected tests.")
+    if counts["executed"] == 0 or counts["passed"] < 1:
+        return end("no_tests_executed", "no_tests_executed", "No test produced a passing result.")
     for item in coverage:
         if item["collected"] == 0:
             return end("no_tests_collected", "selector_matched_nothing", f"Selector matched no tests: {item['selector']}")
@@ -546,6 +567,8 @@ def _common_runner_failures(payload: dict[str, Any], outcome: dict[str, Any], ex
         return "setup_error", ("missing_report", "The sandbox produced no valid report.",
                                {"engine_exit_code": sandbox.get("engine_exit_code"),
                                 "stderr": safe_text(_str(sandbox.get("engine_stderr_tail"), 600), 600)})
+    if report.get("timed_out"):
+        return "timeout", ("timeout", "Execution exceeded its deadline.", {})
     if isinstance(report.get("error"), dict):
         err = report["error"]
         extra = {k: v for k, v in err.items() if k not in ("stage", "message")}
@@ -578,9 +601,7 @@ def classify_node(payload: dict[str, Any], selectors: tuple[str, ...]) -> dict[s
     outcome["tests"] = _sanitize_tests(report.get("tests"))
     outcome["tests_total"] = _int(report.get("tests_total"))
     outcome["tests_truncated"] = outcome["tests_total"] > len(outcome["tests"])
-    log = report.get("log") if isinstance(report.get("log"), dict) else {}
-    outcome["log"] = {"head": _log_part(log.get("head"), 4096), "tail": _log_part(log.get("tail"), 8192),
-                      "total_bytes": _int(log.get("total_bytes"), 10**13), "truncated": bool(log.get("truncated"))}
+    outcome["log"] = _sanitize_log(report.get("log"))
     code = report.get("exit") if type(report.get("exit")) is int else None
     outcome["execution"].update(node_exit_code=code, node_seconds=round(_num(report.get("duration_seconds"), 1e6), 3))
     vacuous = [_str(v, 200) for v in (tap.get("vacuous_files") or [])[:20] if isinstance(v, str)]
@@ -602,6 +623,9 @@ def classify_node(payload: dict[str, Any], selectors: tuple[str, ...]) -> dict[s
         return end("failed", "killed_by_signal", f"node was killed by signal {-code} (possibly a resource limit).")
     if not outcome["reports"]["tap_summary_found"]:
         return end("setup_error", "tap_summary_missing", "node produced no complete TAP summary, so no result can be trusted.")
+    if (outcome["reports"]["tap_truncated"] or outcome["reports"]["malformed_lines"]
+            or any(type(raw.get(k)) is not int or raw[k] < 0 for k in ("tests", "pass", "fail", "cancelled", "skipped", "todo"))):
+        return end("setup_error", "malformed_report", "The TAP report is truncated or malformed.")
     if c["fail"] or c["cancelled"]:
         return end("failed", "test_failures", "One or more tests failed or were cancelled.")
     if code != 0:
@@ -695,13 +719,7 @@ def classify_command(payload: dict[str, Any], profile: str) -> dict[str, Any]:
         err = report["error"]
         return end("setup_error", _str(err.get("stage"), 40) or "sandbox", _str(err.get("message"), 300))
 
-    log = report.get("log") if isinstance(report.get("log"), dict) else {}
-    outcome["log"] = {
-        "head": _log_part(log.get("head"), 4096),
-        "tail": _log_part(log.get("tail"), 8192),
-        "total_bytes": _int(log.get("total_bytes"), 10**13),
-        "truncated": bool(log.get("truncated")),
-    }
+    outcome["log"] = _sanitize_log(report.get("log"))
     outcome["execution"] = {
         "container_seconds": round(_num(sandbox.get("container_seconds"), 1e6), 3),
         "exit_code": report.get("exit"),
@@ -775,90 +793,72 @@ def classify_playwright_spec(payload: dict[str, Any], selectors: tuple[str, ...]
         duration_seconds=round(_num(report.get("duration_seconds"), 1e6), 3),
     )
 
-    log = report.get("log") if isinstance(report.get("log"), dict) else {}
-    outcome["log"] = {
-        "head": _log_part(log.get("head"), 4096),
-        "tail": _log_part(log.get("tail"), 8192),
-        "total_bytes": _int(log.get("total_bytes"), 10**13),
-        "truncated": bool(log.get("truncated")),
-    }
+    outcome["log"] = _sanitize_log(report.get("log"))
     if report.get("server_log"):
         outcome["server_log"] = _log_part(report["server_log"], 8192)
 
-    pw = report.get("playwright") if isinstance(report.get("playwright"), dict) else {}
-    raw_counts = pw.get("counts") if isinstance(pw.get("counts"), dict) else {}
-    c = {
-        "collected": _int(raw_counts.get("collected")),
-        "executed": _int(raw_counts.get("executed")),
-        "passed": _int(raw_counts.get("passed")),
-        "failed": _int(raw_counts.get("failed")),
-        "skipped": _int(raw_counts.get("skipped")),
-        "flaky": _int(raw_counts.get("flaky")),
-        "errors": _int(raw_counts.get("errors")),
-    }
-    outcome["counts"] = c
-    raw_tests = pw.get("tests") or []
-    sanitized_tests = []
-    for t in raw_tests[:200] if isinstance(raw_tests, list) else []:
-        if isinstance(t, dict):
-            entry = {
-                "id": _str(t.get("id"), 250),
-                "title": _str(t.get("title"), 200),
-                "outcome": _str(t.get("outcome"), 20),
-                "duration_seconds": round(_num(t.get("duration_seconds"), 1e6), 3),
-            }
-            if t.get("error"):
-                entry["error"] = _str(t.get("error"), 500)
-            sanitized_tests.append(entry)
-    outcome["tests"] = sanitized_tests
-    outcome["tests_total"] = _int(pw.get("tests_total", len(raw_tests)))
-    outcome["tests_truncated"] = outcome["tests_total"] > len(outcome["tests"])
-    outcome["playwright"] = {
-        "specs": [_str(s, 300) for s in pw.get("specs", [])[:20]],
-        "errors": [_str(e, 500) for e in pw.get("errors", [])[:10]],
-    }
-
     if report.get("timed_out"):
         return end("timeout", "timeout", "Playwright spec run exceeded execution deadline.")
+    if code is None:
+        return end("setup_error", "missing_report", "No Playwright launcher exit status was reported.")
+    if code < 0:
+        return end("failed", "killed_by_signal", f"Playwright was killed by signal {-code}.")
 
-    err = report.get("error")
-    if isinstance(err, dict):
-        stage = err.get("stage") or "sandbox"
-        msg = err.get("message") or "Error during spec execution"
-        kind_map = {
-            "startup": "app_startup_failure",
-            "dependency": "dependency_failure",
-            "collection": "collection_failure",
-        }
-        kind = kind_map.get(stage, f"{stage}_failure")
-        return end("setup_error" if stage in {"startup", "dependency"} else "failed", kind, msg)
-
-    if c["errors"] > 0:
-        err_msg = outcome["playwright"]["errors"][0] if outcome["playwright"]["errors"] else "Playwright collection error"
-        return end("failed", "collection_failure", err_msg)
-
-    if c["failed"] > 0:
-        failing_test = next((t for t in raw_tests if t.get("outcome") == "failed"), None)
-        detail = failing_test.get("error") if failing_test else None
-        msg = f"{c['failed']} test(s) failed."
-        if detail:
-            msg += f" First failure: {detail[:200]}"
-        return end("failed", "assertion_failure", msg, failing_tests=c["failed"])
-
-    if code is not None and code != 0:
-        log_tail = outcome["log"]["tail"]
-        if "Scratch server exited during startup" in log_tail or "did not become ready" in log_tail:
-            return end("setup_error", "app_startup_failure", "Application scratch server failed during startup.")
-        if "No module named" in log_tail or "Cannot find module" in log_tail:
-            return end("setup_error", "dependency_failure", "Missing module or dependency during execution.")
+    pw = report.get("playwright")
+    if not isinstance(pw, dict):
+        return end("setup_error", "missing_report", "No structured Playwright report was returned.")
+    raw_counts = pw.get("counts")
+    keys = ("collected", "executed", "passed", "failed", "skipped", "flaky", "incomplete", "timed_out", "errors")
+    if not isinstance(raw_counts, dict) or any(type(raw_counts.get(k)) is not int or raw_counts[k] < 0 for k in keys):
+        return end("setup_error", "malformed_report", "The Playwright report has invalid counts.")
+    c = {key: _int(raw_counts[key]) for key in keys}
+    outcome["counts"] = c
+    raw_tests, specs, errors = (pw.get(key) for key in ("tests", "specs", "errors"))
+    if not all(isinstance(items, list) for items in (raw_tests, specs, errors)):
+        return end("setup_error", "malformed_report", "The Playwright report has invalid test, spec or error lists.")
+    outcome["tests"] = [
+        {"id": _str(t.get("id"), 250), "title": _str(t.get("title"), 200), "file": _str(t.get("file"), 512),
+         "outcome": _str(t.get("outcome"), 20), "duration_seconds": round(_num(t.get("duration_seconds"), 1e6), 3),
+         "error": _str(t.get("error"), 500) or None}
+        for t in raw_tests[:200] if isinstance(t, dict)
+    ]
+    outcome["tests_total"] = _int(pw.get("tests_total"))
+    outcome["tests_truncated"] = outcome["tests_total"] > len(outcome["tests"])
+    outcome["playwright"] = {"specs": [_str(s, 512) for s in specs[:20]], "errors": [_str(e, 500) for e in errors[:10]]}
+    if c["errors"]:
+        message = outcome["playwright"]["errors"][0] if errors else "Playwright collection error"
+        return end("failed", "collection_failure", message)
+    if c["timed_out"]:
+        return end("timeout", "test_timeout", "One or more Playwright tests exceeded their deadlines.")
+    if c["failed"]:
+        failure = next((t["error"] for t in outcome["tests"] if t["outcome"] == "failed"), None)
+        message = f"{c['failed']} test(s) failed."
+        if failure:
+            message += f" First failure: {failure[:200]}"
+        return end("failed", "assertion_failure", message, failing_tests=c["failed"])
+    if (c["incomplete"] or c["collected"] != sum(c[k] for k in ("passed", "skipped", "flaky"))
+            or c["executed"] != c["passed"] + c["flaky"] or outcome["tests_total"] != c["collected"]
+            or len(outcome["tests"]) != min(c["collected"], 200)):
+        return end("failed", "incomplete_run", "The Playwright report does not account for all collected tests.")
+    if c["flaky"]:
+        return end("failed", "flaky_tests", "One or more Playwright tests passed only after retrying.")
+    if code != 0:
         return end("failed", "unexpected_exit", f"Launcher exited with code {code}.")
+    if not c["collected"]:
+        return end("no_tests_collected", "no_tests_collected", "Playwright collected no tests.")
 
-    if c["collected"] == 0:
-        return end("no_tests_collected", "no_tests_collected", "The selectors matched no tests in the Playwright spec.")
-
-    if c["passed"] == 0:
-        return end("no_tests_executed", "no_tests_executed", "Tests were collected but none executed or passed (all skipped).")
-
+    coverage = pw.get("selector_coverage")
+    if (len(selectors) != 1 or not isinstance(coverage, list) or len(coverage) != 1
+            or not isinstance(coverage[0], dict) or coverage[0].get("selector") != selectors[0]
+            or any(type(coverage[0].get(k)) is not int or not 0 <= coverage[0][k] <= c[k]
+                   for k in ("collected", "executed"))):
+        return end("setup_error", "missing_report", "Exact Playwright selector coverage is missing.")
+    selected = coverage[0]
+    outcome["selector_coverage"] = [{key: selected[key] for key in ("selector", "collected", "executed")}]
+    if selected["collected"] != c["collected"]:
+        return end("failed", "selector_mismatch", "Playwright collected tests outside the exact requested spec or title.")
+    if not c["passed"] or selected["executed"] != c["executed"]:
+        return end("no_tests_executed", "no_tests_executed", "The requested selector produced no verified passing execution.")
     return end("passed")
 
 

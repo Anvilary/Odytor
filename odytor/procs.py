@@ -47,16 +47,17 @@ def run_bounded(argv: Sequence[str], *, env: Mapping[str, str], timeout: float, 
     err: collections.deque[bytes] = collections.deque()
     err_buf = bytearray()
     state = {"overflow": False, "err_len": 0}
+    input_sent = threading.Event()
 
     def read_out() -> None:
-        for chunk in iter(lambda: proc.stdout.read(65536), b""):
+        for chunk in iter(lambda: proc.stdout.read1(65536), b""):
             room = max_stdout - len(out)
             if len(chunk) > room:
                 state["overflow"] = True
             out.extend(chunk[:room])
 
     def read_err() -> None:
-        for chunk in iter(lambda: proc.stderr.read(8192), b""):
+        for chunk in iter(lambda: proc.stderr.read1(8192), b""):
             err.append(chunk)
             state["err_len"] += len(chunk)
             while state["err_len"] - len(err[0]) >= stderr_limit:
@@ -72,7 +73,7 @@ def run_bounded(argv: Sequence[str], *, env: Mapping[str, str], timeout: float, 
                         except Exception:
                             pass
                 if len(err_buf) > MAX_LINE_BUFFER:
-                    del err_buf[:-8192]
+                    err_buf.clear()
         if on_stderr_line is not None and err_buf and len(err_buf) <= MAX_LINE_SIZE:
             try:
                 on_stderr_line(err_buf.decode("utf-8", errors="replace"))
@@ -84,6 +85,7 @@ def run_bounded(argv: Sequence[str], *, env: Mapping[str, str], timeout: float, 
             for chunk in stdin_chunks or ():
                 proc.stdin.write(chunk)
             proc.stdin.flush()
+            input_sent.set()
             if not hold_stdin:
                 proc.stdin.close()
         except (BrokenPipeError, OSError, ValueError):
@@ -107,7 +109,11 @@ def run_bounded(argv: Sequence[str], *, env: Mapping[str, str], timeout: float, 
             else:
                 time.sleep(0.05)
                 continue
-            proc.terminate()
+            if canceled and hold_stdin and input_sent.is_set():
+                # Let the runner observe EOF, release its admission lock and remove its sandbox before SSH exits.
+                proc.stdin.close()
+            else:
+                proc.terminate()
             try:
                 proc.wait(grace)
             except subprocess.TimeoutExpired:

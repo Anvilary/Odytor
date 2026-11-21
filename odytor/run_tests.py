@@ -151,6 +151,16 @@ def submit_test_run(client: GitHubClient, repo: str, number: int, expected_head:
                 shutil.rmtree(spool, ignore_errors=True)
 
 
+def workspace_playwright_selectors(policy: RepoPolicy, selectors: Any, test_title: str | None = None):
+    table = policy.extra.get(PLAYWRIGHT_SPEC_PROFILE, {})
+    specs = table.get("specs", ())
+    if test_title:
+        default = specs if len(specs) == 1 else ()
+        selectors = [f"{s}::{test_title}" if "::" not in s else s for s in (selectors or default)]
+    return validate_playwright_spec_selectors(selectors, allowed_specs=specs,
+                                              allowed_dirs=table.get("spec_dirs", ()), test_dirs=policy.test_dirs)
+
+
 def submit_workspace_run(repo: str, workspace_id: str, expected_version: int, *, workspaces: Any, service: JobService,
                          policies: dict[str, RepoPolicy], owner: str, cfg: RunSettings, profile: str = PROFILE_NAME,
                          selectors: Any = None, test_title: str | None = None) -> dict[str, Any]:
@@ -177,17 +187,7 @@ def submit_workspace_run(repo: str, workspace_id: str, expected_version: int, *,
             selected = validate_node_selectors(selectors, test_dirs)
         elif spec.kind == "playwright_spec":
             cfg_table = policy.extra.get(PLAYWRIGHT_SPEC_PROFILE, {})
-            allowed_specs = cfg_table.get("specs", ())
-            if not selectors and allowed_specs and test_title:
-                selectors = [f"{allowed_specs[0]}::{test_title}"]
-            elif test_title:
-                selectors = [f"{s}::{test_title}" if "::" not in s else s for s in (selectors or ())]
-            selected, parsed_selectors = validate_playwright_spec_selectors(
-                selectors,
-                allowed_specs=allowed_specs,
-                allowed_dirs=cfg_table.get("spec_dirs", ()),
-                test_dirs=policy.test_dirs,
-            )
+            selected, parsed_selectors = workspace_playwright_selectors(policy, selectors, test_title)
             test_dirs = cfg_table.get("spec_dirs", policy.test_dirs)
         elif spec.kind == "pytest":
             test_dirs = policy.test_dirs
@@ -293,6 +293,13 @@ def public_view(record: dict[str, Any], currency: dict[str, Any] | None = None,
     ts = record["timestamps"]
     result = record.get("result") or {}
     status = record["status"]
+    tested_source = "workspace_tree" if workspace_run else (
+        "prospective_merge_tree" if record["mode"] == "prospective_merge" else "unmodified_pr_tree")
+    if status == "merge_conflict":
+        tested_source = None
+    elif record["overlay"].get("applied") and not workspace_run:
+        tested_source = ("reviewer_overlay_applied_to_prospective_merge_tree" if record["mode"] == "prospective_merge"
+                         else "reviewer_overlay_applied_to_pr_tree")
     view: dict[str, Any] = {
         "run_id": record["run_id"], "status": status, "repo": record["repo"], "pr": record["pr"],
         "mode": record["mode"], "profile": record["profile"], "profile_version": record["profile_version"],
@@ -304,8 +311,7 @@ def public_view(record: dict[str, Any], currency: dict[str, Any] | None = None,
                    "queue_delay_seconds": (round(ts["started_at"] - ts["created_at"], 3) if ts.get("started_at") else None),
                    "result_expires_at": _iso(record.get("expires_at"))},
         "artifact": record.get("artifact"),
-        "tests_ran_against": ("workspace_tree" if workspace_run or record.get("kind") == "browser" else
-                              "reviewer_overlay_applied_to_pr_tree" if record["overlay"].get("applied") else "unmodified_pr_tree"),
+        "tests_ran_against": tested_source,
         "github_mutations": "none",
     }
     if workspace_run:
@@ -320,15 +326,27 @@ def public_view(record: dict[str, Any], currency: dict[str, Any] | None = None,
                                                   "network", "snapshots", "events", "artifacts", "playwright", "server_log") if k in result})
         if "log" in view and isinstance(view["log"], dict):
             raw_log = view["log"]
-            tail = raw_log.get("tail") or ""
-            if len(tail.encode("utf-8", "replace")) > max_log_bytes:
+            head = (raw_log.get("head") or "").encode("utf-8", "replace")
+            tail = (raw_log.get("tail") or "").encode("utf-8", "replace")
+            if len(head) + len(tail) > max_log_bytes:
+                tail = tail[-max_log_bytes:] if max_log_bytes else b""
                 view["log"] = {
                     **raw_log,
-                    "tail": tail[-max_log_bytes:],
+                    "head": head[:max_log_bytes - len(tail)].decode("utf-8", "ignore"),
+                    "tail": tail.decode("utf-8", "ignore"),
                     "truncated": True,
                 }
         view["green"] = status == "passed"
-        view["evidence_complete"] = status in {"passed", "failed", "completed", "no_tests_executed", "no_tests_collected"} and bool(result.get("counts") is not None)
+        failure_kind = (result.get("failure") or {}).get("kind")
+        view["structured_outcomes_complete"] = (
+            status in {"passed", "failed", "completed", "no_tests_executed", "no_tests_collected"}
+            and result.get("counts") is not None
+            and failure_kind not in {"incomplete_run", "killed_by_signal", "collection_failure", "unexpected_exit"}
+            and not result.get("tests_truncated")
+        )
+        view["evidence_complete"] = view["structured_outcomes_complete"]
+        if isinstance(view.get("log"), dict):
+            view["log_complete"] = not view["log"].get("truncated")
     else:
         view["green"] = False
         view["evidence_complete"] = False

@@ -218,9 +218,14 @@ def test_playwright_spec_selector_validation():
     assert len(canons) == 1
     assert len(parsed_list) == 1
 
-    # Empty selectors falls back to allowed_specs
-    canons_def, _ = validate_playwright_spec_selectors(None, allowed_specs=allowed)
-    assert canons_def == allowed
+    # An omitted selector is unambiguous only for a single allowed default.
+    canons_def, _ = validate_playwright_spec_selectors(None, allowed_specs=allowed[:1])
+    assert canons_def == allowed[:1]
+    another = "tests/e2e/other/notes-qa-regressions.spec.mjs"
+    with pytest.raises(ProfileError, match="one selector"):
+        validate_playwright_spec_selectors([allowed[0], another])
+    with pytest.raises(ProfileError, match="explicitly"):
+        validate_playwright_spec_selectors(None, allowed_specs=allowed)
 
 
 def test_load_policies_playwright_spec():

@@ -4,6 +4,7 @@ Standard library only; copied beside the job inputs. The container has no networ
 credentials. Everything this module reports is evidence from inside the sandbox, which
 the code under test can influence, and is validated by the host before use.
 """
+import base64
 import collections
 import glob
 import json
@@ -26,12 +27,11 @@ MAX_TESTS = 200
 MAX_TEXT = 200
 LOG_HEAD, LOG_TAIL = 4096, 8192
 
-_ODYTOR_REPORTER_JS = """const fs = require('fs');
-class OdyTorReporter {
+_ODYTOR_REPORTER_JS = """class OdyTorReporter {
   onBegin(config, suite) {
     try {
       const total = suite.allTests().length;
-      process.stderr.write('ODYTOR_PROGRESS:' + JSON.stringify({
+      process.stderr.write('\\nODYTOR_PROGRESS:' + JSON.stringify({
         type: 'collection',
         phase: 'executing_tests',
         total: total
@@ -41,7 +41,7 @@ class OdyTorReporter {
   onTestBegin(test) {
     try {
       const fullTitle = typeof test.titlePath === 'function' ? test.titlePath().join(' > ') : (test.title || '');
-      process.stderr.write('ODYTOR_PROGRESS:' + JSON.stringify({
+      process.stderr.write('\\nODYTOR_PROGRESS:' + JSON.stringify({
         type: 'test_start',
         phase: 'executing_tests',
         id: fullTitle,
@@ -53,7 +53,7 @@ class OdyTorReporter {
   onTestEnd(test, result) {
     try {
       const fullTitle = typeof test.titlePath === 'function' ? test.titlePath().join(' > ') : (test.title || '');
-      process.stderr.write('ODYTOR_PROGRESS:' + JSON.stringify({
+      process.stderr.write('\\nODYTOR_PROGRESS:' + JSON.stringify({
         type: 'test_end',
         phase: 'executing_tests',
         id: fullTitle,
@@ -66,7 +66,7 @@ class OdyTorReporter {
   }
   onEnd(result) {
     try {
-      process.stderr.write('ODYTOR_PROGRESS:' + JSON.stringify({
+      process.stderr.write('\\nODYTOR_PROGRESS:' + JSON.stringify({
         type: 'phase',
         phase: 'finalizing',
         status: result.status
@@ -80,6 +80,7 @@ module.exports = OdyTorReporter;
 
 def _emit_progress(**event):
     try:
+        event.setdefault("ts", round(time.time(), 3))
         sys.stderr.write("ODYTOR_PROGRESS:" + json.dumps(event) + "\n")
         sys.stderr.flush()
     except Exception:
@@ -126,13 +127,29 @@ def _read_events():
                 except ValueError:
                     malformed += 1
                     continue
-                if isinstance(item, dict):
+                if isinstance(item, dict) and _valid_pytest_event(item):
                     events.append(item)
                 else:
                     malformed += 1
     except OSError:
         pass
     return events, malformed
+
+
+def _valid_pytest_event(event):
+    kind = event.get("e")
+    if kind == "collected":
+        ids = event.get("ids")
+        count = event.get("n")
+        return (type(count) is int and isinstance(ids, list) and 0 <= len(ids) <= count
+                and all(isinstance(nodeid, str) and nodeid for nodeid in ids))
+    if kind == "finish":
+        return type(event.get("exit")) is int
+    if kind == "collect_error":
+        return isinstance(event.get("id"), str)
+    return (kind == "report" and isinstance(event.get("id"), str)
+            and event.get("w") in ("setup", "call", "teardown")
+            and event.get("o") in ("passed", "failed", "skipped"))
 
 
 def _num(value, high=1e12):
@@ -172,11 +189,10 @@ def _summarize(events):
             phases.setdefault(event["id"], []).append(event)
     tests = []
     for nodeid, reports in phases.items():
-        outcome, message, duration, called = None, "", 0.0, False
+        outcome, message, duration = None, "", 0.0
         for rep in reports:
             duration += _num(rep.get("d"))
             state, when, xfail = rep.get("o"), rep.get("w"), bool(rep.get("xfail"))
-            called = called or when == "call"
             if state == "failed":
                 outcome = "failed" if when == "call" and outcome != "error" else "error"
                 message = message or str(rep.get("msg", ""))
@@ -185,8 +201,9 @@ def _summarize(events):
                 message = str(rep.get("msg", ""))
             elif state == "passed" and when == "call" and outcome is None:
                 outcome = "xpassed" if xfail else "passed"
-        if outcome == "passed" and not called:
-            outcome = None
+        expected = ["setup", "call", "teardown"] if reports[0].get("o") == "passed" else ["setup", "teardown"]
+        if [rep.get("w") for rep in reports] != expected:
+            outcome = "incomplete"
         tests.append({"id": nodeid[:MAX_TEXT], "outcome": outcome or "incomplete", "duration": round(duration, 4),
                       "message": message[:MAX_TEXT]})
     return collected, collect_errors, finish, tests
@@ -203,15 +220,31 @@ def _counts(tests, collected):
             "not_run": max((collected["count"] if collected else 0) - reported + counts["incomplete"], 0)}
 
 
+RETAIN_HEAD, RETAIN_TAIL = 96 * 1024, 160 * 1024   # bounded copy of the whole log, returned as an artifact when the snippets are not enough
+_LOGS = []
+
+
 class _Log:
-    """Constant-memory log capture: the first and last bytes plus a total."""
+    """Constant-memory log capture: snippets (first and last bytes plus a total) and a larger bounded retained copy."""
 
     def __init__(self):
         self.head, self.tail, self.total = b"", collections.deque(), 0
         self._tail_len = 0
+        self.keep_head, self.keep_tail, self._keep_tail_len = bytearray(), collections.deque(), 0
+        _LOGS.append(self)
 
     def feed(self, chunk):
         self.total += len(chunk)
+        rest = chunk
+        if len(self.keep_head) < RETAIN_HEAD:
+            take = RETAIN_HEAD - len(self.keep_head)
+            self.keep_head += rest[:take]
+            rest = rest[take:]
+        if rest:
+            self.keep_tail.append(rest)
+            self._keep_tail_len += len(rest)
+            while self._keep_tail_len - len(self.keep_tail[0]) >= RETAIN_TAIL:
+                self._keep_tail_len -= len(self.keep_tail.popleft())
         if len(self.head) < LOG_HEAD:
             take = LOG_HEAD - len(self.head)
             self.head += chunk[:take]
@@ -227,6 +260,68 @@ class _Log:
         truncated = self.total > len(self.head) + len(tail)
         return {"head": self.head.decode("utf-8", "replace"), "tail": tail.decode("utf-8", "replace"),
                 "total_bytes": self.total, "truncated": truncated}
+
+    def retained(self):
+        """(bytes, complete): the retained copy, and whether it is the entire log."""
+        tail = b"".join(self.keep_tail)[-RETAIN_TAIL:]
+        complete = self.total <= len(self.keep_head) + len(tail)
+        if complete:
+            return bytes(self.keep_head) + tail, True
+        return bytes(self.keep_head) + b"\n[... %d bytes omitted by the runner ...]\n" % (self.total - len(self.keep_head) - len(tail)) + tail, False
+
+
+class _ProgressTap:
+    """Child output filter: forwards the ODYTOR_PROGRESS lines a child writes into its merged output as live events and
+    passes everything else to the log. Without it those lines only ever reached the final log."""
+
+    PREFIX = b"ODYTOR_PROGRESS:"
+
+    def __init__(self, log):
+        self.log, self.buf = log, bytearray()
+
+    def feed(self, chunk):
+        self.buf += chunk
+        while True:
+            end = self.buf.find(b"\n")
+            if end < 0:
+                break
+            line = bytes(self.buf[:end + 1])
+            del self.buf[:end + 1]
+            self._line(line)
+        if len(self.buf) > 65536:  # an overlong unterminated line is plain output
+            self.log.feed(bytes(self.buf))
+            self.buf.clear()
+
+    def _line(self, line):
+        if not line.startswith(self.PREFIX):
+            self.log.feed(line)
+            return
+        if len(line) > 16384:
+            return
+        try:
+            event = json.loads(line[len(self.PREFIX):])
+            if isinstance(event, dict):
+                _emit_progress(**{k: v for k, v in event.items() if isinstance(k, str)})
+        except (ValueError, TypeError):
+            self.log.feed(line)
+
+    def close(self):
+        if self.buf:
+            self.log.feed(bytes(self.buf))
+            self.buf.clear()
+
+
+def _attach_log_artifact(report):
+    """When the report's log snippets are not the whole log, keep a bounded copy as an artifact that can be fetched."""
+    candidates = [lg for lg in _LOGS if lg.total > len(lg.head) + len(b"".join(lg.tail)[-LOG_TAIL:])]
+    if not candidates or isinstance(report.get("artifacts"), list) and any(a.get("name") == "run.log" for a in report["artifacts"]):
+        return
+    log = max(candidates, key=lambda lg: lg.total)
+    data, complete = log.retained()
+    report.setdefault("artifacts", []).append({"name": "run.log", "kind": "log", "b64": base64.b64encode(data).decode("ascii")})
+    if isinstance(report.get("log"), dict):
+        report["log"]["retained_bytes"] = len(data)
+        report["log"]["retained_complete"] = complete
 
 
 def _run_tests(spec):
@@ -253,9 +348,12 @@ def _run_tests(spec):
         report["error"] = {"stage": "spawn", "message": str(exc)[:400]}
         return report
 
+    tap = _ProgressTap(log)
+
     def pump():
-        for chunk in iter(lambda: proc.stdout.read(8192), b""):
-            log.feed(chunk)
+        for chunk in iter(lambda: proc.stdout.read1(8192), b""):
+            tap.feed(chunk)
+        tap.close()
 
     stop_heartbeat = threading.Event()
 
@@ -285,6 +383,14 @@ def _run_tests(spec):
     _emit_progress(type="phase", phase="finalizing", message="Finalizing pytest report")
     events, malformed = _read_events()
     collected, collect_errors, finish, tests = _summarize(events)
+    if ([event["e"] for event in events].count("collected") > 1
+            or [event["e"] for event in events].count("finish") > 1
+            or finish is not None and events[-1]["e"] != "finish"):
+        malformed += 1
+    if collected and collected["count"] == len(collected["ids"]):
+        known_ids = set(collected["ids"])
+        if len(known_ids) != collected["count"] or any(test["id"] not in known_ids for test in tests):
+            malformed += 1
     counts = _counts(tests, collected)
     order = {"failed": 0, "error": 1, "incomplete": 2, "xpassed": 3, "skipped": 4, "xfailed": 5, "passed": 6}
     ranked = sorted(tests, key=lambda item: order.get(item["outcome"], 9))
@@ -559,58 +665,91 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text) if text else ""
 
 
-def _parse_playwright_json(data: dict) -> dict:
-    stats = data.get("stats") or {}
-    counts = {
-        "collected": 0,
-        "executed": 0,
-        "passed": int(stats.get("expected", 0) or 0),
-        "failed": int(stats.get("unexpected", 0) or 0),
-        "skipped": int(stats.get("skipped", 0) or 0),
-        "flaky": int(stats.get("flaky", 0) or 0),
-        "errors": len(data.get("errors") or []),
-    }
-    specs_list: list[str] = []
-    tests_list: list[dict] = []
+def _parse_playwright_json(data: dict, selector: str) -> dict:
+    """Check the full JSON report before reducing it to bounded response details."""
+    stat_keys = ("expected", "unexpected", "skipped", "flaky")
+    stats = data["stats"]
+    if any(type(stats[key]) is not int or stats[key] < 0 for key in stat_keys):
+        raise ValueError("invalid Playwright summary counts")
+    root = data["config"]["rootDir"]
+    if not os.path.isabs(root):
+        raise ValueError("Playwright report rootDir must be absolute")
+    suites, raw_errors = data["suites"], data["errors"]
+    if not isinstance(suites, list) or not isinstance(raw_errors, list):
+        raise ValueError("invalid Playwright suites or errors")
+    wanted_path, _, wanted_title = selector.partition("::")
+    counts = dict.fromkeys(("collected", "executed", "passed", "failed", "skipped", "flaky",
+                            "incomplete", "timed_out", "errors"), 0)
+    counts["errors"] = len(raw_errors)
+    statuses = collections.Counter()
+    specs = set()
+    tests = []
+    matched = executed = 0
 
     def visit_suite(suite: dict) -> None:
-        file_path = suite.get("file") or ""
-        for spec in suite.get("specs") or []:
-            counts["collected"] += 1
-            spec_title = spec.get("title") or ""
-            spec_file = spec.get("file") or file_path
-            if spec_file and spec_file not in specs_list:
-                specs_list.append(spec_file)
-            for t in spec.get("tests") or []:
-                for r in t.get("results") or []:
+        nonlocal matched, executed
+        for spec in suite.get("specs", []):
+            title = spec["title"]
+            filename = spec["file"]
+            if not isinstance(title, str) or not title or not isinstance(filename, str) or not filename:
+                raise ValueError("invalid Playwright spec identity")
+            file_path = os.path.relpath(os.path.join(root, filename), WORK)
+            selected = file_path == wanted_path and (not wanted_title or title == wanted_title)
+            specs.add(file_path)
+            project_tests = spec["tests"]
+            if not isinstance(project_tests, list) or not project_tests:
+                raise ValueError("Playwright spec lacks project results")
+            for test in project_tests:
+                status = test["status"]
+                results = test["results"]
+                if status not in stat_keys or not isinstance(results, list):
+                    raise ValueError("invalid Playwright test result")
+                attempts = [result["status"] for result in results]
+                if any(state not in {"passed", "failed", "skipped", "timedOut", "interrupted"} for state in attempts):
+                    raise ValueError("invalid Playwright attempt status")
+                latest = results[-1] if results else {}
+                last = attempts[-1] if attempts else None
+                counts["collected"] += 1
+                statuses[status] += 1
+                if selected:
+                    matched += 1
+                if last in {"passed", "failed", "timedOut"}:
                     counts["executed"] += 1
-                    err_obj = r.get("error") or (r.get("errors")[0] if r.get("errors") else None)
-                    err_msg = ""
-                    if isinstance(err_obj, dict):
-                        err_msg = _strip_ansi(err_obj.get("message") or "")
-                    test_entry = {
-                        "id": f"{spec_file}::{spec_title}" if spec_file else spec_title,
-                        "title": spec_title,
-                        "file": spec_file,
-                        "outcome": "passed" if r.get("status") == "passed" else ("skipped" if r.get("status") == "skipped" else "failed"),
-                        "status": r.get("status"),
-                        "duration_seconds": round(_num(r.get("duration"), 1e6) / 1000.0, 3),
-                        "error": err_msg[:500] if err_msg else None,
-                    }
-                    tests_list.append(test_entry)
-        for child in suite.get("suites") or []:
+                    if selected:
+                        executed += 1
+                if not results or "interrupted" in attempts:
+                    outcome = "incomplete"
+                elif last == "timedOut":
+                    outcome = "timed_out"
+                elif status == "unexpected":
+                    outcome = "failed"
+                elif status == "flaky":
+                    outcome = "flaky"
+                elif status == "skipped" and last == "skipped":
+                    outcome = "skipped"
+                elif status == "expected" and last == "passed":
+                    outcome = "passed"
+                else:
+                    outcome = "incomplete"
+                counts[outcome] += 1
+                if len(tests) < MAX_TESTS:
+                    error = latest.get("error") or next(iter(latest.get("errors") or []), {})
+                    tests.append({"id": f"{file_path}::{title}", "title": title, "file": file_path,
+                                  "outcome": outcome, "status": last,
+                                  "duration_seconds": round(_num(latest.get("duration"), 1e6) / 1000.0, 3),
+                                  "error": _strip_ansi(error.get("message", ""))[:500] if error else None})
+        for child in suite.get("suites", []):
             visit_suite(child)
 
-    for top_suite in data.get("suites") or []:
-        visit_suite(top_suite)
+    for suite in suites:
+        visit_suite(suite)
+    if any(statuses[key] != stats[key] for key in stat_keys):
+        raise ValueError("Playwright summary disagrees with the project results")
 
-    raw_errors = data.get("errors") or []
     return {
-        "counts": counts,
-        "specs": specs_list,
-        "tests": tests_list[:MAX_TESTS],
-        "tests_total": len(tests_list),
-        "errors": [_strip_ansi(e.get("message", ""))[:400] for e in raw_errors if isinstance(e, dict)],
+        "counts": counts, "specs": sorted(specs)[:20], "tests": tests, "tests_total": counts["collected"],
+        "selector_coverage": [{"selector": selector, "collected": matched, "executed": executed}],
+        "errors": [_strip_ansi(error["message"])[:400] for error in raw_errors[:10]],
     }
 
 
@@ -677,15 +816,16 @@ def _run_playwright_spec(spec):
 
     argv = [sys.executable, launcher]
     parsed_selectors = pw_cfg.get("parsed_selectors") or []
-    if parsed_selectors:
-        sel = parsed_selectors[0]
-        spec_path = sel.get("spec_path")
-        if spec_path:
-            argv.append(spec_path)
-        title = sel.get("test_title")
-        if title:
-            escaped_title = re.sub(r"([.*+?^${}()|[\]\\])", r"\\\1", title)
-            argv += ["-g", escaped_title]
+    selectors = spec.get("selectors") or []
+    if len(parsed_selectors) != 1 or len(selectors) != 1:
+        report["error"] = {"stage": "collection", "message": "Playwright requires exactly one selector."}
+        return report
+    sel = parsed_selectors[0]
+    argv.append(sel["spec_path"])
+    title = sel.get("test_title")
+    if title:
+        escaped_title = re.sub(r"([.*+?^${}()|[\]\\])", r"\\\1", title)
+        argv += ["-g", f"(?:^| ){escaped_title}(?: |$)"]
     argv.append(f"--reporter={reporter_path},json")
 
     log, started = _Log(), time.monotonic()
@@ -699,10 +839,11 @@ def _run_playwright_spec(spec):
         return report
 
     launched_browser = [False]
+    tap = _ProgressTap(log)
 
     def pump():
-        for chunk in iter(lambda: proc.stdout.read(8192), b""):
-            log.feed(chunk)
+        for chunk in iter(lambda: proc.stdout.read1(8192), b""):
+            tap.feed(chunk)
             if not launched_browser[0]:
                 chunk_lower = chunk.lower()
                 if (b"ready at http" in chunk_lower or b"running at http" in chunk_lower or
@@ -710,6 +851,7 @@ def _run_playwright_spec(spec):
                         b"server ready" in chunk_lower):
                     launched_browser[0] = True
                     _emit_progress(type="phase", phase="launching_browser", message="Application server ready, launching Playwright")
+        tap.close()
 
     stop_heartbeat = threading.Event()
 
@@ -763,7 +905,7 @@ def _run_playwright_spec(spec):
         try:
             with open(report_json, "r", encoding="utf-8") as f:
                 pw_data = json.load(f)
-            report["playwright"] = _parse_playwright_json(pw_data)
+            report["playwright"] = _parse_playwright_json(pw_data, selectors[0])
         except Exception as exc:
             report["error"] = {"stage": "collection", "message": f"Malformed Playwright report: {exc}"}
     else:
@@ -774,8 +916,8 @@ def _run_playwright_spec(spec):
             report["error"] = {"stage": "dependency", "message": "Missing dependency required for test execution."}
         elif timed_out:
             pass
-        elif proc.returncode != 0:
-            report["error"] = {"stage": "execution", "message": f"Playwright runner exited with status {proc.returncode} before creating report."}
+        else:
+            report["error"] = {"stage": "missing_report", "message": f"Playwright launcher exited with status {proc.returncode} without a JSON report."}
 
     return report
 
@@ -793,6 +935,8 @@ def main(argv):
         report = _run_cmd(spec)
     else:
         report = _run_tests(spec)
+    if isinstance(report, dict) and "artifacts" not in report:
+        _attach_log_artifact(report)
     sys.stdout.write("\n" + MARK + json.dumps(report, separators=(",", ":")) + "\n")
     sys.stdout.flush()
     return 0
