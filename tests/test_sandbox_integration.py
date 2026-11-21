@@ -386,7 +386,7 @@ def test_stalled_client_is_cut_off_by_the_frame_deadline(root, tmp_path):
 
 # --- phase 2: environment reuse and lifecycle through the real runner ------------------------------
 def env_dirs(root):
-    return sorted(p.name for p in (root / 'envs').iterdir() if p.is_dir() and (p / '.gp-ready').exists())
+    return sorted(p.name for p in (root / 'envs').glob('*') if p.is_dir() and (p / '.gp-ready').exists())
 
 
 def test_environment_is_prepared_once_then_reused_across_different_sources(tmp_path_factory, tmp_path):
