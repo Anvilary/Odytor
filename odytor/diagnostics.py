@@ -167,7 +167,7 @@ def safe_payload(
             cuts.append(key)
             result["truncated"] = True
             result["truncated_fields"] = sorted(set(cuts))
-            _mark_incomplete(result)
+            _mark_response_incomplete(result, cuts)
         if result.get("truncated") and isinstance(result.get("diff"), str):
             content = result["diff"].removesuffix(TRUNCATION_MARKER)
             if result["diff"].endswith(TRUNCATION_MARKER):
@@ -189,6 +189,13 @@ def _mark_incomplete(value: Any) -> None:
     elif isinstance(value, list):
         for item in value:
             _mark_incomplete(item)
+
+
+def _mark_response_incomplete(value: dict[str, Any], cuts: list[str]) -> None:
+    if "structured_outcomes_complete" in value and all(path == "log" or path.startswith("log.") for path in cuts):
+        value["log_complete"] = False
+    else:
+        _mark_incomplete(value)
 
 
 def _safe_payload_track(
@@ -283,7 +290,8 @@ def _safe_payload_track(
 
             if all_truncated:
                 result_dict["truncated"] = True
-                _mark_incomplete(result_dict)
+                if key_path != "log" or "retained_complete" not in result_dict:
+                    _mark_response_incomplete(result_dict, all_truncated)
 
                 if diff_was_cut and "returned_lines" in result_dict and isinstance(result_dict["returned_lines"], int):
                     diff_val = result_dict.get("diff")

@@ -907,7 +907,7 @@ def _run_playwright_spec(spec):
                 pw_data = json.load(f)
             report["playwright"] = _parse_playwright_json(pw_data, selectors[0])
         except Exception as exc:
-            report["error"] = {"stage": "collection", "message": f"Malformed Playwright report: {exc}"}
+            report["error"] = {"stage": "malformed_report", "message": f"Malformed Playwright report: {exc}"}
     else:
         # Check why report.json was not generated
         if "Scratch server exited during startup" in log_text or "did not become ready" in log_text:

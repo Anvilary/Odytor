@@ -140,3 +140,15 @@ def test_an_over_budget_field_keeps_most_of_the_budget_instead_of_half():
     assert 0.9 * 262144 <= size <= 262144
     assert result['diff_complete'] is False and result['truncated_fields'] == ['diff']
     assert result['diff_returned_lines'] == len(result['diff'].removesuffix('\n[output truncated]').splitlines())
+
+
+def test_incomplete_log_window_preserves_complete_structured_run_outcomes():
+    view = {'structured_outcomes_complete': True, 'evidence_complete': True, 'log_complete': False,
+            'tests': [{'id': 'test_ok'}],
+            'log': {'tail': 'sample', 'truncated': True, 'retained_complete': True}}
+    sanitized = safe_payload(view)
+    assert sanitized['truncated_fields'] == ['log']
+    assert sanitized['structured_outcomes_complete'] is True and sanitized['evidence_complete'] is True
+    assert sanitized['log_complete'] is False and sanitized['log']['retained_complete'] is True
+    view['tests'][0]['id'] = 'x' * 100
+    assert safe_payload(view, limit=40)['structured_outcomes_complete'] is False

@@ -378,7 +378,7 @@ def test_repeated_outcomes_release_runtime_resources_and_retain_evidence(stack, 
                 data(server, 'browser_close', session_id=submitted['session']['session_id'])
             if expected == 'failed':
                 assert terminal['structured_outcomes_complete'] and terminal['log_complete'] is False
-                artifact = next(art for art in terminal['artifacts'] if art['name'] == 'run.log')
+                artifact = next(art for art in terminal['artifacts'] if art['kind'] == 'log')
                 assert artifact['tested_tree'] == expected_tree
                 page = data(server, 'artifact_get', artifact_id=artifact['artifact_id'], mode='text', length=1024)
                 assert page['window']['next_offset'] == 1024 and page['meta']['sha256'] == artifact['sha256']

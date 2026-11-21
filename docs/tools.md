@@ -228,7 +228,7 @@ Retrieves execution evidence, individual test outcomes, logs, and cache performa
 - Verifies continued repository read permissions through the GitHub API before returning data.
 - Returns status (`passed`, `failed`, `setup_error`, `timeout`, `canceled`, `no_tests_executed`).
 - Includes overlay digest, tested tree SHA, execution duration, and currency check (`currency.tested_head_is_current_pr_head`).
-- Use `wait_seconds` and pass each returned `next_cursor` as `after_event_id` to page live progress. Polling and disconnecting leave the job running. `structured_outcomes_complete` describes the test report, and `log_complete` describes the log window. A bounded retained `run.log` may be available through `artifact_get`.
+- Use `wait_seconds` and pass each returned `next_cursor` as `after_event_id` to page live progress. Polling and disconnecting leave the job running. `structured_outcomes_complete` describes the test report, and `log_complete` describes the log window. A bounded retained log may be available through `artifact_get`.
 
 ### `test_run_list`
 
