@@ -334,8 +334,26 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             workspaces.peek(workspace_id, owner)["repo"], workspace_id, expected_version, workspaces=workspaces, service=service,
             policies=current_policies(), owner=owner, cfg=runs, profile=profile, selectors=selectors, test_title=test_title), limit=262144)
 
+    @tool(annotations={"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
+          description="List your open workspaces with their IDs, repositories, PR numbers, versions, trees, and expiration times. Only your own workspaces on permitted repositories are returned. Read-only; requires no write confirmation.")
+    def workspace_list() -> dict[str, Any]:
+        if workspaces is None:
+            return safe_payload(ValidationError("Workspaces are disabled on this server (ODYTOR_WORKSPACES=off).").to_dict())
+        try:
+            owner = caller_principal(cfg, remote)
+            return safe_payload({"workspaces": [workspaces.summary(r) for r in workspaces.list_for(owner) if cfg.is_repo_allowed(r["repo"])]})
+        except GitPlusError as err:
+            return safe_payload(err.to_dict())
+
+    @tool(annotations={"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
+          description="Retrieve detailed status and metadata for a workspace you own: version, tree, source revision, expiry, checkpoints, and whether uncommitted changes exist. Read-only; requires no write confirmation.")
+    def workspace_status(workspace_id: WorkspaceId) -> dict[str, Any]:
+        if workspaces is None:
+            return safe_payload(ValidationError("Workspaces are disabled on this server (ODYTOR_WORKSPACES=off).").to_dict())
+        return invoke_ws(workspace_id, lambda owner: workspaces.summary(workspaces.get(workspace_id, owner, operation="manage")))
+
     @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
-          description="Manage workspaces. action='list' (your open workspaces), 'status' (one workspace: version, tree, expiry, checkpoints, whether it differs from its source), 'extend' (hours, capped by the maximum lifetime) or 'close' (deletes the workspace and its unpublished changes). Expired workspaces are removed automatically; nothing here touches GitHub.")
+          description="Manage workspaces. action='extend' (hours, capped by the maximum lifetime) or 'close' (deletes the workspace and its unpublished changes). For read-only inspection, prefer workspace_list and workspace_status, which require no write approval. Expired workspaces are removed automatically; nothing here touches GitHub.")
     def workspace_manage(action: Literal["list", "status", "extend", "close"], workspace_id: WorkspaceId | None = None,
                          hours: Annotated[float, Field(gt=0)] = 24.0) -> dict[str, Any]:
         if workspaces is None:

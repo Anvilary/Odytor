@@ -108,6 +108,9 @@ class QueuedJob:
 Runner = Callable[[QueuedJob, "threading.Event"], dict[str, Any]]
 
 
+ALLOWED_EVENT_TYPES = frozenset({"phase", "collection", "test_start", "test_end", "diagnostic", "heartbeat"})
+
+
 class RunTracker:
     """Live progress tracker for active test runs, with Condition variable for bounded waiters."""
 
@@ -122,47 +125,68 @@ class RunTracker:
         self.active_tests: dict[str, dict[str, Any]] = {}
         self.counts = {"collected": 0, "executed": 0, "passed": 0, "failed": 0, "skipped": 0, "errors": 0}
         self.last_heartbeat: float = time.monotonic()
+        self.last_progress: float = time.monotonic()
         self.waiters = 0
         self.terminal = False
         self.outcome: dict[str, Any] | None = None
 
-    def record_event(self, data: dict[str, Any]) -> None:
+    def record_event(self, data: Any) -> None:
+        if not isinstance(data, dict):
+            return
+        ev_type = str(data.get("type", "event"))
+        if ev_type not in ALLOWED_EVENT_TYPES:
+            return
+
         with self.cv:
+            if ev_type == "heartbeat":
+                self.last_heartbeat = time.monotonic()
+                return
+
+            self.last_progress = time.monotonic()
             self.event_seq += 1
-            ev_type = str(data.get("type", "event"))
             now = time.time()
             event: dict[str, Any] = {
                 "event_id": self.event_seq,
                 "timestamp": now,
                 "type": ev_type,
             }
-            for k, v in data.items():
-                if k not in event and isinstance(v, (str, int, float, bool, list, dict)):
-                    event[k] = v
-            self.events.append(event)
 
             if "phase" in data and isinstance(data["phase"], str):
-                self.phase = data["phase"]
+                phase_val = _str(data["phase"], 50)
+                self.phase = phase_val
+                event["phase"] = phase_val
 
-            if ev_type == "heartbeat":
-                self.last_heartbeat = time.monotonic()
-            elif ev_type == "collection":
-                if isinstance(data.get("total"), int):
-                    self.counts["collected"] = data["total"]
+            if ev_type == "collection":
+                total = _int(data.get("total"), 100000)
+                self.counts["collected"] = total
+                event["total"] = total
             elif ev_type == "test_start":
-                tid = str(data.get("id") or data.get("title") or "")
-                self.active_tests[tid] = {"title": str(data.get("title", tid)), "started_at": now}
+                tid = safe_text(_str(data.get("id") or data.get("title") or "", 250), 250)
+                title = safe_text(_str(data.get("title", tid), 200), 200)
+                self.active_tests[tid] = {"title": title, "started_at": now}
+                event["id"] = tid
+                event["title"] = title
             elif ev_type == "test_end":
-                tid = str(data.get("id") or data.get("title") or "")
+                tid = safe_text(_str(data.get("id") or data.get("title") or "", 250), 250)
+                title = safe_text(_str(data.get("title", tid), 200), 200)
+                outcome = _str(data.get("outcome"), 20)
+                if outcome not in {"passed", "failed", "error", "skipped", "flaky"}:
+                    outcome = "unknown"
+                dur = _int(data.get("duration_ms"), 100000000)
+                retry = _int(data.get("retry"), 100)
                 self.active_tests.pop(tid, None)
                 self.counts["executed"] += 1
-                outcome = data.get("outcome")
                 if outcome == "passed":
                     self.counts["passed"] += 1
                 elif outcome in {"failed", "error"}:
                     self.counts["failed"] += 1
                 elif outcome == "skipped":
                     self.counts["skipped"] += 1
+                event.update(id=tid, title=title, outcome=outcome, duration_ms=dur, retry=retry)
+            elif ev_type == "diagnostic" or "message" in data:
+                event["message"] = safe_text(_str(data.get("message"), 300), 300)
+
+            self.events.append(event)
             self.cv.notify_all()
 
     def set_phase(self, phase: str) -> None:
@@ -172,6 +196,7 @@ class RunTracker:
         with self.cv:
             self.terminal = True
             self.outcome = outcome
+            self.last_progress = time.monotonic()
             self.phase = str(outcome.get("status", "completed"))
             self.event_seq += 1
             self.events.append({
@@ -185,19 +210,30 @@ class RunTracker:
 
     def get_progress(self, after_event_id: int = 0, max_events: int = 50) -> dict[str, Any]:
         with self.cv:
-            sliced = [e for e in self.events if e["event_id"] > after_event_id][:max_events]
-            last_id = sliced[-1]["event_id"] if sliced else after_event_id
-            remaining = sum(1 for e in self.events if e["event_id"] > last_id)
+            events_list = list(self.events)
+            oldest_id = events_list[0]["event_id"] if events_list else 0
+            cursor_gap = bool(after_event_id > 0 and oldest_id > 0 and after_event_id < oldest_id)
+
+            sliced = [e for e in events_list if e["event_id"] > after_event_id][:max_events]
+            next_cursor = sliced[-1]["event_id"] if sliced else after_event_id
+            remaining = sum(1 for e in events_list if e["event_id"] > next_cursor)
+            has_more = remaining > 0
+
             return {
                 "run_id": self.run_id,
                 "phase": self.phase,
                 "active_tests": list(self.active_tests.values()),
                 "counts": dict(self.counts),
                 "last_heartbeat_ago_seconds": round(time.monotonic() - self.last_heartbeat, 1),
+                "last_progress_ago_seconds": round(time.monotonic() - self.last_progress, 1),
                 "terminal": self.terminal,
                 "events": sliced,
+                "next_cursor": next_cursor,
+                "has_more": has_more,
                 "events_remaining": remaining,
                 "latest_event_id": self.event_seq,
+                "cursor_gap": cursor_gap,
+                "cursor_expired": cursor_gap,
             }
 
 
@@ -225,6 +261,8 @@ def make_subprocess_runner(command: tuple[str, ...], *, extra_wait: int = 1500) 
     def run(job: QueuedJob, cancel: threading.Event) -> dict[str, Any]:
         def on_err_line(line: str) -> None:
             if line.startswith("ODYTOR_PROGRESS:") and job.on_progress is not None:
+                if len(line) > 16384:
+                    return
                 try:
                     payload = json.loads(line[len("ODYTOR_PROGRESS:"):])
                     if isinstance(payload, dict):
@@ -1056,14 +1094,17 @@ class JobService:
             outcome["artifacts"] = self._intake_artifacts(record, payload)
         self._finish(self.store.load(job.run_id) or record, outcome)
 
-    def get_progress_or_wait(self, run_id: str, wait_seconds: float = 0.0, after_event_id: int = 0,
+    def get_progress_or_wait(self, run_id: str, owner: str, wait_seconds: float = 0.0, after_event_id: int = 0,
                              max_events: int = 50) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         self.start()
         self.purge()
+        record = self.store.load(run_id)
+        if record is None or record.get("owner") != owner:
+            return None, None
+
         wait_seconds = max(0.0, min(float(wait_seconds), 60.0))
         tracker = self._trackers.get(run_id)
         if tracker is None:
-            record = self.store.load(run_id)
             return record, None
 
         if wait_seconds > 0.0 and not tracker.terminal:
@@ -1083,7 +1124,7 @@ class JobService:
                         tracker.waiters -= 1
 
         prog = tracker.get_progress(after_event_id=after_event_id, max_events=max_events)
-        record = self.store.load(run_id)
+        record = self.store.load(run_id) or record
         return record, prog
 
     def drain(self, timeout: float = 300.0) -> bool:

@@ -21,6 +21,10 @@ class ProcResult:
     overflowed: bool = False
 
 
+MAX_LINE_BUFFER = 65536
+MAX_LINE_SIZE = 16384
+
+
 def _kill_group(proc: subprocess.Popen) -> None:
     try:
         os.killpg(proc.pid, signal.SIGKILL)
@@ -62,11 +66,14 @@ def run_bounded(argv: Sequence[str], *, env: Mapping[str, str], timeout: float, 
                 while b"\n" in err_buf:
                     line_bytes, _, rest = err_buf.partition(b"\n")
                     err_buf[:] = rest
-                    try:
-                        on_stderr_line(line_bytes.decode("utf-8", errors="replace"))
-                    except Exception:
-                        pass
-        if on_stderr_line is not None and err_buf:
+                    if len(line_bytes) <= MAX_LINE_SIZE:
+                        try:
+                            on_stderr_line(line_bytes.decode("utf-8", errors="replace"))
+                        except Exception:
+                            pass
+                if len(err_buf) > MAX_LINE_BUFFER:
+                    del err_buf[:-8192]
+        if on_stderr_line is not None and err_buf and len(err_buf) <= MAX_LINE_SIZE:
             try:
                 on_stderr_line(err_buf.decode("utf-8", errors="replace"))
             except Exception:

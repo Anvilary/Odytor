@@ -337,9 +337,14 @@ def public_view(record: dict[str, Any], currency: dict[str, Any] | None = None,
             view["active_tests"] = progress.get("active_tests", [])
             view["live_counts"] = progress.get("counts", {})
             view["last_heartbeat_ago_seconds"] = progress.get("last_heartbeat_ago_seconds")
+            view["last_progress_ago_seconds"] = progress.get("last_progress_ago_seconds")
             view["events"] = progress.get("events", [])
+            view["next_cursor"] = progress.get("next_cursor")
+            view["has_more"] = progress.get("has_more", False)
             view["latest_event_id"] = progress.get("latest_event_id", 0)
             view["events_remaining"] = progress.get("events_remaining", 0)
+            view["cursor_gap"] = progress.get("cursor_gap", False)
+            view["cursor_expired"] = progress.get("cursor_expired", False)
     if progress is not None:
         view["live_progress"] = progress
     if currency is not None:
@@ -350,7 +355,7 @@ def public_view(record: dict[str, Any], currency: dict[str, Any] | None = None,
 def fetch_test_result(client: GitHubClient, repo: str, run_id: str, *, service: JobService, owner: str,
                       workspaces: Any | None = None, wait_seconds: float = 0.0, after_event_id: int = 0,
                       max_events: int = 50, max_log_bytes: int = 65536) -> dict[str, Any]:
-    record, progress = service.get_progress_or_wait(run_id, wait_seconds=wait_seconds,
+    record, progress = service.get_progress_or_wait(run_id, owner, wait_seconds=wait_seconds,
                                                     after_event_id=after_event_id,
                                                     max_events=max_events)
     # One indistinguishable error for unknown ids and other callers' runs.
