@@ -213,7 +213,10 @@ def test_empty_profiles_does_not_silently_run_pytest(test_env, monkeypatch):
         cfg=cfg,
         campaign_store=store,
     )
-    assert result["status"] == "passed"
+    # nothing ran, so nothing was validated: this must never read as a successful validation
+    assert result["status"] == "completed"
+    assert result["green"] is False and result["validation_executed"] is False
+    assert result["failure"]["kind"] == "no_validation_executed"
     assert len(called_runs) == 0
     assert result["results"] == {}
     assert result["tested_head"] == head
@@ -256,28 +259,16 @@ def test_setup_error_does_not_label_requested_revisions_as_tested(test_env):
 def test_campaign_idempotency_store_and_lookup(test_env):
     store = test_env["store"]
     rec = CampaignRecord(
-        campaign_id="cmp-1234567890abcdef1234567890abcdef",
-        owner=OWNER,
-        repo="owner/repo",
-        number=1,
-        mode="pr_head",
-        status="passed",
-        created_at=100.0,
-        updated_at=105.0,
-        idempotency_key="key-smoke-1",
-    )
-    store.save(rec)
+        campaign_id="cmp-1234567890abcdef1234567890abcdef", owner=OWNER, repo="owner/repo", number=1, mode="pr_head",
+        status="passed", created_at=100.0, updated_at=105.0, idempotency_key="key-smoke-1", request_digest="d1")
+    got, created = store.claim(rec)
+    assert created and got.campaign_id == rec.campaign_id
 
-    # Lookup succeeds by exact key, owner, repo, and number
-    found = store.find_by_idempotency_key(OWNER, "owner/repo", 1, "key-smoke-1")
-    assert found is not None
-    assert found.campaign_id == rec.campaign_id
-
-    # Lookup fails for mismatched fields
-    assert store.find_by_idempotency_key("other-owner", "owner/repo", 1, "key-smoke-1") is None
-    assert store.find_by_idempotency_key(OWNER, "owner/other", 1, "key-smoke-1") is None
-    assert store.find_by_idempotency_key(OWNER, "owner/repo", 2, "key-smoke-1") is None
-    assert store.find_by_idempotency_key(OWNER, "owner/repo", 1, "key-other") is None
+    # the key is scoped to the owner and the repository
+    assert store.find_by_idempotency_key(OWNER, "OWNER/Repo", "key-smoke-1").campaign_id == rec.campaign_id
+    assert store.find_by_idempotency_key("other-owner", "owner/repo", "key-smoke-1") is None
+    assert store.find_by_idempotency_key(OWNER, "owner/other", "key-smoke-1") is None
+    assert store.find_by_idempotency_key(OWNER, "owner/repo", "key-other") is None
 
 
 def test_campaign_propose_push_flow(test_env, monkeypatch):

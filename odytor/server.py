@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import threading
 import time
@@ -31,7 +32,7 @@ from odytor.profile import PROFILE_NAME, load_policies
 from odytor.run_tests import cancel_test_run, fetch_test_result, submit_test_run, submit_workspace_run
 from odytor.artifacts import ArtifactLimits, ArtifactStore
 from odytor.browser import SessionStore, submit_browser_run, wait_for_run
-from odytor.campaign import CampaignRecord, CampaignStore, run_validation_campaign
+from odytor.campaign import CampaignRecord, CampaignStore, preflight_campaign, request_digest, run_validation_campaign
 from odytor.publish import PlanStore, apply_pr_body, apply_publication, plan_pr_body, plan_publication
 from odytor.workspace import SOURCES, WorkspaceService, open_workspace
 
@@ -391,7 +392,8 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             return safe_payload(err.to_dict())
 
     sessions = SessionStore(Path(cfg.workspaces.data_dir) / "sessions") if cfg.workspaces else None
-    campaigns = CampaignStore(Path(cfg.workspaces.data_dir) / "campaigns") if cfg.workspaces else None
+    campaigns = (CampaignStore(Path(cfg.workspaces.data_dir) / "campaigns", retention_hours=runs.retention_hours if runs else 48.0)
+                 if cfg.workspaces else None)
     plans = PlanStore(Path(cfg.workspaces.data_dir) / "plans") if cfg.workspaces else None
 
     def as_result(payload: dict[str, Any], images: list[tuple[str, bytes]] | None = None, *, limit: int | None = None) -> ToolResult:
@@ -445,8 +447,36 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         except GitPlusError as err:
             return as_result(err.to_dict())
 
-    @tool(annotations={"readOnlyHint": True, "openWorldHint": True},
-          description="Execute a bounded disposable validation campaign for a pull request without requiring human confirmation for intermediate steps. Pins PR head/base revisions, provisions an isolated disposable workspace without publication authority, optionally applies an overlay patch or edits, executes specified test profiles (e.g. python-pytest, node-test) and headless browser scenarios, collects all evidence/artifacts/network metrics, and deterministically cleans up the disposable workspace (or prepares a push preview when propose_push=true and tests pass). Leaves zero GitHub mutations. Safe, isolated, and completely read-only to external systems.")
+    CAMPAIGN_WAIT_CAP = 55.0
+
+    def campaign_view(record, *, wait_seconds: float = 0.0, owner: str | None = None) -> dict[str, Any]:
+        """The record as the caller sees it: bounded server-side waiting, plus the running child run's identity and progress."""
+        owner = owner or record.owner
+        deadline = time.monotonic() + max(0.0, min(float(wait_seconds), CAMPAIGN_WAIT_CAP))
+        start_status, start_run, start_steps = record.status, record.current_run_id, len(record.steps)
+        while record.status in {"running", "canceling"} and time.monotonic() < deadline:
+            time.sleep(0.5)
+            fresh = campaigns.load(record.campaign_id, owner)
+            if fresh is None:
+                break
+            record = fresh
+            if (record.status, record.current_run_id, len(record.steps)) != (start_status, start_run, start_steps):
+                break
+        view = record.to_dict()
+        view["monitoring"] = {"note": "Waiting or disconnecting never cancels a campaign; only campaign_cancel does.",
+                              "max_wait_seconds": CAMPAIGN_WAIT_CAP}
+        if record.current_run_id and service is not None:
+            _, prog = service.get_progress_or_wait(record.current_run_id, owner, 0.0, 0, 1)
+            if prog is not None:
+                view["child_run"] = {"run_id": record.current_run_id, "phase": prog["phase"], "live_counts": prog["counts"],
+                                     "latest_event_id": prog["latest_event_id"], "last_progress_ago_seconds": prog["last_progress_ago_seconds"],
+                                     "next": "test_result(run_id, wait_seconds=30, after_event_id=<latest_event_id>) streams its live events"}
+            else:
+                view["child_run"] = {"run_id": record.current_run_id}
+        return view
+
+    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+          description="Start a bounded disposable validation campaign for a pull request and return its campaign_id immediately (add wait=true to wait up to 45 s for a quick result; the campaign never stops because a wait ends or the client disconnects). Pins the PR head/base, creates an isolated disposable workspace without publication authority, optionally applies overlay_patch, runs the requested profiles (default python-pytest; each selector or one playwright-spec selector per run) and an optional headless browser scenario, collects evidence, and releases the workspace when finished (or keeps it for publication when propose_push=true and everything passed; that only prepares a plan). It executes code on the isolated runner and writes local campaign state, so a host may ask you to approve it once; it makes no GitHub write. A campaign in which nothing ran is reported as 'completed', never 'passed'. Poll campaign_status; it names the running child run, whose live events test_result streams. idempotency_key (scoped to you and the repository) replays the same campaign for an identical request and refuses a changed request.")
     def validation_campaign(
         repo: str,
         number: Number,
@@ -462,7 +492,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         overlay_patch: str | None = None,
         timeout_seconds: Annotated[int, Field(ge=10, le=900)] = 300,
         idempotency_key: Annotated[str | None, Field(pattern=r"^[a-zA-Z0-9_.-]{1,128}$")] = None,
-        wait: bool = True,
+        wait: bool = False,
         propose_push: bool = False,
         commit_message: str | None = None,
     ) -> dict[str, Any]:
@@ -470,151 +500,84 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             return safe_payload(ValidationError("Workspaces or runner execution are disabled on this server.").to_dict())
         if not cfg.is_repo_allowed(repo):
             raise SecurityError(f"Repository '{repo}' is not permitted by Odytor configuration.")
-        if propose_push:
-            if mode != "pr_head":
-                raise ValidationError("propose_push requires mode='pr_head'.")
-            if not commit_message or not commit_message.strip():
-                raise ValidationError("commit_message is required when propose_push=True.")
-            if plans is None:
-                raise ValidationError("Plan storage is disabled on this server.")
         try:
+            owner = caller_principal(cfg, remote)
+            campaigns.maintain(service=service, workspaces=workspaces, plans=plans)
+            digest = request_digest(repo=repo.strip().casefold(), number=number, expected_head=expected_head, expected_base=expected_base,
+                                    mode=mode, profiles=profiles, profile_selectors=profile_selectors, browser_scenario=browser_scenario,
+                                    browser_mocks=browser_mocks, browser_video=browser_video, app_profile=app_profile,
+                                    overlay_patch=overlay_patch, timeout_seconds=timeout_seconds, propose_push=propose_push,
+                                    commit_message=commit_message)
+            wait_for = 45.0 if wait else 0.0
+            if idempotency_key:
+                existing = campaigns.find_by_idempotency_key(owner, repo, idempotency_key)
+                if existing is not None:
+                    if existing.request_digest != digest:
+                        raise ValidationError("This idempotency_key was already used for a different request; use a new key for a different request.",
+                                              {"campaign_id": existing.campaign_id, "classification": "idempotency_key_conflict"})
+                    return safe_payload({**campaign_view(existing, wait_seconds=wait_for, owner=owner), "idempotent_replay": True}, limit=262144)
             with github_client(cfg, remote, repo=repo) as client:
-                owner = getattr(client, "principal", None) or ("service" if remote else "local")
+                pre = preflight_campaign(client, repo, number, expected_head=expected_head, expected_base=expected_base, mode=mode,
+                                         profiles=profiles, policies=current_policies(), propose_push=propose_push,
+                                         commit_message=commit_message, plans=plans, idempotency_key=idempotency_key)
+                now = time.time()
+                fresh = CampaignRecord(campaign_id=f"cmp-{secrets.token_hex(16)}", owner=owner, repo=repo, number=number, mode=mode,
+                                       status="running", created_at=now, updated_at=now, idempotency_key=idempotency_key,
+                                       request_digest=digest, instance=service.instance, requested_head=pre["live_head"],
+                                       requested_base=expected_base if mode == "prospective_merge" else None)
+                record, created = campaigns.claim(fresh)
+                if not created:
+                    return safe_payload({**campaign_view(record, wait_seconds=wait_for, owner=owner), "idempotent_replay": True}, limit=262144)
+                bg_client = GitHubClient(token=getattr(client, "token", cfg.github_token),
+                                         base_url=getattr(client, "base_url", cfg.github_api_url), timeout=cfg.github_timeout,
+                                         restricted_repo=getattr(client, "restricted_repo", None), principal=getattr(client, "principal", None))
+                policies_now = current_policies()
+                cid = record.campaign_id
 
-                if idempotency_key:
-                    existing = campaigns.find_by_idempotency_key(owner, repo, number, idempotency_key)
-                    if existing is not None:
-                        if not wait and existing.status == "running":
-                            return safe_payload(existing.to_dict())
-                        if existing.status != "running":
-                            return safe_payload(existing.to_dict(), limit=262144)
-                        deadline = time.time() + timeout_seconds
-                        rec = existing
-                        while time.time() < deadline:
-                            rec = campaigns.load(existing.campaign_id, owner) or existing
-                            if rec.status != "running":
-                                return safe_payload(rec.to_dict(), limit=262144)
-                            time.sleep(0.5)
-                        return safe_payload(rec.to_dict(), limit=262144)
+                def _run_bg() -> None:
+                    try:
+                        run_validation_campaign(
+                            bg_client, repo, number, expected_head=expected_head, expected_base=expected_base, mode=mode, profiles=profiles,
+                            profile_selectors=profile_selectors, browser_scenario=browser_scenario, browser_mocks=browser_mocks,
+                            browser_video=browser_video, app_profile=app_profile, overlay_patch=overlay_patch, timeout_seconds=timeout_seconds,
+                            workspaces=workspaces, service=service, sessions=sessions, policies=policies_now, owner=owner, cfg=cfg,
+                            campaign_store=campaigns, campaign_id=cid, idempotency_key=idempotency_key, propose_push=propose_push,
+                            commit_message=commit_message, plans=plans, digest=digest)
+                    except BaseException as exc:
+                        def fail(rec):
+                            if rec.status in {"running", "canceling"}:
+                                rec.status = "canceled" if rec.cancel_requested else "setup_error"
+                                rec.failure = {"kind": "setup_error", "message": str(exc)[:300]}
+                                rec.finished_at = time.time()
+                                rec.steps.append({"name": "campaign_worker", "status": "failed", "error": str(exc)[:300]})
+                        campaigns.update(cid, owner, fail)
+                    finally:
+                        bg_client.session.close()
 
-                if not wait:
-                    now = time.time()
-                    cid = f"cmp-{secrets.token_hex(16)}"
-                    init_rec = CampaignRecord(
-                        campaign_id=cid,
-                        owner=owner,
-                        repo=repo,
-                        number=number,
-                        mode=mode,
-                        status="running",
-                        created_at=now,
-                        updated_at=now,
-                        idempotency_key=idempotency_key,
-                        requested_head=expected_head,
-                        requested_base=expected_base,
-                    )
-                    campaigns.save(init_rec)
-
-                    bg_client = GitHubClient(
-                        token=getattr(client, "token", cfg.github_token),
-                        base_url=getattr(client, "base_url", cfg.github_api_url),
-                        timeout=cfg.github_timeout,
-                        restricted_repo=getattr(client, "restricted_repo", None),
-                        principal=getattr(client, "principal", None),
-                    )
-
-                    def _run_bg() -> None:
-                        try:
-                            run_validation_campaign(
-                                bg_client,
-                                repo,
-                                number,
-                                expected_head=expected_head,
-                                expected_base=expected_base,
-                                mode=mode,
-                                profiles=profiles,
-                                profile_selectors=profile_selectors,
-                                browser_scenario=browser_scenario,
-                                browser_mocks=browser_mocks,
-                                browser_video=browser_video,
-                                app_profile=app_profile,
-                                overlay_patch=overlay_patch,
-                                timeout_seconds=timeout_seconds,
-                                workspaces=workspaces,
-                                service=service,
-                                sessions=sessions,
-                                policies=current_policies(),
-                                owner=owner,
-                                cfg=cfg,
-                                campaign_store=campaigns,
-                                campaign_id=cid,
-                                idempotency_key=idempotency_key,
-                                propose_push=propose_push,
-                                commit_message=commit_message,
-                                plans=plans,
-                            )
-                        except Exception as exc:
-                            if campaigns:
-                                rec = campaigns.load(cid, owner)
-                                if rec and rec.status == "running":
-                                    rec.status = "failed"
-                                    rec.failure = {"kind": "setup_error", "message": str(exc)}
-                                    rec.finished_at = time.time()
-                                    rec.steps.append({"name": "campaign_setup", "status": "failed", "error": str(exc)})
-                                    campaigns.save(rec)
-                        finally:
-                            bg_client.session.close()
-
-                    t = threading.Thread(target=_run_bg, daemon=True, name=f"campaign-{cid}")
-                    t.start()
-                    return safe_payload(init_rec.to_dict())
-
-                return safe_payload(run_validation_campaign(
-                    client,
-                    repo,
-                    number,
-                    expected_head=expected_head,
-                    expected_base=expected_base,
-                    mode=mode,
-                    profiles=profiles,
-                    profile_selectors=profile_selectors,
-                    browser_scenario=browser_scenario,
-                    browser_mocks=browser_mocks,
-                    browser_video=browser_video,
-                    app_profile=app_profile,
-                    overlay_patch=overlay_patch,
-                    timeout_seconds=timeout_seconds,
-                    workspaces=workspaces,
-                    service=service,
-                    sessions=sessions,
-                    policies=current_policies(),
-                    owner=owner,
-                    cfg=cfg,
-                    campaign_store=campaigns,
-                    idempotency_key=idempotency_key,
-                    propose_push=propose_push,
-                    commit_message=commit_message,
-                    plans=plans,
-                ), limit=262144)
+                threading.Thread(target=_run_bg, daemon=True, name=f"campaign-{cid}").start()
+                return safe_payload(campaign_view(record, wait_seconds=wait_for, owner=owner), limit=262144)
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 
     @tool(annotations={"readOnlyHint": True, "openWorldHint": False},
-          description="Check the execution status, results, and artifacts of a validation campaign by campaign_id. Campaigns clean up workspaces deterministically upon completion; detailed results and artifacts remain queryable.")
-    def campaign_status(campaign_id: Annotated[str, Field(pattern=r"^cmp-[0-9a-f]{32}$")]) -> dict[str, Any]:
+          description="Check a validation campaign: status, steps, results, artifacts, cleanup state, and (while a profile or browser run is active) the child run_id with its live phase and counts. wait_seconds (0-55) waits server-side for the next change instead of polling. Terminal states: passed, failed, setup_error, timeout, canceled, completed (nothing was validated). 'canceling' means teardown is not yet confirmed (cleanup: pending).")
+    def campaign_status(campaign_id: Annotated[str, Field(pattern=r"^cmp-[0-9a-f]{32}$")],
+                        wait_seconds: Annotated[float, Field(ge=0.0, le=55.0)] = 0.0) -> dict[str, Any]:
         if campaigns is None:
             return safe_payload(ValidationError("Validation campaigns are disabled on this server.").to_dict())
         try:
             owner = caller_principal(cfg, remote)
+            if service is not None and workspaces is not None:
+                campaigns.maintain(service=service, workspaces=workspaces, plans=plans)
             record = campaigns.load(campaign_id, owner)
             if record is None:
                 raise ValidationError(f"Unknown campaign '{campaign_id}'.")
-            return safe_payload(record.to_dict())
+            return safe_payload(campaign_view(record, wait_seconds=wait_seconds, owner=owner), limit=262144)
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 
     @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
-          description="Cancel an active validation campaign. Halts any running test or browser child run and immediately disposes of its temporary workspace.")
+          description="Cancel an active validation campaign you started. Stops its running child run and releases its workspace. The result is 'canceled' once teardown is confirmed, or 'canceling' with cleanup 'pending' until the worker finishes; a canceled campaign never later becomes passed or failed.")
     def campaign_cancel(campaign_id: Annotated[str, Field(pattern=r"^cmp-[0-9a-f]{32}$")]) -> dict[str, Any]:
         if campaigns is None or service is None or workspaces is None:
             return safe_payload(ValidationError("Validation campaigns are disabled on this server.").to_dict())

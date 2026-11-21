@@ -943,6 +943,11 @@ class JobService:
                 os.close(fd)
         return live
 
+    def live_instances(self) -> set[str]:
+        """Instances of this service still alive on the shared data directory, including this one."""
+        self.start()
+        return self._live_instances() | {self.instance}
+
     def _reconcile(self) -> None:
         """Close runs and spool that belonged to dead service instances; never touch a live sibling's."""
         live = self._live_instances() | {self.instance}
