@@ -18,10 +18,11 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md LICENSE ./
 COPY odytor/ ./odytor/
 
-RUN uv pip install --system --no-cache "."
+# A release archive can be extracted with a private umask. Keep root ownership and make its source readable by git-plus.
+RUN chmod -R a+rX /app && uv pip install --system --no-cache "."
 
 RUN mkdir -p /home/git-plus/data/.fastmcp /home/git-plus/test-data && \
     chown -R git-plus:git-plus /home/git-plus && \
