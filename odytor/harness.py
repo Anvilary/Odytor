@@ -75,9 +75,10 @@ def _read_events():
     return events, malformed
 
 
-def _num(value):
+def _num(value, high=1e12):
     try:
-        return float(value)
+        n = float(value)
+        return min(max(n, 0.0), high) if n == n else 0.0
     except (TypeError, ValueError):
         return 0.0
 
