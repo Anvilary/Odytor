@@ -26,6 +26,66 @@ MAX_TESTS = 200
 MAX_TEXT = 200
 LOG_HEAD, LOG_TAIL = 4096, 8192
 
+_ODYTOR_REPORTER_JS = """const fs = require('fs');
+class OdyTorReporter {
+  onBegin(config, suite) {
+    try {
+      const total = suite.allTests().length;
+      process.stderr.write('ODYTOR_PROGRESS:' + JSON.stringify({
+        type: 'collection',
+        phase: 'executing_tests',
+        total: total
+      }) + '\\n');
+    } catch (e) {}
+  }
+  onTestBegin(test) {
+    try {
+      const fullTitle = typeof test.titlePath === 'function' ? test.titlePath().join(' > ') : (test.title || '');
+      process.stderr.write('ODYTOR_PROGRESS:' + JSON.stringify({
+        type: 'test_start',
+        phase: 'executing_tests',
+        id: fullTitle,
+        title: test.title || fullTitle,
+        file: (test.location && test.location.file) || ''
+      }) + '\\n');
+    } catch (e) {}
+  }
+  onTestEnd(test, result) {
+    try {
+      const fullTitle = typeof test.titlePath === 'function' ? test.titlePath().join(' > ') : (test.title || '');
+      process.stderr.write('ODYTOR_PROGRESS:' + JSON.stringify({
+        type: 'test_end',
+        phase: 'executing_tests',
+        id: fullTitle,
+        title: test.title || fullTitle,
+        outcome: result.status,
+        duration_ms: Math.round(result.duration || 0),
+        retry: result.retry || 0
+      }) + '\\n');
+    } catch (e) {}
+  }
+  onEnd(result) {
+    try {
+      process.stderr.write('ODYTOR_PROGRESS:' + JSON.stringify({
+        type: 'phase',
+        phase: 'finalizing',
+        status: result.status
+      }) + '\\n');
+    } catch (e) {}
+  }
+}
+module.exports = OdyTorReporter;
+"""
+
+
+def _emit_progress(**event):
+    try:
+        sys.stderr.write("ODYTOR_PROGRESS:" + json.dumps(event) + "\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
 
 def _extract(limit_files, limit_bytes):
     count = total = 0
@@ -182,9 +242,10 @@ def _run_tests(spec):
         return report
     env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": "/tmp/home", "TMPDIR": "/tmp",
            "LANG": "C.UTF-8", "PYTHONPATH": f"{ENV_SITE}:{INPUT}", "PYTHONDONTWRITEBYTECODE": "1",
-           "PYTHONUNBUFFERED": "1", "ODYTOR_EVENTS": EVENTS}
+           "PYTHONUNBUFFERED": "1", "ODYTOR_EVENTS": EVENTS, "ODYTOR_STREAM_EVENTS": "1"}
     log, started = _Log(), time.monotonic()
     report["argv"] = spec["argv"]
+    _emit_progress(type="phase", phase="collecting", message="Collecting pytest tests")
     try:
         proc = subprocess.Popen(spec["argv"], cwd=WORK, env=env, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
@@ -195,6 +256,15 @@ def _run_tests(spec):
     def pump():
         for chunk in iter(lambda: proc.stdout.read(8192), b""):
             log.feed(chunk)
+
+    stop_heartbeat = threading.Event()
+
+    def heartbeat():
+        while not stop_heartbeat.wait(4.0):
+            _emit_progress(type="heartbeat", elapsed_seconds=round(time.monotonic() - started, 1))
+
+    hb = threading.Thread(target=heartbeat, daemon=True)
+    hb.start()
 
     reader = threading.Thread(target=pump, daemon=True)
     reader.start()
@@ -209,7 +279,10 @@ def _run_tests(spec):
         except OSError:
             pass
     proc.wait()
+    stop_heartbeat.set()
+    hb.join(timeout=1)
     reader.join(timeout=5)
+    _emit_progress(type="phase", phase="finalizing", message="Finalizing pytest report")
     events, malformed = _read_events()
     collected, collect_errors, finish, tests = _summarize(events)
     counts = _counts(tests, collected)
@@ -304,6 +377,7 @@ def _run_node(spec):
            "LANG": "C.UTF-8", "NODE_ENV": "test", "CI": "1", "NO_COLOR": "1"}
     log, started = _Log(), time.monotonic()
     report["argv"] = spec["argv"]
+    _emit_progress(type="phase", phase="executing_tests", message="Executing node tests")
     try:
         proc = subprocess.Popen(spec["argv"], cwd=WORK, env=env, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
@@ -313,12 +387,35 @@ def _run_node(spec):
 
     def pump():
         written = 0
+        tap_buf = bytearray()
         with open(TAP_FILE, "wb") as sink:
             for chunk in iter(lambda: proc.stdout.read(8192), b""):
                 log.feed(chunk)
                 if written < MAX_TAP_BYTES + 1:
                     sink.write(chunk)
                     written += len(chunk)
+                tap_buf.extend(chunk)
+                while b"\n" in tap_buf:
+                    line_bytes, _, rest = tap_buf.partition(b"\n")
+                    tap_buf[:] = rest
+                    line_str = line_bytes.decode("utf-8", "replace")
+                    m = _TAP_RESULT.match(line_str)
+                    if m:
+                        t_name = m.group(3)
+                        t_state = "failed" if m.group(2) == "not ok" else "passed"
+                        if m.group(4) == "SKIP":
+                            t_state = "skipped"
+                        _emit_progress(type="test_end", phase="executing_tests", id=t_name[:MAX_TEXT],
+                                       title=t_name[:MAX_TEXT], outcome=t_state, duration_ms=0, retry=0)
+
+    stop_heartbeat = threading.Event()
+
+    def heartbeat():
+        while not stop_heartbeat.wait(4.0):
+            _emit_progress(type="heartbeat", elapsed_seconds=round(time.monotonic() - started, 1))
+
+    hb = threading.Thread(target=heartbeat, daemon=True)
+    hb.start()
 
     reader = threading.Thread(target=pump, daemon=True)
     reader.start()
@@ -333,7 +430,10 @@ def _run_node(spec):
         except OSError:
             pass
     proc.wait()
+    stop_heartbeat.set()
+    hb.join(timeout=1)
     reader.join(timeout=5)
+    _emit_progress(type="phase", phase="finalizing", message="Finalizing node report")
     tap = _parse_tap(TAP_FILE)
     order = {"failed": 0, "skipped": 1, "todo": 2, "passed": 3}
     report.update({"exit": proc.returncode, "timed_out": timed_out, "duration_seconds": round(time.monotonic() - started, 3),
@@ -561,6 +661,14 @@ def _run_playwright_spec(spec):
         report["error"] = {"stage": "startup", "message": f"Launcher script not found in repository: {launcher_rel}"}
         return report
 
+    # Write Playwright reporter script
+    reporter_path = "/tmp/odytor_reporter.js"
+    try:
+        with open(reporter_path, "w", encoding="utf-8") as rf:
+            rf.write(_ODYTOR_REPORTER_JS)
+    except OSError:
+        pass
+
     report_dir = "/tmp/playwright-results"
     os.makedirs(report_dir, exist_ok=True)
     report_json = os.path.join(report_dir, "report.json")
@@ -576,11 +684,13 @@ def _run_playwright_spec(spec):
             argv.append(spec_path)
         title = sel.get("test_title")
         if title:
-            argv += ["-g", title]
-    argv.append("--reporter=json")
+            escaped_title = re.sub(r"([.*+?^${}()|[\]\\])", r"\\\1", title)
+            argv += ["-g", escaped_title]
+    argv.append(f"--reporter={reporter_path},json")
 
     log, started = _Log(), time.monotonic()
     report["argv"] = argv
+    _emit_progress(type="phase", phase="starting_app", message="Starting application server")
     try:
         proc = subprocess.Popen(argv, cwd=WORK, env=env, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
@@ -588,9 +698,27 @@ def _run_playwright_spec(spec):
         report["error"] = {"stage": "spawn", "message": str(exc)[:400]}
         return report
 
+    launched_browser = [False]
+
     def pump():
         for chunk in iter(lambda: proc.stdout.read(8192), b""):
             log.feed(chunk)
+            if not launched_browser[0]:
+                chunk_lower = chunk.lower()
+                if (b"ready at http" in chunk_lower or b"running at http" in chunk_lower or
+                        b"scratch server is ready" in chunk_lower or b"application ready" in chunk_lower or
+                        b"server ready" in chunk_lower):
+                    launched_browser[0] = True
+                    _emit_progress(type="phase", phase="launching_browser", message="Application server ready, launching Playwright")
+
+    stop_heartbeat = threading.Event()
+
+    def heartbeat():
+        while not stop_heartbeat.wait(4.0):
+            _emit_progress(type="heartbeat", elapsed_seconds=round(time.monotonic() - started, 1))
+
+    hb = threading.Thread(target=heartbeat, daemon=True)
+    hb.start()
 
     reader = threading.Thread(target=pump, daemon=True)
     reader.start()
@@ -605,7 +733,10 @@ def _run_playwright_spec(spec):
         except OSError:
             pass
     proc.wait()
+    stop_heartbeat.set()
+    hb.join(timeout=1)
     reader.join(timeout=5)
+    _emit_progress(type="phase", phase="finalizing", message="Finalizing test report")
 
     rendered_log = log.render()
     log_text = rendered_log.get("tail", "") + "\n" + rendered_log.get("head", "")

@@ -238,12 +238,19 @@ def _kill_container(cfg: RunnerConfig, name: str) -> None:
         pass
 
 
+def _forward_stderr_progress(line: str) -> None:
+    if line.startswith("ODYTOR_PROGRESS:"):
+        sys.stderr.write(line + "\n")
+        sys.stderr.flush()
+
+
 def _run_container(cfg: RunnerConfig, name: str, args: list[str], timeout: float, *,
                    max_stdout: int = MAX_REPORT_BYTES) -> tuple[object, float]:
     started = time.monotonic()
     env = {k: os.environ[k] for k in ("PATH", "HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "LANG") if k in os.environ}
     try:
-        result = run_bounded(args, env=env, timeout=timeout, max_stdout=max_stdout)
+        result = run_bounded(args, env=env, timeout=timeout, max_stdout=max_stdout,
+                             on_stderr_line=_forward_stderr_progress)
     finally:
         _kill_container(cfg, name)
     return result, round(time.monotonic() - started, 3)
@@ -251,6 +258,8 @@ def _run_container(cfg: RunnerConfig, name: str, args: list[str], timeout: float
 
 def _prepare(cfg: RunnerConfig, job_id: str, image: ImageInfo, requirements: str, job_dir: Path):
     def build(tmp: Path) -> dict:
+        sys.stderr.write("ODYTOR_PROGRESS:" + json.dumps({"type": "phase", "phase": "preparing_dependencies", "message": "Preparing dependency environment"}) + "\n")
+        sys.stderr.flush()
         prep = job_dir / "prep"
         prep.mkdir(mode=0o755)
         os.chmod(prep, 0o755)
@@ -406,6 +415,8 @@ def _run_job(cfg: RunnerConfig, job: dict, image: ImageInfo, env: dep_cache.EnvH
         timeout=job["timeout"] + 60, memory_mib=cfg.memory_mib,
         tmpfs=[f"/tmp:rw,nosuid,nodev,exec,size={cfg.tmp_mib}m", f"{WORK_DIR}:rw,nosuid,nodev,exec,size={cfg.work_mib}m"],
         env={}, command=[f"{INPUT_DIR}/harness.py", "test"])
+    sys.stderr.write("ODYTOR_PROGRESS:" + json.dumps({"type": "phase", "phase": "provisioning", "message": "Provisioning sandbox container"}) + "\n")
+    sys.stderr.flush()
     outcome, seconds = _run_container(cfg, name, args, job["timeout"] + 90)
     result["sandbox"] = {
         "engine_exit_code": outcome.returncode, "timed_out": outcome.timed_out, "output_overflow": outcome.overflowed,
@@ -492,6 +503,8 @@ def _run_plain(cfg: RunnerConfig, job: dict, image: ImageInfo, source: Path, job
         cfg, name, image, test=True, workspace=job_dir.name, mounts=mounts, timeout=job["timeout"] + 60,
         memory_mib=cfg.memory_mib, env={}, tmpfs=[f"/tmp:rw,nosuid,nodev,exec,size={cfg.tmp_mib}m",
                                                   f"{WORK_DIR}:rw,nosuid,nodev,exec,size={cfg.work_mib}m"], command=command)
+    sys.stderr.write("ODYTOR_PROGRESS:" + json.dumps({"type": "phase", "phase": "provisioning", "message": "Provisioning sandbox container"}) + "\n")
+    sys.stderr.flush()
     outcome, seconds = _run_container(cfg, name, args, job["timeout"] + 90, max_stdout=ceiling)
     result["sandbox"] = {
         "engine_exit_code": outcome.returncode, "timed_out": outcome.timed_out, "output_overflow": outcome.overflowed,

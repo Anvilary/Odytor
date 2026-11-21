@@ -153,7 +153,7 @@ def submit_test_run(client: GitHubClient, repo: str, number: int, expected_head:
 
 def submit_workspace_run(repo: str, workspace_id: str, expected_version: int, *, workspaces: Any, service: JobService,
                          policies: dict[str, RepoPolicy], owner: str, cfg: RunSettings, profile: str = PROFILE_NAME,
-                         selectors: Any = None) -> dict[str, Any]:
+                         selectors: Any = None, test_title: str | None = None) -> dict[str, Any]:
     """Queue an isolated pytest run on the exact current tree of a workspace.
 
     The tree is exported while the workspace lock is held and the job carries only that tar, so a later edit can
@@ -177,9 +177,14 @@ def submit_workspace_run(repo: str, workspace_id: str, expected_version: int, *,
             selected = validate_node_selectors(selectors, test_dirs)
         elif spec.kind == "playwright_spec":
             cfg_table = policy.extra.get(PLAYWRIGHT_SPEC_PROFILE, {})
+            allowed_specs = cfg_table.get("specs", ())
+            if not selectors and allowed_specs and test_title:
+                selectors = [f"{allowed_specs[0]}::{test_title}"]
+            elif test_title:
+                selectors = [f"{s}::{test_title}" if "::" not in s else s for s in (selectors or ())]
             selected, parsed_selectors = validate_playwright_spec_selectors(
                 selectors,
-                allowed_specs=cfg_table.get("specs", ()),
+                allowed_specs=allowed_specs,
                 allowed_dirs=cfg_table.get("spec_dirs", ()),
                 test_dirs=policy.test_dirs,
             )
@@ -282,7 +287,8 @@ def _workspace_currency(record: dict[str, Any], workspaces: Any | None) -> dict[
             "tested_tree_is_current_workspace_tree": live["tree"] == record["trees"]["effective_tree"]}
 
 
-def public_view(record: dict[str, Any], currency: dict[str, Any] | None = None) -> dict[str, Any]:
+def public_view(record: dict[str, Any], currency: dict[str, Any] | None = None,
+                progress: dict[str, Any] | None = None, max_log_bytes: int = 65536) -> dict[str, Any]:
     workspace_run = record.get("kind") in {"workspace", "browser"}
     ts = record["timestamps"]
     result = record.get("result") or {}
@@ -312,24 +318,46 @@ def public_view(record: dict[str, Any], currency: dict[str, Any] | None = None) 
                                                   "environment", "reports", "conflict", "storage", "steps", "steps_total",
                                                   "replayed_steps", "browser", "serve", "console", "page_errors", "page_errors_total",
                                                   "network", "snapshots", "events", "artifacts", "playwright", "server_log") if k in result})
+        if "log" in view and isinstance(view["log"], dict):
+            raw_log = view["log"]
+            tail = raw_log.get("tail") or ""
+            if len(tail.encode("utf-8", "replace")) > max_log_bytes:
+                view["log"] = {
+                    **raw_log,
+                    "tail": tail[-max_log_bytes:],
+                    "truncated": True,
+                }
         view["green"] = status == "passed"
         view["evidence_complete"] = status in {"passed", "failed", "completed", "no_tests_executed", "no_tests_collected"} and bool(result.get("counts") is not None)
     else:
         view["green"] = False
         view["evidence_complete"] = False
+        if progress is not None:
+            view["phase"] = progress.get("phase", status)
+            view["active_tests"] = progress.get("active_tests", [])
+            view["live_counts"] = progress.get("counts", {})
+            view["last_heartbeat_ago_seconds"] = progress.get("last_heartbeat_ago_seconds")
+            view["events"] = progress.get("events", [])
+            view["latest_event_id"] = progress.get("latest_event_id", 0)
+            view["events_remaining"] = progress.get("events_remaining", 0)
+    if progress is not None:
+        view["live_progress"] = progress
     if currency is not None:
         view["currency"] = currency
     return view
 
 
 def fetch_test_result(client: GitHubClient, repo: str, run_id: str, *, service: JobService, owner: str,
-                      workspaces: Any | None = None) -> dict[str, Any]:
-    record = service.get(run_id)
+                      workspaces: Any | None = None, wait_seconds: float = 0.0, after_event_id: int = 0,
+                      max_events: int = 50, max_log_bytes: int = 65536) -> dict[str, Any]:
+    record, progress = service.get_progress_or_wait(run_id, wait_seconds=wait_seconds,
+                                                    after_event_id=after_event_id,
+                                                    max_events=max_events)
     # One indistinguishable error for unknown ids and other callers' runs.
     if record is None or record["owner"] != owner or record["repo"].casefold() != repo.casefold():
         raise ValidationError("Unknown run_id.")
     if record.get("kind") in {"workspace", "browser"}:
-        return public_view(record, _workspace_currency(record, workspaces))
+        return public_view(record, _workspace_currency(record, workspaces), progress=progress, max_log_bytes=max_log_bytes)
     currency = _currency(client, record)
     if currency["pr_state"] in {"closed", "merged"}:
         grace = service.clock() + service.cfg.closed_grace_hours * 3600
@@ -337,4 +365,4 @@ def fetch_test_result(client: GitHubClient, repo: str, run_id: str, *, service: 
             if item["repo"].casefold() == repo.casefold() and item["pr"] == record["pr"]:
                 service.mutate(item["run_id"], lambda r: r.__setitem__("expires_at", min(r["expires_at"], grace)))
         record = service.store.load(run_id) or record
-    return public_view(record, currency)
+    return public_view(record, currency, progress=progress, max_log_bytes=max_log_bytes)

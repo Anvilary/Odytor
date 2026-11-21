@@ -8,7 +8,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
-from typing import Iterable, Mapping, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 
 
 @dataclass
@@ -30,15 +30,18 @@ def _kill_group(proc: subprocess.Popen) -> None:
 
 def run_bounded(argv: Sequence[str], *, env: Mapping[str, str], timeout: float, max_stdout: int,
                 stdin_chunks: Iterable[bytes] | None = None, cancel: threading.Event | None = None,
-                grace: float = 5.0, stderr_limit: int = 8192, hold_stdin: bool = False) -> ProcResult:
+                grace: float = 5.0, stderr_limit: int = 8192, hold_stdin: bool = False,
+                on_stderr_line: Callable[[str], None] | None = None) -> ProcResult:
     """Run without a shell; never buffer more than max_stdout bytes; always reap the process group.
 
     hold_stdin keeps the child's stdin open after the chunks are written, so its EOF means this process is gone.
+    on_stderr_line is an optional callback called for each complete line emitted on stderr.
     """
     proc = subprocess.Popen(list(argv), env=dict(env), stdin=subprocess.PIPE if stdin_chunks is not None else subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     out = bytearray()
     err: collections.deque[bytes] = collections.deque()
+    err_buf = bytearray()
     state = {"overflow": False, "err_len": 0}
 
     def read_out() -> None:
@@ -54,6 +57,20 @@ def run_bounded(argv: Sequence[str], *, env: Mapping[str, str], timeout: float, 
             state["err_len"] += len(chunk)
             while state["err_len"] - len(err[0]) >= stderr_limit:
                 state["err_len"] -= len(err.popleft())
+            if on_stderr_line is not None:
+                err_buf.extend(chunk)
+                while b"\n" in err_buf:
+                    line_bytes, _, rest = err_buf.partition(b"\n")
+                    err_buf[:] = rest
+                    try:
+                        on_stderr_line(line_bytes.decode("utf-8", errors="replace"))
+                    except Exception:
+                        pass
+        if on_stderr_line is not None and err_buf:
+            try:
+                on_stderr_line(err_buf.decode("utf-8", errors="replace"))
+            except Exception:
+                pass
 
     def feed() -> None:
         try:

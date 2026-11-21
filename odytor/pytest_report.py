@@ -4,20 +4,44 @@ Standard library only. Its output is evidence from the code under test, not a tr
 """
 import json
 import os
+import sys
 
 _PATH = os.environ.get("ODYTOR_EVENTS")
+_STREAM = os.environ.get("ODYTOR_STREAM_EVENTS")
 _MAX_TEXT = 400
 _MAX_IDS = 20000
 
 
 def _emit(**event):
-    if not _PATH:
-        return
-    try:
-        with open(_PATH, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event, ensure_ascii=True) + "\n")
-    except Exception:
-        pass
+    if _PATH:
+        try:
+            with open(_PATH, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(event, ensure_ascii=True) + "\n")
+        except Exception:
+            pass
+    if _STREAM:
+        try:
+            e = event.get("e")
+            if e == "collected":
+                sys.stderr.write("ODYTOR_PROGRESS:" + json.dumps({
+                    "type": "collection",
+                    "phase": "executing_tests",
+                    "total": event.get("n", 0)
+                }) + "\n")
+                sys.stderr.flush()
+            elif e == "report" and event.get("w") == "call":
+                sys.stderr.write("ODYTOR_PROGRESS:" + json.dumps({
+                    "type": "test_end",
+                    "phase": "executing_tests",
+                    "id": event.get("id"),
+                    "title": event.get("id"),
+                    "outcome": event.get("o"),
+                    "duration_ms": int(float(event.get("d", 0)) * 1000),
+                    "retry": 0
+                }) + "\n")
+                sys.stderr.flush()
+        except Exception:
+            pass
 
 
 def _text(report):

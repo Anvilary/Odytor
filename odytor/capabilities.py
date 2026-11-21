@@ -182,6 +182,13 @@ def describe(cfg: Settings, *, policies: dict[str, RepoPolicy], service: Any | N
             "diff": {"default_lines": cfg.default_max_diff_lines, "default_bytes": cfg.default_max_diff_bytes},
             "quick_fix": {"max_files": cfg.quick_fix_max_files, "max_changed_lines": cfg.quick_fix_max_changed_lines,
                           "max_patch_bytes": cfg.quick_fix_max_patch_bytes},
+            "progress_and_waiting": {
+                "max_wait_seconds": 60.0,
+                "default_wait_seconds": 0.0,
+                "event_log_capacity": 500,
+                "max_waiters_per_run": 20,
+                "replayable_event_log": True,
+            },
             **({"runs": {"max_queued": runs.max_queued, "default_timeout_seconds": runs.default_timeout,
                          "max_timeout_seconds": runs.max_timeout, "retention_hours": runs.retention_hours,
                          "max_source_mib": runs.max_source_bytes // (1024 * 1024), "max_overlay_bytes": runs.max_overlay_bytes},

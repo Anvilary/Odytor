@@ -102,9 +102,103 @@ class QueuedJob:
     header: dict[str, Any]
     timeout: int
     max_output: int = 4 * 1024 * 1024  # profiles that return artifacts in their report raise this
+    on_progress: Callable[[dict[str, Any]], None] | None = None
 
 
 Runner = Callable[[QueuedJob, "threading.Event"], dict[str, Any]]
+
+
+class RunTracker:
+    """Live progress tracker for active test runs, with Condition variable for bounded waiters."""
+
+    def __init__(self, run_id: str, max_events: int = 500, max_waiters: int = 20) -> None:
+        self.run_id = run_id
+        self.max_events = max_events
+        self.max_waiters = max_waiters
+        self.cv = threading.Condition()
+        self.events: collections.deque[dict[str, Any]] = collections.deque(maxlen=max_events)
+        self.event_seq = 0
+        self.phase = "queued"
+        self.active_tests: dict[str, dict[str, Any]] = {}
+        self.counts = {"collected": 0, "executed": 0, "passed": 0, "failed": 0, "skipped": 0, "errors": 0}
+        self.last_heartbeat: float = time.monotonic()
+        self.waiters = 0
+        self.terminal = False
+        self.outcome: dict[str, Any] | None = None
+
+    def record_event(self, data: dict[str, Any]) -> None:
+        with self.cv:
+            self.event_seq += 1
+            ev_type = str(data.get("type", "event"))
+            now = time.time()
+            event: dict[str, Any] = {
+                "event_id": self.event_seq,
+                "timestamp": now,
+                "type": ev_type,
+            }
+            for k, v in data.items():
+                if k not in event and isinstance(v, (str, int, float, bool, list, dict)):
+                    event[k] = v
+            self.events.append(event)
+
+            if "phase" in data and isinstance(data["phase"], str):
+                self.phase = data["phase"]
+
+            if ev_type == "heartbeat":
+                self.last_heartbeat = time.monotonic()
+            elif ev_type == "collection":
+                if isinstance(data.get("total"), int):
+                    self.counts["collected"] = data["total"]
+            elif ev_type == "test_start":
+                tid = str(data.get("id") or data.get("title") or "")
+                self.active_tests[tid] = {"title": str(data.get("title", tid)), "started_at": now}
+            elif ev_type == "test_end":
+                tid = str(data.get("id") or data.get("title") or "")
+                self.active_tests.pop(tid, None)
+                self.counts["executed"] += 1
+                outcome = data.get("outcome")
+                if outcome == "passed":
+                    self.counts["passed"] += 1
+                elif outcome in {"failed", "error"}:
+                    self.counts["failed"] += 1
+                elif outcome == "skipped":
+                    self.counts["skipped"] += 1
+            self.cv.notify_all()
+
+    def set_phase(self, phase: str) -> None:
+        self.record_event({"type": "phase", "phase": phase})
+
+    def mark_terminal(self, outcome: dict[str, Any]) -> None:
+        with self.cv:
+            self.terminal = True
+            self.outcome = outcome
+            self.phase = str(outcome.get("status", "completed"))
+            self.event_seq += 1
+            self.events.append({
+                "event_id": self.event_seq,
+                "timestamp": time.time(),
+                "type": "terminal",
+                "phase": self.phase,
+                "status": outcome.get("status"),
+            })
+            self.cv.notify_all()
+
+    def get_progress(self, after_event_id: int = 0, max_events: int = 50) -> dict[str, Any]:
+        with self.cv:
+            sliced = [e for e in self.events if e["event_id"] > after_event_id][:max_events]
+            last_id = sliced[-1]["event_id"] if sliced else after_event_id
+            remaining = sum(1 for e in self.events if e["event_id"] > last_id)
+            return {
+                "run_id": self.run_id,
+                "phase": self.phase,
+                "active_tests": list(self.active_tests.values()),
+                "counts": dict(self.counts),
+                "last_heartbeat_ago_seconds": round(time.monotonic() - self.last_heartbeat, 1),
+                "terminal": self.terminal,
+                "events": sliced,
+                "events_remaining": remaining,
+                "latest_event_id": self.event_seq,
+            }
 
 
 def _frame(header: dict[str, Any], artifact: Path):
@@ -129,9 +223,19 @@ def runner_environment() -> dict[str, str]:
 
 def make_subprocess_runner(command: tuple[str, ...], *, extra_wait: int = 1500) -> Runner:
     def run(job: QueuedJob, cancel: threading.Event) -> dict[str, Any]:
+        def on_err_line(line: str) -> None:
+            if line.startswith("ODYTOR_PROGRESS:") and job.on_progress is not None:
+                try:
+                    payload = json.loads(line[len("ODYTOR_PROGRESS:"):])
+                    if isinstance(payload, dict):
+                        job.on_progress(payload)
+                except Exception:
+                    pass
+
         result = run_bounded(command, env=runner_environment(), timeout=job.timeout + extra_wait,
                              max_stdout=job.max_output, cancel=cancel,
-                             stdin_chunks=_frame(job.header, job.spool / "source.tar"), hold_stdin=True)
+                             stdin_chunks=_frame(job.header, job.spool / "source.tar"), hold_stdin=True,
+                             on_stderr_line=on_err_line)
         if result.canceled:
             return {"canceled": True}
         stderr = safe_text(result.stderr_tail.decode("utf-8", "replace"), 600)
@@ -760,6 +864,8 @@ class JobService:
         self._last_purge = 0.0
         self._started = False
         self._probe_cache: tuple[float, dict[str, Any]] | None = None
+        self._trackers: dict[str, RunTracker] = {}
+        self._draining = False
 
     # --- lifecycle -------------------------------------------------------------------------
     def start(self) -> None:
@@ -837,8 +943,8 @@ class JobService:
         self.start()
         self.purge()
         with self._cv:
-            if self._stop:
-                raise QueueFullError("The test service is shutting down.")
+            if self._stop or self._draining:
+                raise QueueFullError("The test service is draining or shutting down.")
             if len(self._queue) + self._reserved >= self.cfg.max_queued:
                 raise QueueFullError("The test queue is full; retry later.", {"max_queued": self.cfg.max_queued})
             free = shutil.disk_usage(self.root).free
@@ -854,6 +960,9 @@ class JobService:
         """Convert a held reservation into a queued job."""
         with self._cv:
             record["instance"] = self.instance
+            tracker = RunTracker(record["run_id"])
+            self._trackers[record["run_id"]] = tracker
+            job.on_progress = tracker.record_event
             self.store.save(record)
             self._queue.append(job)
             self._reserved = max(self._reserved - 1, 0)
@@ -904,6 +1013,9 @@ class JobService:
         if started:
             record["timestamps"]["duration_seconds"] = round(now - started, 3)
         self.store.save(record)
+        tracker = self._trackers.get(record["run_id"])
+        if tracker:
+            tracker.mark_terminal(outcome)
 
     def _work(self) -> None:
         while True:
@@ -933,6 +1045,9 @@ class JobService:
         record["status"] = "running"
         record["timestamps"]["started_at"] = self.clock()
         self.store.save(record)
+        tracker = self._trackers.get(job.run_id)
+        if tracker:
+            tracker.set_phase("running")
         payload = self.runner(job, cancel)
         if payload.get("canceled") or cancel.is_set():
             outcome = {"status": "canceled", "failure": {"kind": "canceled", "message": "Canceled while running."}}
@@ -940,6 +1055,48 @@ class JobService:
             outcome = classify_job(record, payload)
             outcome["artifacts"] = self._intake_artifacts(record, payload)
         self._finish(self.store.load(job.run_id) or record, outcome)
+
+    def get_progress_or_wait(self, run_id: str, wait_seconds: float = 0.0, after_event_id: int = 0,
+                             max_events: int = 50) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        self.start()
+        self.purge()
+        wait_seconds = max(0.0, min(float(wait_seconds), 60.0))
+        tracker = self._trackers.get(run_id)
+        if tracker is None:
+            record = self.store.load(run_id)
+            return record, None
+
+        if wait_seconds > 0.0 and not tracker.terminal:
+            with tracker.cv:
+                if tracker.waiters < tracker.max_waiters:
+                    tracker.waiters += 1
+                    deadline = time.monotonic() + wait_seconds
+                    try:
+                        while not tracker.terminal and time.monotonic() < deadline:
+                            if any(e["event_id"] > after_event_id for e in tracker.events):
+                                break
+                            rem = deadline - time.monotonic()
+                            if rem <= 0:
+                                break
+                            tracker.cv.wait(timeout=min(rem, 2.0))
+                    finally:
+                        tracker.waiters -= 1
+
+        prog = tracker.get_progress(after_event_id=after_event_id, max_events=max_events)
+        record = self.store.load(run_id)
+        return record, prog
+
+    def drain(self, timeout: float = 300.0) -> bool:
+        """Stop accepting new work, allow active runs to finish, return True if all finished."""
+        with self._cv:
+            self._draining = True
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._cv:
+                if not self._cancels and not self._queue:
+                    return True
+            time.sleep(0.5)
+        return False
 
     def queue_depth(self) -> dict[str, int]:
         with self._cv:
@@ -1026,4 +1183,8 @@ class JobService:
         for stale in self.store.directory.glob("*.tmp-*"):
             if now - stale.stat().st_mtime > 3600:
                 stale.unlink(missing_ok=True)
+        active_ids = {r.get("run_id") for r in self.store.records()}
+        for rid in list(self._trackers.keys()):
+            if rid not in active_ids:
+                self._trackers.pop(rid, None)
         return removed

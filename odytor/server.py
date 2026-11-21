@@ -195,8 +195,14 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                            selectors=selectors, mode=mode, expected_base=expected_base, test_overlay=test_overlay)
 
     @tool(annotations={"readOnlyHint": True, "openWorldHint": True},
-              description="Retrieve status and evidence for a test_run: verified revisions, tested tree, overlay digest, runner image, dependency cache status, exact pytest invocation, per-test outcomes and bounded logs. Only the submitting user can read a run. A green result requires executed, passing tests; zero collected, skipped-only, missing-report and setup failures are never green.")
-    def test_result(run_id: str) -> dict[str, Any]:
+          description="Retrieve status, live progress, and evidence for a test_run or workspace_run: verified revisions, tested tree, overlay digest, runner image, dependency cache status, live phase, test counts, structured events, per-test outcomes, and bounded logs. Supports bounded server-side waiting (wait_seconds, capped at 60s) to wait for new progress events or completion without client-side busy-looping. Use after_event_id to paginate the replayable event log.")
+    def test_result(
+        run_id: str,
+        wait_seconds: Annotated[float, Field(ge=0.0, le=60.0)] = 0.0,
+        after_event_id: Annotated[int, Field(ge=0)] = 0,
+        max_events: Annotated[int, Field(ge=1, le=200)] = 50,
+        max_log_bytes: Annotated[int, Field(ge=1024, le=262144)] = 65536,
+    ) -> dict[str, Any]:
         if service is None:
             return safe_payload(runner_not_configured())
         record = service.get(run_id) if isinstance(run_id, str) else None
@@ -210,7 +216,9 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                     return safe_payload(ValidationError("Unknown run_id.").to_dict())
                 if not cfg.is_repo_allowed(record["repo"]):
                     return safe_payload(SecurityError("This run's repository is no longer permitted by Odytor configuration.").to_dict())
-                return safe_payload(fetch_test_result(client, record["repo"], run_id, service=service, owner=owner, workspaces=workspaces), limit=262144)
+                return safe_payload(fetch_test_result(client, record["repo"], run_id, service=service, owner=owner, workspaces=workspaces,
+                                                      wait_seconds=wait_seconds, after_event_id=after_event_id,
+                                                      max_events=max_events, max_log_bytes=max_log_bytes), limit=262144)
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 
@@ -316,14 +324,15 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                          limit=262144)
 
     @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
-          description="Queue an isolated test run on the exact current tree of a workspace (expected_version must match, so you test what you last saw). profile is python-pytest (default; selectors are pytest paths or node ids) or node-test (node --test; selectors are .mjs/.cjs/.js files or directories), each only if the maintainer policy enables it. The tree is snapshotted at submission: later edits never change a running test. Same isolation as test_run: no network, no arbitrary commands or flags. Browser scenarios use browser_run. Poll test_result with the returned run_id; the result names the workspace version and tree that was tested. Requires a configured runner and a maintainer test policy for the repository.")
+          description="Queue an isolated test run on the exact current tree of a workspace (expected_version must match, so you test what you last saw). profile is python-pytest (default; selectors are pytest paths or node ids), node-test (node --test; selectors are .mjs/.cjs/.js files or directories), or playwright-spec (selectors are spec paths or spec::title, or pass test_title), each only if the maintainer policy enables it. The tree is snapshotted at submission: later edits never change a running test. Same isolation as test_run: no network, no arbitrary commands or flags. Browser scenarios use browser_run. Poll test_result with the returned run_id; the result names the workspace version and tree that was tested. Requires a configured runner and a maintainer test policy for the repository.")
     def workspace_run(workspace_id: WorkspaceId, expected_version: Annotated[int, Field(ge=0)], profile: str = PROFILE_NAME,
-                      selectors: list[str] | None = None) -> dict[str, Any]:
+                      selectors: list[str] | None = None,
+                      test_title: str | None = None) -> dict[str, Any]:
         if service is None:
             return safe_payload(runner_not_configured())
         return invoke_ws(workspace_id, lambda owner: submit_workspace_run(
             workspaces.peek(workspace_id, owner)["repo"], workspace_id, expected_version, workspaces=workspaces, service=service,
-            policies=current_policies(), owner=owner, cfg=runs, profile=profile, selectors=selectors), limit=262144)
+            policies=current_policies(), owner=owner, cfg=runs, profile=profile, selectors=selectors, test_title=test_title), limit=262144)
 
     @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
           description="Manage workspaces. action='list' (your open workspaces), 'status' (one workspace: version, tree, expiry, checkpoints, whether it differs from its source), 'extend' (hours, capped by the maximum lifetime) or 'close' (deletes the workspace and its unpublished changes). Expired workspaces are removed automatically; nothing here touches GitHub.")
