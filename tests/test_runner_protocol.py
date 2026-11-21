@@ -48,7 +48,7 @@ def test_source_frame_respects_free_space_floor_before_writing(tmp_path, monkeyp
     monkeypatch.setattr(sandbox.shutil, 'disk_usage', lambda path: SimpleNamespace(free=103))
     prefix = b'\x00\x00\x00\x02{}'
     source = tmp_path / 'source.tar'
-    with pytest.raises(sandbox.SetupError, match='Insufficient free space') as caught:
+    with pytest.raises(sandbox.SetupError, match='Insufficient free disk space') as caught:
         sandbox.read_job(BytesIO(prefix + (4).to_bytes(8, 'big') + b'data'), cfg, source)
     assert caught.value.stage == 'resources' and not source.exists()
     assert sandbox.read_job(BytesIO(prefix + (3).to_bytes(8, 'big') + b'abc'), cfg, source) == {}
@@ -103,6 +103,22 @@ def test_dead_job_workspaces_are_swept_quickly_but_live_ones_never(tmp_path):
     assert removed == 1 and live.exists() and not dead.exists()
     assert starting.exists()  # no lock file and younger than the long grace: may still be starting
     os.close(holder)
+
+
+def test_inspecting_a_concurrently_removed_runner_lock_does_not_recreate_it(tmp_path, monkeypatch):
+    ticket = tmp_path / 'finished.ticket'
+    ticket.touch()
+    real_open = os.open
+
+    def removed_before_open(path, flags, *args):
+        if path == ticket:
+            ticket.unlink(missing_ok=True)
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(sandbox.os, 'open', removed_before_open)
+    assert sandbox._lock_free(ticket) is True
+    sandbox._remove_stale_ticket(ticket)
+    assert not ticket.exists()
 
 
 # --- host-wide admission ------------------------------------------------------------------------------------------

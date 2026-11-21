@@ -37,6 +37,9 @@ ARG ODYTOR_BUILD_ID=""
 ARG BUILD_ID=""
 ARG ODYTOR_BUILD_TIME=""
 
+LABEL org.opencontainers.image.revision="${ODYTOR_BUILD_REVISION}" \
+      org.opencontainers.image.title="OdyTor control plane"
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
     PATH="/home/git-plus/.local/bin:${PATH}" \

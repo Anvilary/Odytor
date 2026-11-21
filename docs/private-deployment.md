@@ -43,29 +43,55 @@ cd ~/services/git-plus-runner/hosting-bay
 docker logs --since 1h git-plus            # application log (no secrets are logged)
 ```
 
-Housekeeping needs no action: orphan containers, dead workspaces and expired or over-budget environments are
-removed before every job and by a 6-hourly timer. Environment TTL 7 days, budget 10 GiB, minimum free 2 GiB.
-Retained results: 48 h, expiring 6 h after a PR is seen closed or merged.
+Runtime housekeeping removes orphan containers, dead workspaces and expired or over-budget environments before
+every job and by a 6-hourly timer. Environment TTL 7 days, budget 10 GiB, minimum free 2 GiB. Retained results:
+48 h, expiring 6 h after a PR is seen closed or merged. This runtime cleanup does not manage host image tags,
+runner images, wheel files, VM disks or build caches. Manage those separately with the scoped procedure below.
 
 ## Deploying a new application commit
 
-1. `git archive` the tested commit, transfer, `docker build -f deploy/app/Dockerfile` to `odytor:<commit>`.
-2. Copy `compose.yaml` to `compose.yaml.before-<commit>`, change only the `image:` tag.
-3. `docker compose up -d --no-deps git-plus` (never `down -v`; the tunnel and Nginx are not touched), wait for `healthy`.
-4. Check `https://odytor.alexandreteixeira.dev/.well-known/oauth-authorization-server` (200) and an unauthenticated
-   `POST /mcp` (401 with `WWW-Authenticate`).
+1. Record the source commit and deployment time. Build the app image from that exact tested source; use a commit
+   tag and record the image ID/digest. Build a runner wheel from that same source revision and record its SHA-256.
+   The runner image must also be pinned by digest. Keep these provenance records with the release evidence.
+2. Copy `compose.yaml` to `compose.yaml.before-<new-commit>`, preserving it as the rollback file. Change only
+   the application image tag. Before deploying, confirm the currently running image/tag and that the previous
+   compose file and image are present.
+3. Drain admission before replacing the app. On a revision that supports it, run `odytor --drain start` and
+   poll `odytor --drain status` until it reports both `draining` and `quiescent`. Do not interpret `draining`
+   alone as quiescence: accepted campaigns and reservations retain their shared admission lease and can finish.
+   Keep the persistent run-data volume mounted throughout the upgrade. Resume admission with
+   `odytor --drain resume` after verification or rollback.
+4. Revision `2511b7e` predates the drain command. For deployments from that revision, close admission at the
+   ingress/tool boundary before stopping the old process. The gate must reject new MCP tool calls while allowing
+   already accepted work to finish; verify this with an operator-observable request log or equivalent evidence,
+   then wait for in-flight calls and reservations to reach zero. A maintenance page alone is insufficient if
+   `/mcp` remains reachable. If no such gate and evidence are available, do not replace the running process.
+5. Deploy with `docker compose up -d --no-deps git-plus` (never `down -v`; the tunnel and Nginx are not touched),
+   wait for `healthy`, and verify `https://odytor.alexandreteixeira.dev/.well-known/oauth-authorization-server`
+   (200) and an unauthenticated `POST /mcp` (401 with `WWW-Authenticate`). Confirm the reported build revision
+   through `odytor_capabilities` where supported. Perform read-only preparation checks first. Do not exercise
+   GitHub write tools on real PRs; separately configure allowed groups for preparation and retain all existing
+   GitHub write prompts and authorization checks.
+6. Resume admission, then verify a fresh read-only request and inspect application logs. Save the deployed revision,
+   image digest, wheel hash, health checks, drain evidence and any verification output with the release record.
 
-Updating the runner software: build the wheel, `GP_RUNNER_IMAGE=... GP_WHEEL=... ./runner-vm.sh provision`. It is
-idempotent and does not restart the user manager unless cgroup delegation changed. Drain jobs first anyway.
-Changing a dependency policy: replace the file in `policies/` (a new digest builds a new environment; the old one
-ages out). Policies are read at startup, so recreate the application container afterwards.
+Updating the runner software: build the wheel from the application release source and verify its SHA-256 against
+the recorded value. Pin `GP_RUNNER_IMAGE` to the runner image digest built for the same release, then run
+`GP_RUNNER_IMAGE=... GP_WHEEL=... ./runner-vm.sh provision`. Record the guest's installed runner version and
+image digest after provisioning. Drain application admission and wait for quiescence before provisioning. The
+provision command is idempotent and does not restart the user manager unless cgroup delegation changed.
+Publish approved requirements before atomically replacing `policy.toml` in the mounted policy directory. The
+service loads policy at admission. An invalid policy rejects new execution and reports a diagnostic in
+`odytor_capabilities`. An admitted job retains its original policy and deadline.
 
 ## Rollback
 
 * Test tools only: remove the `ODYTOR_TEST_*` lines from `compose.yaml` (or stop the VM). Both tools then report
   that test execution is not configured or unavailable; the other six tools and OAuth are unaffected.
-* Application: `cp compose.yaml.before-<commit> compose.yaml && docker compose up -d --no-deps git-plus`. The previous
-  images (`git-plus:4eab036` and earlier) are kept. The OAuth volume is never touched.
+* Application: reapply the matching saved compose file and image, then `docker compose up -d --no-deps git-plus`.
+  Confirm health and OAuth metadata/challenge checks before resuming admission. The previous images and runner
+  wheel/image must remain available until the rollback window closes. The OAuth volume and persistent run-data
+  volume are never touched.
 * VM: `./runner-vm.sh stop` (graceful guest poweroff). To discard it: `docker rm -f git-plus-runner-vm`, delete
   `~/services/git-plus-runner-vm/disk/vm.qcow2`, then `init` and `provision` rebuild it in about three minutes.
   Remove the network with `docker network rm gp-runner-net` once nothing is attached.
@@ -82,8 +108,52 @@ ages out). Policies are read at startup, so recreate the application container a
   host account in a container with no capabilities. Keep the guest patched; rebuild it from scripts when in doubt.
 * A host reboot powers the guest off abruptly (Docker stops the container); it restarts with Docker and recovers
   its journal and cache. No runs survive a restart; they are reported as `setup_error`.
-* Only Python/pytest, only repositories listed in `policy.toml` (currently `odysseus-dev/odysseus`).
+* Available test profiles depend on the pinned image and each repository's entry in `policy.toml`.
 * Guest and application containers are not backed up: the cache is rebuildable and results are disposable.
+
+## Scoped host and runner retention and headroom
+
+Use `deploy/hosting-bay/retention-headroom.sh` independently on each storage owner, once on the host and once in
+the runner guest (or through the approved administrative SSH session). It reports free MiB for supplied roots and
+prints candidates by default. It does not call Docker or Podman cleanup and never clears build caches. Candidate
+and keep manifests are newline-separated absolute paths. Include only exact, reviewed app/runner image archive
+files, obsolete wheel files, or other deployment artifacts under the declared roots. Keep manifests must include
+the active deployment, the complete known rollback set, and any artifact used by an in-progress release. Shared
+or ambiguous caches stay untouched. Directories require especially careful inventory because a directory candidate
+is removed recursively.
+
+Example, after reviewing both manifests and confirming paths against the deployment inventory:
+
+```sh
+./retention-headroom.sh --root "$HOME/services/git-plus/releases" \
+  --root "$HOME/services/git-plus-runner/releases" \
+  --candidates /secure/reviewed-candidates.txt --keep /secure/keep-active-and-rollback.txt \
+  --min-free-mib 2048
+# Inspect the proposed removals and headroom report. Repeat with --apply only for reviewed candidates.
+```
+
+Run the command separately on each host or guest so its `df` values describe the filesystem where the artifacts
+live. The example minimum is 2 GiB free, matching the runner environment's existing minimum; choose a larger
+threshold when the next image build, VM growth or backup needs it. The script exits with status 1 below the
+threshold. Reclaim reviewed candidates or expand storage. Refresh candidate and keep manifests
+for every release. Never list active/in-use resources, rollback images, the VM disk, mounted persistent data,
+container storage internals, or shared build-cache directories as candidates.
+
+Keep the running release and at least one boot-tested rollback release for both the application and the runner.
+Keep their compose files, exact image IDs and tags, checked wheels, and policy snapshots together. Inventory
+named deployments with `docker image ls` on hosting-bay and `podman image ls` as the runner user. Before removing
+each reviewed obsolete tag, resolve its image ID and check all containers, including stopped containers, with
+`docker ps -a --filter ancestor=<image-id>` or `podman ps -a --filter ancestor=<image-id>`. Skip references
+from any container or rollback manifest. Remove only the exact tag with `docker image rm --no-prune <tag>` or
+`podman image rm --no-prune <tag>` without force. Measure filesystem headroom again because image sizes include
+shared layers. Leave shared build caches in place when their owner cannot be determined. Use per-release archive
+and build-context directories for future builds so those paths can be retired explicitly.
+
+Before any planned host or guest maintenance, capture a recoverable backup of the release metadata and manifests,
+compose and rollback compose files, policy/configuration files without secrets, and persistent run-data volume if
+it contains evidence needed for recovery. Store credentials through the existing secret process, never in the
+backup bundle. Record the backup location, completion time and checksum, and test that the archive can be listed.
+The runner VM disk is not an application backup; preserve it unless a separate tested rebuild/recovery plan exists.
 
 ## Dogfooding checklist (read-only unless stated; do not mutate real Odysseus PRs to complete it)
 

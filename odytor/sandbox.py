@@ -322,7 +322,7 @@ def read_job(stream, cfg: RunnerConfig, source: Path) -> dict:
     if length:
         free = shutil.disk_usage(source.parent).free
         if free < cfg.min_free_bytes + length:
-            raise SetupError("resources", "Insufficient free space to stage the source artifact.",
+            raise SetupError("resources", "Insufficient free disk space to stage the source artifact.",
                              {"free_bytes": free, "minimum_free_bytes": cfg.min_free_bytes, "source_bytes": length})
     remaining = length
     with source.open("wb") as handle:
@@ -570,12 +570,25 @@ def _root_tag(root: Path) -> str:
 
 def _lock_free(path: Path) -> bool:
     """True when no live runner holds this workspace lock (or the lock file is gone)."""
-    fd = dep_cache._try_lock(path, exclusive=True) if path.exists() else -1
-    if fd is None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except FileNotFoundError:
+        return True
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
         return False
-    if fd >= 0:
+    finally:
         os.close(fd)
-    return True
+
+
+def _remove_stale_ticket(path: Path) -> None:
+    try:
+        if time.time() - path.stat().st_mtime > 2:  # a newly created ticket may not be locked yet
+            path.unlink(missing_ok=True)
+    except FileNotFoundError:
+        pass  # a finishing or disconnected job deleted its ticket during the scan
 
 
 def reap_orphan_containers(cfg: RunnerConfig, *, strict: bool = False) -> list[str]:
@@ -603,14 +616,19 @@ def _single_flight(cfg: RunnerConfig, job_id: str):
     active = cfg.root / "active"
     active.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = active / f"{job_id}.lock"
-    fd = dep_cache._try_lock(path, exclusive=True)
+    guard = active / ".guard"
+    with dep_cache._flock(guard, exclusive=True, wait=None):
+        fd = dep_cache._try_lock(path, exclusive=True)
     if fd is None:
         raise SetupError("duplicate", "A job with this id is already running on the runner.")
     try:
         yield
     finally:
-        path.unlink(missing_ok=True)
-        os.close(fd)
+        try:
+            with dep_cache._flock(guard, exclusive=True, wait=None):
+                path.unlink(missing_ok=True)
+        finally:
+            os.close(fd)
 
 
 @contextlib.contextmanager
@@ -635,8 +653,8 @@ def _admission(cfg: RunnerConfig, record: dict):
                 found.append(entry)
             elif not _lock_free(entry):
                 found.append(entry)
-            elif time.time() - entry.stat().st_mtime > 2:  # the grace covers a ticket being created and locked
-                entry.unlink(missing_ok=True)
+            else:
+                _remove_stale_ticket(entry)
         return found
 
     started = time.monotonic()
@@ -658,9 +676,12 @@ def _admission(cfg: RunnerConfig, record: dict):
 
 
 def _sweep_active(cfg: RunnerConfig) -> None:
-    for entry in list((cfg.root / "active").glob("test-*.lock")):
-        if _lock_free(entry):
-            entry.unlink(missing_ok=True)
+    active = cfg.root / "active"
+    active.mkdir(parents=True, mode=0o700, exist_ok=True)
+    with dep_cache._flock(active / ".guard", exclusive=True, wait=None):
+        for entry in active.glob("test-*.lock"):
+            if _lock_free(entry):
+                entry.unlink(missing_ok=True)
 
 
 def probe(cfg: RunnerConfig) -> dict:
@@ -738,8 +759,8 @@ def gc(cfg: RunnerConfig) -> dict:
     reaped = reap_orphan_containers(cfg, strict=True)
     _sweep_active(cfg)
     for stale in list((cfg.root / "queue").glob("*.ticket")):
-        if _lock_free(stale) and time.time() - stale.stat().st_mtime > 2:
-            stale.unlink(missing_ok=True)
+        if _lock_free(stale):
+            _remove_stale_ticket(stale)
     try:
         report = dep_cache.collect(cfg.root, ttl_seconds=cfg.env_ttl_days * 86400, budget_bytes=cfg.env_budget_bytes,
                                    min_free_bytes=cfg.min_free_bytes)
