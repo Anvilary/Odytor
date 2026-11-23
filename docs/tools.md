@@ -14,6 +14,7 @@ Each tool is designed specifically for AI agents, featuring bounded memory usage
 | [`ci_diagnose`](#ci_diagnose) | Read-only | Correlate failed CI jobs, log excerpts, annotations, and code scanning | Capped at 20 failed jobs per call; bounded log retrieval |
 | [`pr_conflicts`](#pr_conflicts) | Read-only | Inspect Git merge conflicts via `git merge-tree` | Runs in ephemeral repository; stage and text conflict regions |
 | [`quick_fix`](#quick_fix) | Mutating | Apply an exact patch and append one commit to PR head | Exact revision pinned; push lease on forks; non-executable UTF-8 only |
+| [`pr_rebase_preview`](#pr_rebase) | Read-only | Preview a linear rebase onto live base branch | Read-only preview; verifies live base tip |
 | [`pr_rebase`](#pr_rebase) | Mutating | Linear rebase preview or apply onto live base branch | Requires explicit approval flags; lease-bound push; verifies live tip |
 | [`ci_control`](#ci_control) | Mutating | Trigger workflow reruns, failed job reruns, or dispatches | Ref-based dispatch verification; explicit authorization arguments |
 | [`test_run`](#test_run) | Execution | Queue isolated pytest execution against exact PR tree | Executes only on isolated runner VM; rootless network-isolated container |
@@ -237,3 +238,15 @@ Recover a lost direct submission response with `test_run_list(repo, number, expe
 ### `validation_campaign`
 
 Submit with `wait=false` (the default), keep the `campaign_id`, and monitor via `campaign_status`. While a child runs, use its `run_id` with `test_result` and start at cursor zero. Choose one explicit selector for `playwright-spec` when policy lists more than one spec. A campaign with no validation plans completes with `green=false`. An optional idempotency key binds the effective request to one campaign for its retention period.
+
+---
+
+## Additive Workspace, Browser, Publication & Discovery Tools
+
+In addition to the core tools above, OdyTor registers 23 additive tools whose full contracts are documented in their dedicated guides:
+
+- **Workspaces ([docs/workspaces.md](workspaces.md))**: `workspace_create`, `workspace_read`, `workspace_search`, `workspace_edit`, `workspace_diff`, `workspace_run`, `workspace_list`, `workspace_status`, `workspace_manage`, `test_cancel`.
+- **Browser & Artifacts ([docs/browser.md](browser.md), [docs/artifacts.md](artifacts.md))**: `browser_run`, `browser_close`, `artifact_get`.
+- **Campaigns**: `validation_campaign`, `campaign_status`, `campaign_cancel`.
+- **Guarded Publication ([docs/publishing.md](publishing.md))**: `publish_plan`, `publish_apply`, `pr_body_plan`, `pr_body_apply`.
+- **Discovery**: `odytor_capabilities` (separates `installed`, `configured`, `operational`, and `authorized` status per capability).

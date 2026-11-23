@@ -83,12 +83,12 @@ Hosted deployment exposes the Model Context Protocol over HTTP using the Streama
 
 1. Register or update your GitHub OAuth App:
    - **Application Name:** Odytor MCP Server
-   - **Homepage URL:** `https://odytor.alexandreteixeira.dev`
-   - **Authorization callback URL:** `https://odytor.alexandreteixeira.dev/auth/callback`
+   - **Homepage URL:** `https://odytor.example.com`
+   - **Authorization callback URL:** `https://odytor.example.com/auth/callback`
 
 2. Configure environment variables in `.env`:
    ```dotenv
-   ODYTOR_PUBLIC_URL=https://odytor.alexandreteixeira.dev
+   ODYTOR_PUBLIC_URL=https://odytor.example.com
    ODYTOR_GITHUB_CLIENT_ID=your_github_client_id
    ODYTOR_GITHUB_CLIENT_SECRET=your_github_client_secret
    ODYTOR_OAUTH_SIGNING_KEY=generate_random_secret_at_least_32_bytes
@@ -108,9 +108,7 @@ Hosted deployment exposes the Model Context Protocol over HTTP using the Streama
 
 5. In ChatGPT:
    - Go to Settings -> Connected apps or Custom MCP servers.
-   - Enter `https://odytor.alexandreteixeira.dev/mcp`.
-   - Select OAuth authentication and complete consent.
-   - Enter `https://your-domain.example.com/mcp`.
+   - Enter `https://odytor.example.com/mcp`.
    - Select OAuth authentication and complete consent.
 
 ---
@@ -171,6 +169,7 @@ directory unless overridden and **must be on a persistent volume in production**
 |---|---|---|
 | `ODYTOR_WORKSPACES` | `on` | `off` disables workspace tools. |
 | `ODYTOR_WORKSPACE_DIR` | `$XDG_STATE_HOME/odytor/workspaces` | Workspace objects, state, browser sessions, publication plans. |
+| `ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY` | `off` | Set to `on` or `true` to permit `publish_apply` and `pr_body_apply` writes. |
 | `ODYTOR_WORKSPACE_TTL_HOURS`, `_MAX_TTL_HOURS`, `_MAX_PER_OWNER`, `_MAX_MIB`, `_MAX_TOTAL_MIB`, `_MAX_FILE_BYTES`, `_MAX_CHANGED_FILES`, `_MAX_CHECKPOINTS`, `_MAX_RUNS`, `_MIN_FREE_MIB` | see [workspaces](workspaces.md) | Hard caps. |
 | `ODYTOR_ARTIFACTS`, `ODYTOR_ARTIFACT_DIR`, `_RETENTION_HOURS`, `_MAX_MIB`, `_MAX_IMAGE_BYTES`, `_MAX_OWNER_MIB`, `_MAX_TOTAL_MIB` | see [artifacts](artifacts.md) | Evidence storage. |
 | `ODYTOR_BUILD_REVISION` (40-hex), `ODYTOR_BUILD_ID` | unset | Reported by `odytor_capabilities` so the running revision can be verified. Stamp it when building the image. |

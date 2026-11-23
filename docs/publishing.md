@@ -3,7 +3,7 @@
 Publication turns a validated workspace change into **one additive commit on the PR's head branch**, and only after
 explicit authorization. It is deliberately two separate acts.
 
-## Plan (`publish_plan`) — read-only
+## Plan (`publish_plan`) - read-only
 
 Requires a workspace opened with `source="pr_head"` **and** with `publish` in its scope (the default scope does not
 include it). It writes nothing to GitHub. The plan binds:
@@ -23,9 +23,9 @@ scripts, key material, container definitions or sensitive names), and the change
 `quick_fix` limits for files, lines and bytes. Only regular text files can be added, modified or deleted; mode changes,
 symlinks, submodules and binaries are refused. A plan expires after an hour.
 
-## Apply (`publish_apply`) — the only write
+## Apply (`publish_apply`) - the only write
 
-It refuses unless **all** of these hold, each re-checked against live state:
+Requires the server flag `ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY=on` (disabled by default; `publish_plan` remains usable for review when apply is disabled). It refuses unless **all** of these hold, each re-checked against live state:
 
 1. `user_authorized` is exactly `true` and `confirm` equals the plan's text. This is the server's contract: the user's
    approval is the caller's to obtain, and the confirmation ties it to the immutable inputs they approved.
@@ -55,7 +55,15 @@ becomes `unknown_outcome`; calling `publish_apply` again **reconciles against th
 
 A definitive rejection from GitHub leaves the plan pending.
 
+## Draft PR body updates (`pr_body_plan` / `pr_body_apply`)
+
+OdyTor also provides a two-phase flow for updating the description of an **open draft pull request** (`draft=true`):
+
+* `pr_body_plan(repo, number, expected_head, body)` (read-only): verifies that the PR is open and still a draft at `expected_head`, records `current_body_digest` and `replacement_body_digest`, and returns a `pb-*` plan and confirmation phrase.
+* `pr_body_apply(plan_id, confirm, user_authorized=false)` (mutating): requires `ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY=on`, `user_authorized=true`, and the exact confirmation text. Before writing, it re-verifies that the PR is open, still a draft, at `expected_head`, and unchanged from `current_body_digest`. Immediately after the `PATCH`, it re-reads the PR to confirm that title, base ref, base SHA, head SHA, draft status, and body all match invariants.
+
 ## Not covered
 
-Branch workspaces and prospective-merge workspaces cannot be published (a merged tree would add merge content to the PR
-head; a branch has no review gate). There is no signing of fork-pushed commits.
+* Branch workspaces and prospective-merge workspaces cannot be published (a merged tree would add merge content to the PR head; a branch has no review gate). There is no signing of fork-pushed commits.
+* `pr_body_plan` and `pr_body_apply` refuse non-draft (ready-for-review) pull requests.
+* OdyTor v1 does not include PR merge tools, thread reading (`thread_read`), or generalized comment, review verdict, reply, or issue/PR closure tools (`text_plan`, `text_apply`, `text_recover`).

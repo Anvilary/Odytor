@@ -1,18 +1,12 @@
-<p align="center">
-  <img src="assets/logo.png" alt="Odytor Logo" width="160" />
-</p>
+![OdyTor, an Anvilary Tools product](docs/media/odytor-readme-banner-1920x640.png)
 
-<h1 align="center">Odytor</h1>
+# OdyTor
 
-<p align="center">
-  <strong>GitHub operations, optimized for AI agents.</strong>
-</p>
+**GitHub pull request operations, isolated validation, and guarded maintenance for AI agents.** Inspect large pull requests within bounded context windows, diagnose CI failures, explore and test changes in disposable Git-object workspaces, run headless browser checks in network-isolated containers, and prepare revision-pinned fixes with explicit human authorization gates.
 
-<p align="center">
-  An <a href="https://anvilary.tools">Anvilary Tools</a> project.
-</p>
+A source-available project from [Anvilary Tools](https://anvilary.tools).
 
-<p align="center">
+<p>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-3776AB.svg?style=flat&logo=python&logoColor=white" alt="Python 3.11+" /></a>
   <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-compatible-4B5563.svg?style=flat" alt="MCP Compatible" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-PolyForm_Noncommercial_1.0.0-blue.svg?style=flat" alt="License: PolyForm Noncommercial 1.0.0" /></a>
@@ -21,135 +15,177 @@
 
 ---
 
-Odytor is a lightweight Model Context Protocol (MCP) server that provides repository maintenance and pull request operations designed specifically for AI agents.
+## Why OdyTor?
 
-AI agents often struggle with standard GitHub operations: large pull request diffs exhaust context windows, concurrent commits cause silent conflicts, multi-megabyte CI logs exceed memory budgets, and executing untrusted contributor code on local developer machines poses severe security risks.
+AI coding assistants and maintainer agents often run into sharp operational limits when working directly with GitHub APIs and local developer checkouts: large pull request diffs overflow context budgets, multi-megabyte CI logs drown out root causes, concurrent pushes create silent race conditions, and running untrusted contributor code locally puts developer workstations and credentials at risk.
 
-Odytor solves these challenges through eight focused, unbranded MCP tools that enforce bounded responses, explicit commit revision pinning, lease-bound Git updates, and isolated test execution.
+OdyTor is designed for repository maintainers, code-review agents, and automated engineering workflows that need repeatable, bounded, and auditable GitHub operations:
+
+- **Bounded Pull Request Evidence**: Inspect large pull requests (`pr_evidence`) with paginated file lists, windowed diffs, review context, status checks, and explicit `*_complete` / `truncated_fields` signals.
+- **Correlated CI Diagnosis**: Group failed workflow runs, job logs, step annotations, and code-scanning alerts (`ci_diagnose`) against pinned commit revisions.
+- **Strict Revision Pinning & Branch Leases**: Require `expected_head` and `expected_base` SHAs across conflict checks, rebases, test runs, and mutations, refusing concurrent drift and enforcing `--force-with-lease` on fork pushes.
+- **Checkout-Free Disposable Workspaces**: Explore, search, edit, diff, checkpoint, and test repositories in isolated Git object stores (`workspace_*`) without checking out working trees on the control plane.
+- **Network-Isolated Runner Execution**: Execute tests (`test_run`, `workspace_run`), headless Chromium browser checks (`browser_run`), and multi-step validation campaigns (`validation_campaign`) inside rootless Podman containers with `--network=none`, `--cap-drop=ALL`, read-only root filesystems, and no GitHub credentials.
+- **Four-State Capability Discovery**: Distinguish `installed`, `configured`, `operational` (observed via live runner probe), and `authorized` capabilities through `odytor_capabilities`.
+- **Two-Phase Guarded Publication**: Prepare immutable plans (`publish_plan`, `pr_body_plan`) that require `user_authorized=true` and an exact confirmation phrase before applying (`publish_apply`, `pr_body_apply`), with server-side write gating disabled by default.
 
 > [!NOTE]
-> Odytor complements the [official GitHub MCP server](https://github.com/github/github-mcp-server) rather than replacing it. The official server provides broad browsing of repositories, issues, discussions, and search APIs. Odytor provides agent-optimized operations: windowed diffs, revision-pinned patches, linear rebases with leases, log diagnosis, and sandboxed test execution.
-
-> Odytor was developed under the name Git Plus. Existing installations and configuration keys continue to function through compatibility aliases. See [docs/migration-from-git-plus.md](docs/migration-from-git-plus.md) for details.
-
----
-
-## Capabilities
-
-Odytor exposes eight original tools that form the stable MCP contract, plus tools for disposable engineering workspaces,
-browser evidence, artifacts and guarded publication. The tool names of the original eight are unchanged.
-
-| Tool | Mode | Description |
-| --- | --- | --- |
-| [`pr_evidence`](docs/tools.md#pr_evidence) | Read-only | Collect PR metadata, windowed diffs, file lists, reviews, and status checks with completeness flags. |
-| [`ci_diagnose`](docs/tools.md#ci_diagnose) | Read-only | Correlate failed CI jobs, log excerpts, annotations, and code scanning alerts against captured revisions. |
-| [`pr_conflicts`](docs/tools.md#pr_conflicts) | Read-only | Inspect Git merge conflicts via `git merge-tree` with conflict stages and text regions. |
-| [`quick_fix`](docs/tools.md#quick_fix) | Mutating | Validate an exact patch in an isolated index and append one commit to the PR head with a lease. |
-| [`pr_rebase`](docs/tools.md#pr_rebase) | Mutating | Preview or apply a linear rebase onto the live target branch with explicit confirmation guards. |
-| [`ci_control`](docs/tools.md#ci_control) | Mutating | Coordinate revision-aware workflow reruns, failed job reruns, dispatches, and fork run approvals. |
-| [`test_run`](docs/tools.md#test_run) | Execution | Queue an isolated pytest run against an exact PR head or merge tree, with optional reviewer test overlays. |
-| [`test_result`](docs/tools.md#test_result) | Read-only | Retrieve per-test evidence, tested tree, overlay digest, and runner cache status. |
-
-**Remote engineering workspace** (additive; see [Workspaces](docs/workspaces.md)):
-
-| Tool | Mode | Description |
-| --- | --- | --- |
-| `odytor_capabilities` | Read-only | What this deployment can actually do: installed, configured, observed-operational and authorized, per capability. |
-| `workspace_create` / `workspace_manage` | Local state | Open a disposable workspace at an exact PR head, prospective merge or branch revision; list, extend, close. |
-| `workspace_read` / `workspace_search` / `workspace_diff` | Read-only | Tree, bounded file ranges, symbols, `git grep` and the complete effective diff. |
-| `workspace_edit` | Scratch only | Versioned `write`, `replace`, `delete`, `rename`, `patch`, `checkpoint`, `reset`; GitHub is never touched. |
-| `workspace_run` / `test_cancel` | Execution | Run `python-pytest` or `node-test` on the exact current tree; cancel queued or running work. |
-| [`browser_run`](docs/browser.md) / `browser_close` | Execution | Chromium against the application in the sandbox; steps, assertions, network evidence, screenshots as native image content. |
-| [`artifact_get`](docs/artifacts.md) | Read-only | Retrieve screenshots, logs and traces with provenance and integrity hashes. |
-| [`publish_plan` / `publish_apply`](docs/publishing.md) | Plan read-only / apply mutating | Prepare, then (after explicit user authorization) append one additive commit built from a workspace. |
-
-For complete parameter schemas, output fields, and windowing behavior, see the [Tool Reference](docs/tools.md).
-
-### Operational Support by Deployment Mode
-
-Every tool is registered in every deployment mode so MCP client tool discovery remains stable. Test execution, `workspace_run` and `browser_run` require an isolated runner host; workspace reading, searching, editing, diffing and capability discovery do not.
-
-| Deployment Mode | Investigation & Fixes (`pr_*`, `ci_*`, `quick_fix`) | Test Execution (`test_run`, `test_result`) |
-| --- | --- | --- |
-| **Local stdio (no runner)** | Full operational support | Registered; returns runner configuration requirements |
-| **Local stdio (with runner)** | Full operational support | Full operational support |
-| **Hosted Streamable HTTP (with runner)** | Full operational support | Full operational support |
+> OdyTor complements the [official GitHub MCP server](https://github.com/github/github-mcp-server) rather than replacing it. The official server provides broad repository, issue, and search APIs; OdyTor focuses on agent-bounded PR evidence, CI log diagnosis, isolated validation, and lease-guarded Git operations.
 
 ---
 
 ## Quick Start
 
 ### Prerequisites
-- Python 3.11 or newer
-- Git 2.38 or newer
-- GitHub CLI (`gh`) or a Personal Access Token with `repo` and `workflow` scopes
 
-### 1. Installation
+- **Python**: 3.11 or newer
+- **Git**: 2.38 or newer (required for `git merge-tree` and object-store operations)
+- **GitHub Credentials**: GitHub CLI (`gh`) authenticated with `repo` and `workflow` scopes, or a Personal Access Token via `GITHUB_TOKEN`
 
-Install Odytor in a dedicated virtual environment:
+### 1. Install and Verify Locally
 
 ```bash
 git clone https://github.com/Anvilary/Odytor.git
 cd Odytor
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
-```
 
-Verify the installation and test suite:
-
-```bash
+# Verify CLI and offline unit test suite
 .venv/bin/odytor --version
 .venv/bin/pytest -q
 ```
 
-### 2. Configure MCP Client
+### 2. Run Over Local Stdio
 
-Odytor includes a stdio launcher script in `deploy/local/odytor-mcp` that retrieves your GitHub CLI session token without writing credentials to disk.
+**Direct stdio launch:**
 
-Install the launcher:
-
-```bash
-cp deploy/local/odytor-mcp ~/.local/bin/anvi-odytor-mcp
-chmod +x ~/.local/bin/anvi-odytor-mcp
-```
-
-Add Odytor to your agent profile:
-
-**Claude Code (`~/.claude.json`):**
-```json
-{
-  "mcpServers": {
-    "anvi-odytor": {
-      "command": "/home/YOUR_USER/.local/bin/anvi-odytor-mcp"
-    }
-  }
-}
-```
-
-**Direct stdio invocation:**
 ```bash
 export GITHUB_TOKEN="ghp_your_personal_access_token"
 export ODYTOR_ALLOWED_REPOSITORIES="owner/repo,owner/another-repo"
 .venv/bin/odytor --transport stdio
 ```
 
-> [!TIP]
-> In local stdio mode, Odytor defaults to unrestricted repository access if `ODYTOR_ALLOWED_REPOSITORIES` is not set, printing a plain-language notice to stderr. For production or automated setups, always configure an explicit allowlist.
+**Shared stdio launcher (`deploy/local/odytor-mcp`):**
 
-For remote web deployment, Streamable HTTP, and ChatGPT integration, see the [Deployment Guide](docs/deployment.md).
+OdyTor includes a stdio launcher script in [deploy/local/odytor-mcp](deploy/local/odytor-mcp) that resolves your active `gh` CLI token in memory without writing secrets to disk:
+
+```bash
+cp deploy/local/odytor-mcp ~/.local/bin/anvi-odytor-mcp
+chmod +x ~/.local/bin/anvi-odytor-mcp
+```
+
+Example MCP client registration (`~/.claude.json`):
+
+```json
+{
+  "mcpServers": {
+    "anvi-odytor": {
+      "command": "/path/to/your/.local/bin/anvi-odytor-mcp"
+    }
+  }
+}
+```
+
+> [!TIP]
+> In local stdio mode, leaving `ODYTOR_ALLOWED_REPOSITORIES` unset permits every repository visible to your GitHub credential and prints a notice to `stderr`. Always set an explicit allowlist in shared, automated, or hosted environments.
+
+For remote Streamable HTTP hosting, GitHub OAuth, server-held PAT configuration, and reverse-proxy setup, see the [Deployment and Integration Guide](docs/deployment.md).
 
 ---
 
-## Architecture
+## Key Capabilities & Tool Catalog
 
-Odytor maintains strict operational boundaries between MCP clients, the GitHub API, local Git workspaces, and execution sandboxes.
+OdyTor registers 31 MCP tools consistently across all deployment modes so client tool discovery stays predictable. Execution-backed tools return explicit setup instructions when no runner host is configured, and guarded write tools respect server configuration gates.
+
+### Pull Request Evidence, Conflicts & Rebase
+
+| Tool | Mode | Description |
+| --- | --- | --- |
+| [`pr_evidence`](docs/tools.md#pr_evidence) | Read-only | Collect PR metadata, windowed diffs, paginated file lists, reviews, and status checks with completeness flags. |
+| [`ci_diagnose`](docs/tools.md#ci_diagnose) | Read-only | Correlate failed workflow runs, bounded job logs, annotations, and code scanning alerts against pinned revisions. |
+| [`pr_conflicts`](docs/tools.md#pr_conflicts) | Read-only | Inspect merge conflicts via `git merge-tree` against the recorded base or live target-branch tip (`merge_target="live_tip"`). |
+| [`pr_rebase_preview`](docs/tools.md#pr_rebase) | Read-only | Preview a linear rebase onto the live target branch tip without mutating branch refs. |
+| [`pr_rebase`](docs/tools.md#pr_rebase) | Mutating | Preview or apply a linear rebase with `apply=true` and `allow_history_rewrite=true` confirmation guards. |
+| [`quick_fix`](docs/tools.md#quick_fix) | Mutating | Validate an exact unified diff on regular non-executable UTF-8 files and append one commit with a lease. |
+| [`ci_control`](docs/tools.md#ci_control) | Mutating | Trigger workflow reruns, failed-job reruns, dispatches, and fork workflow approvals with explicit authorization flags. |
+
+### Disposable Engineering Workspaces
+
+| Tool | Mode | Description |
+| --- | --- | --- |
+| [`workspace_create`](docs/workspaces.md) | Local state | Open a checkout-free Git-object workspace at `pr_head`, `prospective_merge`, or `branch` with an explicit operation scope. |
+| [`workspace_read`](docs/workspaces.md) | Read-only | Inspect directory trees, bounded file line ranges, or Python/JS/TS symbol outlines. |
+| [`workspace_search`](docs/workspaces.md) | Read-only | Search the exact workspace tree with `git grep` (literal by default, optional extended regex). |
+| [`workspace_edit`](docs/workspaces.md) | Scratch only | Apply version-pinned (`expected_version`) `write`, `replace`, `delete`, `rename`, `patch`, `checkpoint`, and `reset` edits. |
+| [`workspace_diff`](docs/workspaces.md) | Read-only | Return changed-file summaries, pageable patch windows, and the whole-patch SHA-256 digest. |
+| [`workspace_list`](docs/workspaces.md) | Read-only | List active workspaces owned by the calling principal. |
+| [`workspace_status`](docs/workspaces.md) | Read-only | Inspect current version, tree SHA, limits, expiry, and attached runs for a workspace. |
+| [`workspace_manage`](docs/workspaces.md) | Local state | List, inspect, extend TTL, or close a disposable workspace. |
+
+### Isolated Test Execution, Browser Evidence & Campaigns
+
+| Tool | Mode | Description |
+| --- | --- | --- |
+| [`test_run`](docs/tools.md#test_run) | Execution | Queue an isolated test run against an exact PR head or prospective merge tree, with optional reviewer test overlays. |
+| [`test_result`](docs/tools.md#test_result) | Read-only | Poll run progress, bounded live event streams, per-test structured outcomes, and currency checks. |
+| [`test_run_list`](docs/tools.md#test_run_list) | Read-only | Recover previously submitted run IDs for a pinned PR head without starting a new run. |
+| [`test_cancel`](docs/test-runner.md#cancellation) | Control | Cancel a queued or running job and tear down its runner container and workspace. |
+| [`workspace_run`](docs/workspaces.md) | Execution | Execute an approved profile (`python-pytest`, `node-test`, etc.) against an immutable export of the workspace tree. |
+| [`browser_run`](docs/browser.md) | Execution | Drive headless Chromium inside the isolated sandbox with typed steps, assertions, network evidence, and screenshots. |
+| [`browser_close`](docs/browser.md) | Control | Close a replay-based browser session explicitly. |
+| [`artifact_get`](docs/artifacts.md) | Read-only | Retrieve owner-bound screenshots (native MCP image content), logs, traces, and videos with SHA-256 provenance. |
+| [`validation_campaign`](docs/tools.md#validation_campaign) | Execution | Run a bounded multi-profile and optional browser validation campaign on a PR head or prospective merge. |
+| [`campaign_status`](docs/tools.md#validation_campaign) | Read-only | Poll status and child run summaries for an active or completed validation campaign. |
+| [`campaign_cancel`](docs/tools.md#validation_campaign) | Control | Cancel a running validation campaign and its child runs. |
+
+### Guarded Plan-Then-Apply Publication & Capability Discovery
+
+| Tool | Mode | Description |
+| --- | --- | --- |
+| [`publish_plan`](docs/publishing.md) | Read-only | Prepare an immutable publication plan binding workspace tree, patch digest, expected head, validation evidence, and confirmation phrase. |
+| [`publish_apply`](docs/publishing.md) | Mutating | Apply an approved `publish_plan` as one additive commit on the PR head after `user_authorized=true` and server gate checks. |
+| [`pr_body_plan`](docs/publishing.md#draft-pr-body-updates-pr_body_plan--pr_body_apply) | Read-only | Prepare a body replacement plan for an open draft pull request, binding `expected_head` and body digests. |
+| [`pr_body_apply`](docs/publishing.md#draft-pr-body-updates-pr_body_plan--pr_body_apply) | Mutating | Apply an approved `pr_body_plan` to a draft PR and verify post-write invariants via read-back. |
+| `odytor_capabilities` | Read-only | Report version, build revision, limits, execution profiles, and per-capability `installed` / `configured` / `operational` / `authorized` state. |
+
+### Registered Execution Profiles
+
+Execution profiles are defined in trusted server/runner code (`odytor/profile.py`) and must be enabled per repository in the maintainer TOML policy (`ODYTOR_TEST_POLICIES`):
+
+- **Primary verified profiles**: `python-pytest` (pinned maintainer requirements), `node-test` (`node --test --test-reporter=tap`), `browser-playwright` (headless Chromium against `127.0.0.1`), and `playwright-spec` (repository Playwright specs against an in-sandbox app).
+- **Additional defined profiles**: `python-lint`, `python-typecheck`, `python-build`, `node-lint`, `node-typecheck`, `node-build`, `cmake-build`, `make-build`, and `c-test` (only operational when both enabled in repository policy and present in the pinned runner container image).
+
+---
+
+## Capability States & Operational Modes
+
+OdyTor separates capability reporting into four explicit flags via `odytor_capabilities` so agents never confuse installed code with a live, authorized runtime:
+
+| Flag | Meaning |
+| --- | --- |
+| `installed` | Code for the capability is present in this OdyTor build. |
+| `configured` | Required operator settings (such as `ODYTOR_TEST_RUNNER_COMMAND`, `ODYTOR_TEST_POLICIES`, or `ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY`) are set. |
+| `operational` | Observed live via `odytor_capabilities(probe_runner=true)` (`true`, `false`, or `null` when not probed). |
+| `authorized` | Permitted for the calling principal and repository policy. |
+
+| Deployment Mode | PR & CI Tools (`pr_*`, `ci_*`, `quick_fix`) | Workspaces & Plan Tools (`workspace_*`, `*_plan`) | Runner Execution (`test_run`, `workspace_run`, `browser_run`, `validation_campaign`) |
+| --- | --- | --- | --- |
+| **Local stdio (no runner)** | Operational | Operational (unless `ODYTOR_WORKSPACES=off`) | Registered; returns runner configuration instructions |
+| **Local stdio (with runner)** | Operational | Operational | Operational for policy-enabled profiles on the runner |
+| **Hosted Streamable HTTP (with runner)** | Operational | Operational | Operational for policy-enabled profiles on the runner |
+
+---
+
+## Architecture & Security Model
+
+OdyTor isolates MCP protocol handling, GitHub credentials, ephemeral Git workspaces, and untrusted repository code across distinct trust boundaries:
 
 ```mermaid
 flowchart TD
     Client["MCP Client\n(Claude Code, Codex, Antigravity, ChatGPT)"]
-    Server["Odytor MCP Server\n(FastMCP / Python 3.11+)"]
+    Server["Odytor MCP Control Plane\n(FastMCP / Python 3.11+)"]
     GitHub["GitHub API & Repositories\n(REST, GraphQL, Git over HTTPS)"]
-    Runner["Isolated Test Runner Host\n(Dedicated VM / Rootless Podman)"]
+    Runner["Isolated Runner Host\n(Dedicated VM / Rootless Podman)"]
 
     Client -->|"MCP Protocol\n(stdio / Streamable HTTP)"| Server
     Server -->|"Revision-pinned operations\n(Tokens in memory only)"| GitHub
@@ -160,102 +196,110 @@ flowchart TD
     class Server highlight;
 ```
 
-### Key Architectural Boundaries
+- **No In-Process Code Execution**: Repository code, test suites, build scripts, and Git hooks (`core.hooksPath=/dev/null`) are never executed in the MCP server process.
+- **Credential Isolation**: GitHub tokens stay in memory and are passed to Git subprocesses via host-scoped authorization headers; the isolated runner never receives GitHub tokens or server secrets.
+- **Rootless Sandbox Enforcement**: `odytor-runner` executes jobs inside rootless Podman containers with `--network=none`, `--read-only`, `--cap-drop=ALL`, `no-new-privileges`, unprivileged UID `65534`, and bounded memory/PID/tmpfs limits.
+- **Fail-Closed Concurrency & Uncertainty Handling**: Stale SHAs or workspace versions fail closed; network ambiguities during mutations return `outcome: "unknown"` rather than retrying blindly, and `publish_apply` reconciles against the remote before retrying.
 
-- **MCP Client Boundary:** Standard JSON-RPC communication over stdio or Streamable HTTP. Tool schemas are unbranded and carry explicit annotations (`readOnlyHint`, `destructiveHint`).
-- **Server and Ephemeral Workspaces:** Odytor executes Git operations inside temporary directories created with restricted filesystem permissions. Workspaces are purged immediately after each operation.
-- **GitHub API and Network:** Authentication tokens are kept strictly in memory and injected into Git subprocesses only via host-scoped authorization headers. Tokens are never written to disk or logs.
-- **Isolated Runner Boundary:** Odytor never executes repository code in the main MCP server process. Test execution delegates over SSH to a dedicated runner VM running rootless Podman containers with no network access (`--network=none`), no capabilities, and no credentials.
-
-See [docs/test-runner.md](docs/test-runner.md) for detailed runner VM specifications.
+See [Security Model](docs/security.md) and [Pre-Release Security Review](docs/security-review.md) for detailed threat boundaries and test verification status.
 
 ---
 
-## Security Model
+## Configuration Overview
 
-Odytor is designed around defensive engineering principles for autonomous agent interactions:
+All settings use the `ODYTOR_` prefix and are parsed by `odytor/config.py`.
 
-- **Strict Revision Pinning:** Mutating operations require exact commit SHAs (`expected_head` and `expected_base`). Odytor fails closed if remote branches advance concurrently.
-- **Repository Allowlists:** `ODYTOR_ALLOWED_REPOSITORIES` limits operations to explicitly approved repositories. Access to contributor forks is restricted to PR head branches referencing allowlisted base repositories.
-- **Branch Leases:** Remote branch updates use explicit push leases (`--force-with-lease=<ref>:<expected_head>`). `quick_fix` proves mathematically that new commits are an exact single child of the expected head before pushing.
-- **Destructive Operation Guards:** Potentially disruptive operations require explicit confirmation arguments (e.g., `allow_history_rewrite=true`, `authorize_dispatch_semantics=true`, `user_authorized_fork_approval=true`).
-- **No In-Process Code Execution:** Repository build scripts, test suites, and hooks are never executed within the MCP server process.
-- **Uncertainty Handling:** Network interruptions or verification timeouts report `outcome: "unknown"` and are never retried automatically, preventing duplicate commits or unintended workflow dispatches.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ODYTOR_ALLOWED_REPOSITORIES` | `""` | Comma-separated allowlist (`owner/repo` or `owner/*`). |
+| `ODYTOR_MAX_RESPONSE_BYTES` | `262144` (256 KiB) | Response budget before field truncation (16 KiB to 4 MiB). |
+| `ODYTOR_GITHUB_TIMEOUT` | `120` | GitHub API read timeout in seconds (10 to 600). |
+| `ODYTOR_WORKSPACES` | `on` | Set to `off` to disable disposable workspace tools. |
+| `ODYTOR_WORKSPACE_DIR` | `$XDG_STATE_HOME/odytor/workspaces` | Persistent directory for workspace Git objects, sessions, and plans. |
+| `ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY` | `off` | Must be `on`/`true` to allow `publish_apply` and `pr_body_apply` writes. |
+| `ODYTOR_ARTIFACTS` | `on` | Set to `off` to disable artifact storage. |
+| `ODYTOR_ARTIFACT_DIR` | `$XDG_STATE_HOME/odytor/artifacts` | Storage directory for owner-bound screenshots, logs, and traces. |
+| `ODYTOR_TEST_RUNNER_COMMAND` | `""` | JSON argv array for invoking `odytor-runner` over forced-command SSH. |
+| `ODYTOR_TEST_POLICIES` | `""` | Path to maintainer TOML policy file enabling repositories and profiles. |
+| `ODYTOR_TEST_DATA_DIR` | `$XDG_STATE_HOME/odytor/tests` | Spool directory for retained test run records. |
+| `ODYTOR_PUBLIC_URL` | `""` | Canonical external HTTPS URL for OAuth metadata and callbacks. |
+| `ODYTOR_ALLOWED_GITHUB_USERS` | `""` | Comma-separated GitHub logins permitted in OAuth mode. |
+| `ODYTOR_AUTH_TOKEN` | `""` | Static bearer secret for non-OAuth Streamable HTTP deployments. |
+| `ODYTOR_BUILD_REVISION` | unset | 7-to-40 hex commit SHA stamped into images for `odytor_capabilities`. |
 
-For a comprehensive explanation of security boundaries and threat mitigations, see the [Security Model](docs/security.md).
-
----
-
-## Documentation and Resources
-
-- **[Tool Reference](docs/tools.md)**: Exhaustive documentation for the original eight tools, parameters, schemas, and large PR windowing.
-- **[Workspaces](docs/workspaces.md)**, **[Browser](docs/browser.md)**, **[Artifacts](docs/artifacts.md)**, **[Publishing](docs/publishing.md)**: the remote engineering workspace.
-- **[Capability Matrix](docs/capability-matrix.md)**, **[Security Review](docs/security-review.md)**, **[Client Compatibility](docs/client-compatibility.md)**: what exists, what was verified, and what was not.
-- **[Security Model](docs/security.md)**: Defense in depth, revision guards, branch lease mechanics, and isolation boundaries.
-- **[Deployment and Integration](docs/deployment.md)**: Stdio configuration, Streamable HTTP setup, ChatGPT OAuth integration, and environment variables.
-- **[Test Runner Architecture](docs/test-runner.md)**: Protocol specifications, container sandboxing, SSH forced command, and policy configuration.
-- **[Private Hosting Operations](docs/private-deployment.md)**: Production runbook, rollback procedures, resource budgets, and dogfooding checklist.
-- **[Migration from Git Plus](docs/migration-from-git-plus.md)**: Compatibility rules, environment variable mappings, and migration instructions.
+For the complete configuration reference, limits, and environment variables, see [Deployment and Integration Guide](docs/deployment.md), [Workspaces](docs/workspaces.md), [Artifacts](docs/artifacts.md), and [Test Runner Architecture](docs/test-runner.md).
 
 ---
 
-## Validation Tiers
+## Verification & Validation Tiers
 
-Odytor enforces a three-tier validation policy:
+OdyTor divides validation into three tiers:
 
-- **Tier 1 (Every Commit):** Offline unit and fixture test suite across supported Python runtimes (3.11, 3.12, and 3.13). Verifies schemas, allowlist logic, revision guards, and Git workspace mechanics without external dependencies.
-- **Tier 2 (Pre-Deployment):** Integration tests against an active test runner VM using real Podman containers and SSH framing.
-- **Tier 3 (Release Certification):** Clean wheel installation, Streamable HTTP and stdio transport verification, full OAuth discovery checks, and deployment rollback validation.
+1. **Tier 1 (Offline Unit & Git Fixture Suite)**: Runs without external runner images or network access; verifies tool schemas, allowlists, revision pinning, workspace locks, overlays, publication guards, and Git fixture workflows.
+   ```bash
+   .venv/bin/python -m compileall -q odytor
+   .venv/bin/pytest -q -rs
+   ```
+2. **Tier 2 (Isolated Container & SSH Runner Integration)**: Exercises real rootless Podman containers (`ODYTOR_TEST_RUNNER_IMAGE`), real headless Chromium (`ODYTOR_TEST_BROWSER_IMAGE`), and provisioned KVM/SSH runner hosts (`ODYTOR_TEST_SSH_RUNNER_DIR`). Tests whose host prerequisites are absent skip explicitly with `-rs`.
+3. **Tier 3 (Packaging & Transport Verification)**: Verifies clean wheel installation, CLI entry points (`odytor`, `odytor-runner`), and Streamable HTTP / OAuth metadata checks.
 
 ---
 
-## Code Map
+## Documentation Directory
 
-```text
-odytor/
-  server.py          # FastMCP server registration and allowlist middleware
-  auth.py            # Credential resolution, OAuth provider, and token routing
-  config.py          # Environment settings and configuration parsing
-  github.py          # GitHub REST and GraphQL client with bounded retries
-  git_workspace.py   # Ephemeral Git workspace management and lease execution
-  pr_evidence.py     # Pull request evidence collection and diff windowing
-  ci_diagnose.py     # CI failure correlation and log diagnostic extraction
-  pr_conflicts.py    # git merge-tree conflict inspection
-  quick_fix.py       # Patch validation, GraphQL commits, and fork fast-forward push
-  pr_rebase.py       # Linear rebase preview and lease-guarded application
-  ci_control.py      # Actions rerun, job rerun, dispatch, and fork approval
-  run_tests.py       # Test run queuing and client-side orchestration
-  jobs.py            # Local test job spool and lifecycle state
-  overlay.py         # Reviewer test overlay validation and application
-  profile.py         # Test profile resolution and requirements mapping
-  pytest_report.py   # Structured pytest evidence parser
-  sandbox.py         # odytor-runner isolated container execution engine
-```
+- **[Tool Reference](docs/tools.md)**: Detailed schemas, windowing rules, and parameter guides for the core tools and additive catalog.
+- **[Disposable Workspaces](docs/workspaces.md)**: Checkout-free Git object stores, versioned editing, confinement, and scope controls.
+- **[Browser Execution](docs/browser.md)**: Typed Playwright steps, network isolation, replay sessions, and evidence rules.
+- **[Artifacts](docs/artifacts.md)**: Owner-bound evidence storage, media sniffing, quotas, and native MCP image delivery.
+- **[Guarded Publication](docs/publishing.md)**: Plan-then-apply invariants for workspace commits and draft PR bodies.
+- **[Test Runner Architecture](docs/test-runner.md)**: Framed SSH protocol, container isolation, dependency cache, and provisioning.
+- **[Security Model](docs/security.md)**: Core security invariants, revision guards, leases, and credential handling.
+- **[Security Review](docs/security-review.md)**: Line-by-line pre-release assessment distinguishing verified tests, code reviews, and unverified areas.
+- **[Capability Matrix](docs/capability-matrix.md)**: Feature status and test evidence across baseline and workspace expansion.
+- **[Client Compatibility](docs/client-compatibility.md)**: Verified fastMCP behaviors, approval prompt layers, and untested product UIs.
+- **[Deployment and Integration Guide](docs/deployment.md)**: Local stdio setup, Streamable HTTP, GitHub OAuth, and full settings reference.
+- **[Migration from Git Plus](docs/migration-from-git-plus.md)**: Temporary compatibility aliases and upgrade notes.
+- **[Security Policy](SECURITY.md)**: Vulnerability reporting instructions and supported version scope.
+- **[Changelog](CHANGELOG.md)**: Release notes and boundaries for v1 (`0.1.0`).
+
+---
+
+## Known Boundaries & Intentional Limitations
+
+- **No Pull Request Merge or Branch Deletion**: OdyTor does not provide tools to merge pull requests or delete remote branches.
+- **No Thread Reading or Comment/Review Publishing**: Tools for reading conversation threads (`thread_read`) or publishing PR comments, review verdicts, replies, or issue/PR closures (`text_plan`, `text_apply`, `text_recover`) are excluded or deferred from this v1 candidate.
+- **Guarded Publication Disabled by Default**: `publish_apply` and `pr_body_apply` refuse writes unless `ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY=on` is explicitly configured by the server operator. Default workspace scopes exclude `publish`.
+- **Draft-Only PR Body Updates**: `pr_body_plan` and `pr_body_apply` only accept open draft pull requests (`draft=true`) and refuse ready-for-review pull requests.
+- **External Runner Required for Execution**: `test_run`, `workspace_run`, `browser_run`, and `validation_campaign` require an external runner host (`ODYTOR_TEST_RUNNER_COMMAND`) and repository entries in `ODYTOR_TEST_POLICIES`.
+- **Maintainer-Pinned Dependencies**: Only `python-pytest` (and `playwright-spec` with approved Python requirements) builds a dependency environment from maintainer-pinned requirements; repository manifests are never trusted to install Node or Python packages dynamically.
+- **Sandboxed Browser Scope**: `browser_run` drives headless Chromium against `127.0.0.1` inside the container only. Unrestricted JavaScript evaluation, external network access, file uploads/downloads, and Firefox/WebKit are intentionally unavailable.
+- **Verification Scope**: Tier 1 offline unit/Git-fixture tests pass in CI and local development. Full SSH runner VM tests (`tests/test_ssh_runner.py`), real GitHub writes, CPU cgroup enforcement on hosts without CPU controller delegation, and external product UI rendering (ChatGPT, Perplexity, Claude Code UI) require target environment verification outside offline CI.
 
 ---
 
 ## Contributing
 
-Contributions to Odytor must be focused and accompanied by relevant test coverage. Before submitting changes, verify that the complete test suite passes:
+Contributions must be focused and accompanied by relevant test coverage. Before submitting changes, run the compilation and test checks:
 
 ```bash
-.venv/bin/pytest -q
+.venv/bin/python -m compileall -q odytor
+.venv/bin/pytest -q -rs
 ```
 
 Guidelines:
-- Maintain backward compatibility for existing MCP client configurations.
-- Never add AI attribution or Co-Authored-By trailers to commit messages or pull requests.
+- Preserve backward compatibility for existing MCP tool names and schemas.
+- Adhere strictly to the security invariants in [docs/security.md](docs/security.md).
 - Avoid em dashes in documentation and code comments.
-- Adhere strictly to the established security invariants.
+- Never add AI attribution or `Co-Authored-By` trailers to commits or pull requests.
 
 ---
 
 ## License
 
-Odytor is distributed under the [PolyForm Noncommercial License 1.0.0](LICENSE).
+OdyTor is distributed under the **[PolyForm Noncommercial License 1.0.0](LICENSE)**.
 
-- **Noncommercial purposes permitted:** Free for research, personal study, hobby projects, amateur pursuits, education, and noncommercial organizations.
-- **Commercial use restricted:** Commercial use or deployment requires separate written permission from the rights holder. Odytor is not OSI-approved open source software.
+- **Noncommercial use permitted**: Free for research, personal study, hobby projects, amateur pursuits, education, and noncommercial organizations.
+- **Commercial use restricted**: Commercial use or commercial deployment requires separate written permission from the rights holder. OdyTor is not OSI-approved open-source software.
 
 Copyright (c) 2026 Alexandre Teixeira and Anvilary Tools contributors.
 
@@ -263,9 +307,8 @@ Copyright (c) 2026 Alexandre Teixeira and Anvilary Tools contributors.
 
 ## Organization and Status
 
-Odytor is maintained by Alexandre Teixeira as part of [Anvilary Tools](https://anvilary.tools).
+OdyTor is maintained by Alexandre Teixeira as part of [Anvilary Tools](https://anvilary.tools).
 
-Canonical repository: `Anvilary/Odytor`
-Distribution: `odytor`
-MCP Server identifier: `anvi-odytor`
-Current version: `0.1.0`
+- **Distribution**: `odytor`
+- **MCP Server Identifier**: `anvi-odytor` (`Odytor`)
+- **Current Version**: `0.1.0`
