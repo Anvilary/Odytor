@@ -131,17 +131,9 @@ job cannot alter another's dependencies; each job gets its own tmpfs. Changing t
 image, profile version or platform produces a new key. Results report `cache_status`, key, preparation time,
 size and cumulative hit/miss counters.
 
-### Approved dependency policy for `odysseus-dev/odysseus`
+### Approved dependency policies (`deploy/policies/`)
 
-`deploy/policies/` holds the maintainer policy (`policy.toml`) and the approved requirements. They are the only
-dependency source: a PR cannot add, change or remove anything here. The Odysseus file records its origin in its
-header: `requirements.txt` of the trusted `dev` branch at commit `6e47bfd2…`, resolved with `pip
---only-binary=:all:` on CPython 3.12.15 in the pinned runner image, with the full 109-package transitive closure
-pinned and every compatible wheel hash from PyPI attached. A hash-pinned file must hash every package, and pip
-then refuses anything unhashed, any sdist and any wheel whose bytes differ. Validation on 2026-11-18: cold
-preparation 24 s and 718 MB on a workstation, warm reuse 2.3 s, a tampered hash fails as `setup_error` (stage
-`prepare`) and leaves no environment. To change the policy, regenerate the file from the new `dev` revision,
-review the diff, and replace it; the new digest produces a new cache key and the old environment ages out.
+`deploy/policies/` contains example maintainer policy configuration (`policy.toml`) and approved requirement files (`example-webapp.requirements.txt`, `smoke-test.requirements.txt`). They are the only dependency source for `python-pytest`: a PR cannot add, change, or remove dependencies through its own manifest files. For production use, generate a full transitive closure pinned with `name==version` and `--hash=sha256:...` for your target runner platform so pip enforces hash-checking mode with `--only-binary=:all:`. To update a repository's approved dependencies, regenerate its requirements file from a reviewed base branch, inspect the diff, and replace it; the new digest produces a new cache key and the old environment ages out.
 
 ## Cleanup and storage
 
@@ -240,7 +232,7 @@ timeout + 60 s.
   execution is not configured; nothing else changes (OAuth storage, the classic PAT and the other six tools are
   untouched). The new tools are registered unconditionally and become inert, so no separate un-registration is
   needed.
-* Application image: redeploy the previous image or commit (`4eab036` precedes this feature). Persistent OAuth
+* Application image: redeploy a previous release image. Persistent OAuth
   storage is a separate volume; never run `docker compose down -v`.
 * Runner configuration: restore the previous `/etc/git-plus-runner/runner.env` and re-run `provision.sh` with the
   previous image digest. To disable the runner without deleting it, remove `/etc/ssh/git-plus-runner.authorized_keys`

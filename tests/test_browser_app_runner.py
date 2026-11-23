@@ -23,7 +23,7 @@ def test_clean_env_sets_pythonpath_when_env_site_exists(tmp_path, monkeypatch):
 def test_app_preflight_detects_missing_module_and_records_log(tmp_path):
     serve = {
         "kind": "command",
-        "argv": [sys.executable, "-m", "nonexistent_odysseus_module", "--port", "9999"],
+        "argv": [sys.executable, "-m", "nonexistent_app_module", "--port", "9999"],
         "port": 9999,
         "ready_path": "/ready",
         "ready_timeout": 2,
@@ -34,9 +34,9 @@ def test_app_preflight_detects_missing_module_and_records_log(tmp_path):
         server.start()
     err = exc_info.value
     assert err.profile == "app"
-    assert err.missing_module == "nonexistent_odysseus_module"
+    assert err.missing_module == "nonexistent_app_module"
     assert err.interpreter == sys.executable
-    assert "nonexistent_odysseus_module" in server.log.decode("utf-8", "replace")
+    assert "nonexistent_app_module" in server.log.decode("utf-8", "replace")
 
 
 def test_app_preflight_detects_missing_executable():
@@ -119,7 +119,7 @@ def test_sandbox_validate_header_accepts_browser_requirements_and_profile():
     header = {
         "schema": 1,
         "job_id": new_run_id(),
-        "repo": "odysseus-dev/odysseus",
+        "repo": "example-org/webapp",
         "profile": "browser-playwright",
         "profile_version": profile.PROFILES["browser-playwright"],
         "timeout_seconds": 60,
@@ -145,18 +145,18 @@ def test_sandbox_validate_header_accepts_browser_requirements_and_profile():
 def test_submit_browser_run_attaches_requirements_for_command_profiles(tmp_path, monkeypatch):
     pol_file = tmp_path / "policy.toml"
     pol_file.write_text(
-        '[repos."odysseus-dev/odysseus"]\n'
+        '[repos."example-org/webapp"]\n'
         'profile = "python-pytest"\n'
         'test_dirs = ["tests"]\n'
         'requirements = "reqs.txt"\n'
         '\n'
-        '[repos."odysseus-dev/odysseus".browser-playwright]\n'
+        '[repos."example-org/webapp".browser-playwright]\n'
         'kind = "static"\n'
         'root = "static"\n'
         'port = 8765\n'
         'ready_path = "/index.html"\n'
         '\n'
-        '[repos."odysseus-dev/odysseus".browser-playwright.profiles.app]\n'
+        '[repos."example-org/webapp".browser-playwright.profiles.app]\n'
         'kind = "command"\n'
         'argv = ["python3", "-m", "uvicorn", "app:app", "--port", "8765"]\n'
         'port = 8765\n'
@@ -165,7 +165,7 @@ def test_submit_browser_run_attaches_requirements_for_command_profiles(tmp_path,
     )
     (tmp_path / "reqs.txt").write_text("pytest==8.3.5\nuvicorn==0.54.0\n")
     policies = profile.load_policies(pol_file)
-    repo_pol = policies["odysseus-dev/odysseus"]
+    repo_pol = policies["example-org/webapp"]
 
     enqueued_job = None
     class FakeService:
@@ -182,11 +182,11 @@ def test_submit_browser_run_attaches_requirements_for_command_profiles(tmp_path,
 
     class FakeWorkspaces:
         def get(self, ws_id, owner, operation):
-            return {"repo": "odysseus-dev/odysseus", "version": 1}
+            return {"repo": "example-org/webapp", "version": 1}
         def snapshot(self, ws_id, owner, expected_version, destination, max_bytes, attach_run):
             destination.write_bytes(b"dummy tar")
             return {
-                "record": {"repo": "odysseus-dev/odysseus", "version": 1, "source": "head", "pr": 6479,
+                "record": {"repo": "example-org/webapp", "version": 1, "source": "head", "pr": 42,
                            "source_tree": "0" * 40, "tree": "0" * 40},
                 "artifact": {"artifact_id": "art-1", "name": "source.tar", "kind": "source_tar", "sha256": "0" * 64, "size_bytes": 9},
             }
@@ -201,7 +201,7 @@ def test_submit_browser_run_attaches_requirements_for_command_profiles(tmp_path,
     cfg = RunSettings(runner_command=("echo",), policies_path=str(pol_file), data_dir=str(tmp_path / "runs"), default_timeout=60, max_timeout=300)
 
     res = submit_browser_run(
-        "odysseus-dev/odysseus",
+        "example-org/webapp",
         "ws-1",
         expected_version=1,
         steps=[{"op": "goto", "path": "/index.html"}],

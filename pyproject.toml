@@ -30,7 +30,7 @@ dev = [
 [project.scripts]
 odytor = "odytor.cli:main"
 odytor-runner = "odytor.sandbox:main"
-# Temporary aliases for existing installations and the runner host's forced command; removed before the first release.
+# Compatibility aliases retained in 0.1.0 for existing installations and the runner host's forced command.
 git-plus = "odytor.cli:main"
 git-plus-runner = "odytor.sandbox:main"
 

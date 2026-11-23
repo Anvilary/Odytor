@@ -2,7 +2,7 @@
 
 Both spellings of a setting are accepted. When both are present with different values the setting is ambiguous and
 startup fails (nothing is guessed, in particular nothing less restrictive is silently chosen). Standard library only,
-because the runner imports it too. The fallback is removed before the first release.
+because the runner imports it too. The fallback is retained in 0.1.0 for existing deployments and will be removed in a future release.
 """
 from __future__ import annotations
 

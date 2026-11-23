@@ -22,7 +22,6 @@ if [ -z "$CHECKOUT" ]; then
 fi
 if [ -z "$CHECKOUT" ]; then
   for candidate in \
-    "$REAL_HOME/Projects/Anvilary-Tools/odytor" \
     "$REAL_HOME/Projects/Odytor" \
     "$REAL_HOME/Projects/odytor"; do
     if [ -x "$candidate/.venv/bin/odytor" ] || [ -x "$candidate/.venv/bin/git-plus" ]; then
@@ -31,8 +30,8 @@ if [ -z "$CHECKOUT" ]; then
     fi
   done
 fi
-CHECKOUT="${CHECKOUT:-$REAL_HOME/Projects/Anvilary-Tools/odytor}"
-ALLOWED_REPOSITORIES="alteixeira20/*,Anvilary/*,odysseus-dev/odysseus"
+CHECKOUT="${CHECKOUT:-$REAL_HOME/Projects/Odytor}"
+ALLOWED_REPOSITORIES="Anvilary/*,owner/repo"
 
 fail() { echo "odytor-mcp: $*" >&2; exit 1; }
 
@@ -59,6 +58,7 @@ for suffix in AUTH_TOKEN SERVER_PAT SERVER_PAT_LOGIN SERVER_PAT_REPOSITORY ODYSS
               GITHUB_CLIENT_SECRET OAUTH_SIGNING_KEY PUBLIC_URL ALLOWED_GITHUB_USERS ALLOWED_REPOSITORIES; do
   unset "ODYTOR_$suffix" "GIT_PLUS_$suffix"
 done
+unset GIT_PLUS_WORKSPACE_ALLOW_PUBLISH_APPLY
 export GITHUB_TOKEN="$TOKEN"
 unset TOKEN
 # Both spellings, with the same value: the launcher may end up running an installation that was made before the rename and
@@ -66,12 +66,11 @@ unset TOKEN
 export ODYTOR_ALLOWED_REPOSITORIES="$ALLOWED_REPOSITORIES" GIT_PLUS_ALLOWED_REPOSITORIES="$ALLOWED_REPOSITORIES"
 
 if [ -f "$REAL_HOME/.local/share/odytor/runner-ssh/runner_key" ] && [ -f "$REAL_HOME/.local/share/odytor/policies/policy.toml" ]; then
-  export ODYTOR_TEST_RUNNER_COMMAND='["ssh","-F","/home/alteixeira20/.ssh/config","-T","-i","'"$REAL_HOME"'/.local/share/odytor/runner-ssh/runner_key","-o","IdentitiesOnly=yes","-o","BatchMode=yes","-o","StrictHostKeyChecking=no","-o","ConnectTimeout=10","-o","ServerAliveInterval=15","-o","ServerAliveCountMax=3","-J","hosting-bay","-p","2222","gp-runner@172.30.77.2"]'
+  export ODYTOR_TEST_RUNNER_COMMAND='["ssh","-T","-i","'"$REAL_HOME"'/.local/share/odytor/runner-ssh/runner_key","-o","IdentitiesOnly=yes","-o","BatchMode=yes","-o","StrictHostKeyChecking=yes","-o","UserKnownHostsFile='"$REAL_HOME"'/.local/share/odytor/runner-ssh/known_hosts","-o","ConnectTimeout=10","-o","ServerAliveInterval=15","-o","ServerAliveCountMax=3","gp-runner@runner.example.internal"]'
   export ODYTOR_TEST_POLICIES="$REAL_HOME/.local/share/odytor/policies/policy.toml"
 fi
 export ODYTOR_TEST_DATA_DIR="$REAL_HOME/.local/share/odytor/test-data"
 export ODYTOR_WORKSPACE_DIR="$REAL_HOME/.local/share/odytor/workspaces"
 export ODYTOR_ARTIFACT_DIR="$REAL_HOME/.local/share/odytor/artifacts"
-export ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY="true"
 
 exec "$EXE" --transport stdio "$@"

@@ -1,6 +1,6 @@
 """Run-to-PR association for CI reruns, driven through GitHubClient over a fake GitHub HTTP session.
 
-The default payload is the shape production GitHub returned for alteixeira20/Anvilary-Website PR #1 / run
+The default payload is the shape GitHub returned for a sample repository PR #1 / run
 44350223757: the run's pull_requests[].base.repo carries a numeric `id` and a `name` but no `full_name`.
 """
 from __future__ import annotations
@@ -17,16 +17,16 @@ from odytor.ci_control import control_ci
 from odytor.errors import RevisionMismatchError, SecurityError, ValidationError
 from odytor.github import GitHubClient
 
-REPO, NUMBER, RUN, JOB = "alteixeira20/Anvilary-Website", 1, 44350223757, 99
+REPO, NUMBER, RUN, JOB = "acme/website", 1, 44350223757, 99
 REPO_ID = 1297682797
 HEAD, OTHER = "d" * 40, "e" * 40
 
 PR = {"state": "open", "merged": False, "maintainer_can_modify": False,
-      "head": {"sha": HEAD, "ref": "test/git-plus-mcp-e2e-20261118", "repo": {"id": REPO_ID, "full_name": REPO, "fork": False}},
-      "base": {"sha": "c" * 40, "ref": "main", "repo": {"id": REPO_ID, "full_name": REPO, "name": "Anvilary-Website"}}}
+      "head": {"sha": HEAD, "ref": "test/mcp-e2e-fixture", "repo": {"id": REPO_ID, "full_name": REPO, "fork": False}},
+      "base": {"sha": "c" * 40, "ref": "main", "repo": {"id": REPO_ID, "full_name": REPO, "name": "website"}}}
 RUN_PAYLOAD = {"id": RUN, "head_sha": HEAD, "event": "pull_request", "status": "completed", "conclusion": "failure", "run_attempt": 1,
                "head_repository": {"id": REPO_ID, "full_name": REPO},
-               "pull_requests": [{"number": NUMBER, "base": {"ref": "main", "sha": "c" * 40, "repo": {"id": REPO_ID, "name": "Anvilary-Website"}}}]}
+               "pull_requests": [{"number": NUMBER, "base": {"ref": "main", "sha": "c" * 40, "repo": {"id": REPO_ID, "name": "website"}}}]}
 JOB_PAYLOAD = {"id": JOB, "run_id": RUN, "head_sha": HEAD, "status": "completed", "conclusion": "failure"}
 
 
@@ -94,7 +94,7 @@ def test_production_payload_with_repository_id_and_no_full_name_reaches_the_muta
     {"full_name": REPO},                                   # complete owner/name only
     {"full_name": REPO.upper()},                           # names compare case-insensitively
     {"id": REPO_ID, "full_name": REPO},                    # both, consistent
-    {"id": REPO_ID, "name": "Anvilary-Website"},           # id plus the short name GitHub sends
+    {"id": REPO_ID, "name": "website"},                    # id plus the short name GitHub sends
 ])
 def test_every_verified_identity_representation_is_accepted(operation, identity):
     fake, call = rerun(operation, run=association(link(repo=identity)))
@@ -105,11 +105,11 @@ def test_every_verified_identity_representation_is_accepted(operation, identity)
 @pytest.mark.parametrize("repo_obj,why", [
     ({"id": REPO_ID + 1}, "different repository id"),
     ({"id": REPO_ID + 1, "full_name": "someone/else"}, "same PR number in a different repository"),
-    ({"full_name": "someone/Anvilary-Website"}, "different owner, same repository name"),
+    ({"full_name": "someone/website"}, "different owner, same repository name"),
     ({"id": REPO_ID, "full_name": "someone/else"}, "id matches but name contradicts"),
     ({"id": REPO_ID + 1, "full_name": REPO}, "name matches but id contradicts"),
     ({"id": str(REPO_ID)}, "id of the wrong type"),
-    ({"name": "Anvilary-Website"}, "short name alone is not an identity"),
+    ({"name": "website"}, "short name alone is not an identity"),
     ({}, "no identity at all"),
     (None, "no repository object"),
     ("owner/repo", "repository is not an object"),
@@ -143,9 +143,9 @@ def test_missing_association_is_refused_for_a_same_repository_pr(operation, link
 
 def test_a_fork_pr_run_may_omit_the_association_but_keeps_every_other_guard():
     pr = copy.deepcopy(PR)
-    pr["head"]["repo"] = {"id": 5, "full_name": "contributor/Anvilary-Website", "fork": True}
+    pr["head"]["repo"] = {"id": 5, "full_name": "contributor/website", "fork": True}
     run = copy.deepcopy(RUN_PAYLOAD)
-    run.update(pull_requests=[], head_repository={"id": 5, "full_name": "contributor/Anvilary-Website"})
+    run.update(pull_requests=[], head_repository={"id": 5, "full_name": "contributor/website"})
     fake, call = rerun("rerun_failed", run=run, pr=pr)
     assert call()["accepted"] is True and fake.posts == [ENDPOINTS["rerun_failed"]]
     run["event"] = "push"

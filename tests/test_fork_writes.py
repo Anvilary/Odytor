@@ -267,7 +267,7 @@ def test_pat_grant_does_not_expand_to_other_requests():
         ('POST', f'repos/{FORK}'), ('DELETE', f'repos/{FORK}'),
         ('GET', f'repos/{FORK}/contents/README.md'), ('GET', f'repos/{FORK}/git/refs'),
         ('GET', f'repos/{FORK}?x=1'), ('GET', 'repos/contributor/other'),
-        ('GET', 'repos/robyroro/odysseus'), ('GET', 'user'), ('GET', 'orgs/owner/repos'),
+        ('GET', 'repos/contributor/unlisted-repo'), ('GET', 'user'), ('GET', 'orgs/owner/repos'),
     ]:
         with pytest.raises(SecurityError):
             client.request(method, path)

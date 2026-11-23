@@ -1,97 +1,33 @@
-# Migration from Git Plus to Odytor
+# Migration from Git Plus to OdyTor
 
-Odytor is the new name of Git Plus. This is a naming change: the eight tools, their arguments and annotations, the
-authorization model and the isolated runner are unchanged (a script that compares every tool name, argument schema,
-annotation and output schema between the last Git Plus build and this one finds only the server display name differing).
-This page is temporary and is deleted before the first public release.
+OdyTor is the canonical name of the project previously developed as Git Plus. In OdyTor `0.1.0`, the original tool names, schemas, authorization boundaries, and isolated runner protocol remain compatible while the `ODYTOR_*` configuration namespace and `odytor` / `odytor-runner` commands are standard.
 
 ## Identity
 
 | | |
 | --- | --- |
-| Product | Odytor, an Anvilary Tools product |
-| Python distribution and package | `odytor` (not registered on PyPI when checked on 2026-11-18; recommended fallback `anvilary-odytor` if it is taken before publication; nothing has been published) |
+| Product | OdyTor, an Anvilary Tools project |
+| Python distribution and package | `odytor` |
 | Commands | `odytor`, `odytor-runner` |
-| MCP server name | `Odytor`; tool names are unchanged and unbranded |
+| MCP server name | `Odytor` |
 | Settings prefix | `ODYTOR_` |
 
-## Collisions with the older Odytor (do not overwrite)
+## Compatibility Retained in 0.1.0
 
-A separate, older terminal application called Odytor is installed and running. It is a different project and is not touched.
+For existing deployments upgrading from Git Plus, OdyTor `0.1.0` retains the following compatibility paths (scheduled for removal in a future release):
 
-| Where | What exists | Consequence |
-| --- | --- | --- |
-| `~/.local/bin/odytor`, `odytor-mcp`, `odytor-legacy`, `odytor-minimal` | wrappers around `~/Projects/odytor-stabilization` and `~/Projects/Odysseus/odytor` | The new launcher cannot be installed as `~/.local/bin/odytor-mcp`. The Odytor package is installed only into its own virtualenv, whose `bin/` is not on `PATH`, so its `odytor` command does not shadow the older one. |
-| Agent Hub `mcp/retired-servers.json` | lists `odytor` | `agent-sync mcp` removes any shared MCP server named `odytor` from every client. A shared entry with that name needs that line removed first. |
-| hosting-bay | containers `odytor-mcp`, `odytor-operator`, `odytor-worker`, images `odytor-mcp:*`, volumes `odytor_*` and `odytor-stage_*`, networks `odytor_*`, directories `~/services/odytor` and `~/services/odytor-stage` | Nothing of the old stack is reused. The new image is `odytor:<commit>`; volumes, networks and directories keep their existing `git-plus` names. |
+* **Settings**: `ODYTOR_X` is canonical, and `GIT_PLUS_X` is still accepted for server, test runner, and runner host settings. If both `ODYTOR_X` and `GIT_PLUS_X` are set with different values, startup fails closed and names both variables rather than guessing. Equal values are accepted. Local `stdio` starts print a deprecation notice to `stderr` when legacy names are active; hosted HTTP starts do not. The legacy `ODYTOR_ODYSSEUS_PAT*` and `GIT_PLUS_ODYSSEUS_PAT*` aliases for single-user server-held PAT mode also remain supported as aliases of `ODYTOR_SERVER_PAT*`.
+* **Commands**: `git-plus` and `git-plus-runner` remain installed console script entry points pointing to the exact same `odytor.cli:main` and `odytor.sandbox:main` functions.
+* **State directories**: Default state directories fall back to `~/.local/state/git-plus/tests` and `~/.local/state/git-plus-runner` when those legacy directories exist and the `odytor` equivalents do not yet exist.
+* **Runner host**: The forced-command entry script prefers `odytor-runner` and falls back to `git-plus-runner`, and `runner.env` accepts either prefix (`provision.sh` rewrites retained `GIT_PLUS_RUNNER_*` lines to `ODYTOR_RUNNER_*` and keeps a timestamped backup).
 
-## Temporary compatibility
+## Legacy Deployment Identifiers
 
-* **Settings.** `ODYTOR_X` is canonical and `GIT_PLUS_X` is still read for every setting (server, test runner and runner
-  host). If both are set with different values, startup fails with a message naming both; nothing is guessed, so a stale old
-  value can never silently widen a repository allowlist. Equal values are accepted. A local (stdio) start prints a note on stderr listing
-  any old-prefix settings still in use; the hosted server does not. The old `GIT_PLUS_ODYSSEUS_PAT*` aliases for the server-held PAT also remain, as before.
-* **Commands.** `git-plus` and `git-plus-runner` are entry-point aliases of the same functions (no second implementation).
-  An installation made before the rename also keeps its old console scripts until it is reinstalled.
-* **State.** Default state directories still resolve to existing data: `~/.local/state/git-plus/tests` and
-  `~/.local/state/git-plus-runner` are used when present, otherwise the `odytor` equivalents. A runner host therefore keeps
-  its dependency cache.
-* **Runner host.** The forced command prefers `odytor-runner` and falls back to `git-plus-runner`, and `runner.env` may use
-  either prefix (re-provisioning rewrites it with `ODYTOR_` names and keeps a `runner.env.before-<time>` copy for rollback).
+Existing self-hosted deployments created under Git Plus may retain internal infrastructure identifiers (such as container names `git-plus` / `git-plus-runner-vm`, Docker volumes `git_plus_data` / `git_plus_test_data`, runner account `gp-runner`, `/opt/git-plus-runner`, `/etc/git-plus-runner`, and container label keys `git-plus.*`) to avoid orphaning persistent volumes or breaking existing reverse-proxy upstreams during upgrades.
 
-All of the above is removed before the first release. Existing deployments should move to the new names first.
+## Migrating Existing Installations
 
-## Identifiers deliberately not renamed
-
-They identify existing deployments and data; renaming them would orphan or break something, and none is branding.
-
-| Identifier | Why it stays |
-| --- | --- |
-| Production container `git-plus`, directory `~/services/git-plus`, Compose project `git-plus` | The Nginx upstream and the Cloudflare tunnel address the container by name; a new project name would create new volumes and networks |
-| Volumes `git_plus_data` (OAuth state) and `git_plus_test_data`, container home `/home/git-plus` | Persistent data; the production `.env` pins `HOME` and `FASTMCP_HOME` there |
-| Hostname `git-plus.alexandreteixeira.dev` | In use by ChatGPT and other clients; see the endpoint plan below |
-| Runner VM container `git-plus-runner-vm`, network `gp-runner-net`, account `gp-runner`, `/opt/git-plus-runner`, `/etc/git-plus-runner`, `git-plus-runner-gc.timer`, firewall table `git_plus_runner` | Existing runner host and its SSH trust |
-| Runner container prefix `gp-` and label keys `git-plus.root`, `git-plus.workspace` | Runtime markers of running jobs; orphan cleanup depends on them |
-| Repository `Anvilary/git-plus` and the local checkout `~/Projects/git-plus` | Reserved for the repository rename |
-
-## Local agents (12 profiles through Agent Hub)
-
-State: the installed launcher `~/.local/bin/git-plus-mcp` and the shared entry `git-plus` are unchanged and still work. The
-new launcher is `deploy/local/odytor-mcp` (same credential handling, fixed allowlist, clean stdout and Antigravity D-Bus
-behavior). It is not installed, because `~/.local/bin/odytor-mcp` belongs to the older Odytor.
-
-To switch, once a decision on the collision is made (for example installing the new launcher under another name, or moving
-the older one aside yourself):
-
-1. Reinstall the checkout's virtualenv from the renamed source (`uv pip install -e .`); until then the old launcher keeps
-   running the old code.
-2. Back up `~/.config/agent-hub/mcp/shared-servers.json` and `retired-servers.json`, plus each client's generated config.
-3. Install the launcher, change the shared entry name and `command` (one entry, never both `git-plus` and `odytor`),
-   remove `odytor` from `retired-servers.json` only if the shared server must be named `odytor`, and add `git-plus` to
-   that list so the old entry is removed everywhere.
-4. `agent-sync mcp --dry-run`, then `agent-sync mcp`, then `agent-sync verify`.
-5. Rollback: restore the two hub files and the launcher name, and run `agent-sync mcp`.
-
-## Hosted deployment
-
-Production cutover has completed: image `odytor:cb446ef` is active, the canonical hostname is
-`https://odytor.alexandreteixeira.dev/mcp`, Cloudflare DNS and ingress point to `git-plus-tunnel`, Nginx forwards
-`odytor.alexandreteixeira.dev` to the application, and the environment settings use the canonical `ODYTOR_*` keys.
-
-Legacy Odytor services (`odytor-mcp`, `odytor-operator`, `odytor-worker`) have been decommissioned and their persistent data
-archived.
-
-The old hostname `git-plus.alexandreteixeira.dev` is retired as an active endpoint because the OAuth issuer and resource
-metadata are bound to `https://odytor.alexandreteixeira.dev`. Existing clients (e.g. ChatGPT, Perplexity) connect to
-`https://odytor.alexandreteixeira.dev/mcp`.
-
-## After the GitHub repository is renamed to `Anvilary/odytor`
-
-1. Local checkout: `git remote set-url origin git@github.com:Anvilary/odytor.git` (GitHub redirects the old URL meanwhile).
-2. Repository allowlists name the repository: change `Anvilary/git-plus` to `Anvilary/odytor` in
-   `deploy/local/odytor-mcp` (and the installed launcher) and in the production `ODYTOR_ALLOWED_REPOSITORIES`. Until then
-   requests naming the new repository are refused by the allowlist.
-3. The test fixtures that use `Anvilary/git-plus` as a sample repository name need no change.
-4. If the checkout directory is renamed, set `ODYTOR_HOME` for the launcher or update its default.
-5. Add the repository URL to the package metadata (`[project.urls]`) when it exists; nothing in the code embeds it.
-6. CI, the tunnel, OAuth and the runner do not depend on the repository name.
+1. Reinstall the package in your virtual environment (`pip install -e .` or install the `0.1.0` wheel).
+2. Update your MCP client configuration to launch `odytor --transport stdio` (or [deploy/local/odytor-mcp](../deploy/local/odytor-mcp) for `gh` CLI token injection).
+3. Replace `GIT_PLUS_*` environment variables with `ODYTOR_*` equivalents in `.env` and `runner.env` (and remove duplicate legacy entries so conflicting values cannot block startup).
+4. In hosted Streamable HTTP deployments, ensure `ODYTOR_PUBLIC_URL` matches your canonical HTTPS endpoint (for example `https://odytor.example.com`) and that your GitHub OAuth callback URL matches `${ODYTOR_PUBLIC_URL}/auth/callback`.

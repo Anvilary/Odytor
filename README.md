@@ -27,7 +27,7 @@ OdyTor is designed for repository maintainers, code-review agents, and automated
 - **Checkout-Free Disposable Workspaces**: Explore, search, edit, diff, checkpoint, and test repositories in isolated Git object stores (`workspace_*`) without checking out working trees on the control plane.
 - **Network-Isolated Runner Execution**: Execute tests (`test_run`, `workspace_run`), headless Chromium browser checks (`browser_run`), and multi-step validation campaigns (`validation_campaign`) inside rootless Podman containers with `--network=none`, `--cap-drop=ALL`, read-only root filesystems, and no GitHub credentials.
 - **Four-State Capability Discovery**: Distinguish `installed`, `configured`, `operational` (observed via live runner probe), and `authorized` capabilities through `odytor_capabilities`.
-- **Two-Phase Guarded Publication**: Prepare immutable plans (`publish_plan`, `pr_body_plan`) that require `user_authorized=true` and an exact confirmation phrase before applying (`publish_apply`, `pr_body_apply`), with server-side write gating disabled by default.
+- **Two-Phase Guarded Publication**: Prepare immutable plans (`publish_plan`, `pr_body_plan`) that require `user_authorized=true` and an exact confirmation phrase before applying (`publish_apply`, `pr_body_apply`), with both apply operations disabled by default (`ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY=off`). Direct PR maintenance mutations (`quick_fix`, `pr_rebase`, `ci_control`) are governed separately by repository allowlists, revision pinning, branch leases, and per-call confirmation flags.
 
 > [!NOTE]
 > OdyTor complements the [official GitHub MCP server](https://github.com/github/github-mcp-server) rather than replacing it. The official server provides broad repository, issue, and search APIs; OdyTor focuses on agent-bounded PR evidence, CI log diagnosis, isolated validation, and lease-guarded Git operations.
@@ -67,7 +67,7 @@ export ODYTOR_ALLOWED_REPOSITORIES="owner/repo,owner/another-repo"
 
 **Shared stdio launcher (`deploy/local/odytor-mcp`):**
 
-OdyTor includes a stdio launcher script in [deploy/local/odytor-mcp](deploy/local/odytor-mcp) that resolves your active `gh` CLI token in memory without writing secrets to disk:
+OdyTor includes a stdio launcher script in [deploy/local/odytor-mcp](deploy/local/odytor-mcp) that resolves your active `gh` CLI token in memory without writing secrets to disk. Customize `ALLOWED_REPOSITORIES` in your installed copy; `publish_apply` and `pr_body_apply` stay off by default unless you explicitly export `ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY=on`:
 
 ```bash
 cp deploy/local/odytor-mcp ~/.local/bin/anvi-odytor-mcp
@@ -143,9 +143,9 @@ OdyTor registers 31 MCP tools consistently across all deployment modes so client
 | Tool | Mode | Description |
 | --- | --- | --- |
 | [`publish_plan`](docs/publishing.md) | Read-only | Prepare an immutable publication plan binding workspace tree, patch digest, expected head, validation evidence, and confirmation phrase. |
-| [`publish_apply`](docs/publishing.md) | Mutating | Apply an approved `publish_plan` as one additive commit on the PR head after `user_authorized=true` and server gate checks. |
+| [`publish_apply`](docs/publishing.md) | Mutating | Apply an approved `publish_plan` as one additive commit on the PR head (disabled unless `ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY=on`). |
 | [`pr_body_plan`](docs/publishing.md#draft-pr-body-updates-pr_body_plan--pr_body_apply) | Read-only | Prepare a body replacement plan for an open draft pull request, binding `expected_head` and body digests. |
-| [`pr_body_apply`](docs/publishing.md#draft-pr-body-updates-pr_body_plan--pr_body_apply) | Mutating | Apply an approved `pr_body_plan` to a draft PR and verify post-write invariants via read-back. |
+| [`pr_body_apply`](docs/publishing.md#draft-pr-body-updates-pr_body_plan--pr_body_apply) | Mutating | Apply an approved `pr_body_plan` to a draft PR and verify invariants via read-back (disabled unless `ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY=on`). |
 | `odytor_capabilities` | Read-only | Report version, build revision, limits, execution profiles, and per-capability `installed` / `configured` / `operational` / `authorized` state. |
 
 ### Registered Execution Profiles
@@ -258,7 +258,7 @@ OdyTor divides validation into three tiers:
 - **[Capability Matrix](docs/capability-matrix.md)**: Feature status and test evidence across baseline and workspace expansion.
 - **[Client Compatibility](docs/client-compatibility.md)**: Verified fastMCP behaviors, approval prompt layers, and untested product UIs.
 - **[Deployment and Integration Guide](docs/deployment.md)**: Local stdio setup, Streamable HTTP, GitHub OAuth, and full settings reference.
-- **[Migration from Git Plus](docs/migration-from-git-plus.md)**: Temporary compatibility aliases and upgrade notes.
+- **[Migration from Git Plus](docs/migration-from-git-plus.md)**: Legacy `git-plus` / `GIT_PLUS_*` compatibility aliases retained in `0.1.0` and upgrade steps.
 - **[Security Policy](SECURITY.md)**: Vulnerability reporting instructions and supported version scope.
 - **[Changelog](CHANGELOG.md)**: Release notes and boundaries for v1 (`0.1.0`).
 
@@ -267,9 +267,10 @@ OdyTor divides validation into three tiers:
 ## Known Boundaries & Intentional Limitations
 
 - **No Pull Request Merge or Branch Deletion**: OdyTor does not provide tools to merge pull requests or delete remote branches.
-- **No Thread Reading or Comment/Review Publishing**: Tools for reading conversation threads (`thread_read`) or publishing PR comments, review verdicts, replies, or issue/PR closures (`text_plan`, `text_apply`, `text_recover`) are excluded or deferred from this v1 candidate.
-- **Guarded Publication Disabled by Default**: `publish_apply` and `pr_body_apply` refuse writes unless `ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY=on` is explicitly configured by the server operator. Default workspace scopes exclude `publish`.
+- **No Thread Reading or Comment/Review Publishing**: Tools for reading conversation threads (`thread_read`) or publishing PR comments, review verdicts, replies, or issue/PR closures (`text_plan`, `text_apply`, `text_recover`) are excluded or deferred from `0.1.0`.
+- **Two-Phase Workspace & Draft-Body Apply Disabled by Default**: `publish_apply` and `pr_body_apply` refuse writes unless `ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY=on` is explicitly configured by the server operator (`publish_plan` and `pr_body_plan` remain available for planning). Default workspace scopes exclude `publish`. Direct PR maintenance mutations (`quick_fix`, `pr_rebase`, `ci_control`) are not gated by `ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY`; they require repository allowlists, pinned `expected_head` / `expected_base` SHAs, branch leases, and per-call confirmation flags where applicable.
 - **Draft-Only PR Body Updates**: `pr_body_plan` and `pr_body_apply` only accept open draft pull requests (`draft=true`) and refuse ready-for-review pull requests.
+- **Legacy Compatibility Aliases Retained in 0.1.0**: Console entry points (`git-plus`, `git-plus-runner`) and `GIT_PLUS_*` configuration fallbacks remain active in `0.1.0` for existing deployments; see [Migration from Git Plus](docs/migration-from-git-plus.md).
 - **External Runner Required for Execution**: `test_run`, `workspace_run`, `browser_run`, and `validation_campaign` require an external runner host (`ODYTOR_TEST_RUNNER_COMMAND`) and repository entries in `ODYTOR_TEST_POLICIES`.
 - **Maintainer-Pinned Dependencies**: Only `python-pytest` (and `playwright-spec` with approved Python requirements) builds a dependency environment from maintainer-pinned requirements; repository manifests are never trusted to install Node or Python packages dynamically.
 - **Sandboxed Browser Scope**: `browser_run` drives headless Chromium against `127.0.0.1` inside the container only. Unrestricted JavaScript evaluation, external network access, file uploads/downloads, and Firefox/WebKit are intentionally unavailable.

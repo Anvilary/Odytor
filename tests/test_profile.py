@@ -95,12 +95,12 @@ def test_policy_file(tmp_path):
         load_policies(tmp_path / 'bad2.toml')
 
 
-def test_the_shipped_odysseus_policy_is_valid_hash_complete_and_pins_pytest():
+def test_the_shipped_example_policy_is_valid_hash_complete_and_pins_pytest():
     from pathlib import Path
     from odytor.profile import load_policies
-    policy = load_policies(Path(__file__).resolve().parents[1] / 'deploy' / 'policies' / 'policy.toml')['odysseus-dev/odysseus']
+    policy = load_policies(Path(__file__).resolve().parents[1] / 'deploy' / 'policies' / 'policy.toml')['example-org/webapp']
     lines = [line for line in policy.requirements.splitlines() if line]
-    assert len(lines) > 50 and all('==' in line and '--hash=sha256:' in line for line in lines)
+    assert len(lines) >= 5 and all('==' in line and '--hash=sha256:' in line for line in lines)
     assert policy.test_dirs == ('tests',) and len(policy.requirements_sha256) == 64
 
 
@@ -143,7 +143,7 @@ def test_template_inheritance_in_load_policies():
     from pathlib import Path
     from odytor.profile import load_policies
     policies = load_policies(Path(__file__).resolve().parents[1] / 'deploy' / 'policies' / 'policy.toml')
-    smoke_policy = policies['alteixeira20/odytor-smoke-test']
+    smoke_policy = policies['example-org/polyglot-service']
     assert 'python-pytest' in smoke_policy.profiles
     assert 'python-lint' in smoke_policy.profiles
     assert 'node-test' in smoke_policy.profiles
@@ -155,9 +155,9 @@ def test_load_policies_publish_exemptions():
     from pathlib import Path
     from odytor.profile import load_policies
     policies = load_policies(Path(__file__).resolve().parents[1] / 'deploy' / 'policies' / 'policy.toml')
-    ody_policy = policies['odysseus-dev/odysseus']
-    assert 'publish' in ody_policy.extra
-    exemptions = ody_policy.extra['publish']['exempt_paths']
+    webapp_policy = policies['example-org/webapp']
+    assert 'publish' in webapp_policy.extra
+    exemptions = webapp_policy.extra['publish']['exempt_paths']
     assert "frontend/src/features/notes/application/noteSession.js" in exemptions
     assert "static/js/features/notes/application/noteSession.js" in exemptions
 
@@ -232,10 +232,10 @@ def test_load_policies_playwright_spec():
     from pathlib import Path
     from odytor.profile import PLAYWRIGHT_SPEC_PROFILE, load_policies
     policies = load_policies(Path(__file__).resolve().parents[1] / 'deploy' / 'policies' / 'policy.toml')
-    ody_policy = policies['odysseus-dev/odysseus']
-    assert PLAYWRIGHT_SPEC_PROFILE in ody_policy.profiles
-    assert PLAYWRIGHT_SPEC_PROFILE in ody_policy.extra
-    cfg = ody_policy.extra[PLAYWRIGHT_SPEC_PROFILE]
+    webapp_policy = policies['example-org/webapp']
+    assert PLAYWRIGHT_SPEC_PROFILE in webapp_policy.profiles
+    assert PLAYWRIGHT_SPEC_PROFILE in webapp_policy.extra
+    cfg = webapp_policy.extra[PLAYWRIGHT_SPEC_PROFILE]
     assert "tests/e2e/notes-qa/notes-qa-regressions.spec.mjs" in cfg["specs"]
     assert cfg["launcher"] == "tests/e2e/notes-qa/run_notes_qa.py"
 

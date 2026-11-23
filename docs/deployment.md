@@ -31,7 +31,7 @@ Local stdio mode is the simplest way to run Odytor alongside desktop coding assi
    ```
 
 3. **Configure local launcher:**
-   A production-ready launcher is provided in `deploy/local/odytor-mcp`. It automatically extracts the caller's session token from the GitHub CLI without storing secrets on disk:
+   A stdio launcher is provided in `deploy/local/odytor-mcp`. It automatically extracts the caller's session token from the GitHub CLI without storing secrets on disk, and leaves `ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY` off by default unless explicitly exported by the operator. Customize `ALLOWED_REPOSITORIES` in your installed copy:
    ```bash
    cp deploy/local/odytor-mcp ~/.local/bin/anvi-odytor-mcp
    chmod +x ~/.local/bin/anvi-odytor-mcp
@@ -169,7 +169,7 @@ directory unless overridden and **must be on a persistent volume in production**
 |---|---|---|
 | `ODYTOR_WORKSPACES` | `on` | `off` disables workspace tools. |
 | `ODYTOR_WORKSPACE_DIR` | `$XDG_STATE_HOME/odytor/workspaces` | Workspace objects, state, browser sessions, publication plans. |
-| `ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY` | `off` | Set to `on` or `true` to permit `publish_apply` and `pr_body_apply` writes. |
+| `ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY` | `off` | Set to `on` or `true` to permit `publish_apply` and `pr_body_apply` writes (does not gate `quick_fix`, `pr_rebase`, or `ci_control`). |
 | `ODYTOR_WORKSPACE_TTL_HOURS`, `_MAX_TTL_HOURS`, `_MAX_PER_OWNER`, `_MAX_MIB`, `_MAX_TOTAL_MIB`, `_MAX_FILE_BYTES`, `_MAX_CHANGED_FILES`, `_MAX_CHECKPOINTS`, `_MAX_RUNS`, `_MIN_FREE_MIB` | see [workspaces](workspaces.md) | Hard caps. |
 | `ODYTOR_ARTIFACTS`, `ODYTOR_ARTIFACT_DIR`, `_RETENTION_HOURS`, `_MAX_MIB`, `_MAX_IMAGE_BYTES`, `_MAX_OWNER_MIB`, `_MAX_TOTAL_MIB` | see [artifacts](artifacts.md) | Evidence storage. |
 | `ODYTOR_BUILD_REVISION` (40-hex), `ODYTOR_BUILD_ID` | unset | Reported by `odytor_capabilities` so the running revision can be verified. Stamp it when building the image. |

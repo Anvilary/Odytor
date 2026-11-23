@@ -308,7 +308,7 @@ def test_validate_path_odysseus_notes_session_denied_in_other_repos() -> None:
     p2 = "static/js/features/notes/application/noteSession.js"
 
     # Denied when repo is another repository
-    for other_repo in ("owner/repo", "alteixeira20/odytor-smoke-test", "odysseus-dev/other", ""):
+    for other_repo in ("owner/repo", "acme/smoke-test", "odysseus-dev/other", ""):
         with pytest.raises(SecurityError, match="sensitive keyword pattern"):
             _validate_path(p1, repo=other_repo)
         with pytest.raises(SecurityError, match="sensitive keyword pattern"):

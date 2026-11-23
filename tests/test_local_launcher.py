@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 LAUNCHER = Path(__file__).resolve().parents[1] / "deploy" / "local" / "odytor-mcp"
-ALLOWED = "alteixeira20/*,Anvilary/*,odysseus-dev/odysseus"
+ALLOWED = "Anvilary/*,owner/repo"
 TOKEN = "gho_" + "t" * 36
 
 
@@ -62,16 +62,24 @@ def test_an_installation_that_predates_the_rename_still_receives_the_allowlist(s
 def test_stray_variables_cannot_widen_the_allowlist_or_select_another_credential(sandbox):
     stray = {"GIT_PLUS_ALLOWED_REPOSITORIES": "evil/repo", "ODYTOR_ALLOWED_REPOSITORIES": "other/repo", "GH_TOKEN": "ghp_stray",
              "ODYTOR_SERVER_PAT": "ghp_pat", "GIT_PLUS_ODYSSEUS_PAT": "ghp_pat2", "GIT_PLUS_AUTH_TOKEN": "static",
-             "ODYTOR_GITHUB_CLIENT_ID": "x", "GIT_PLUS_PUBLIC_URL": "https://x.example"}
+             "ODYTOR_GITHUB_CLIENT_ID": "x", "GIT_PLUS_PUBLIC_URL": "https://x.example",
+             "GIT_PLUS_WORKSPACE_ALLOW_PUBLISH_APPLY": "true"}
     seen = started_with(run(sandbox, env=stray))
     assert seen["ODYTOR_ALLOWED_REPOSITORIES"] == seen["GIT_PLUS_ALLOWED_REPOSITORIES"] == ALLOWED
     assert seen["GITHUB_TOKEN"] == TOKEN
+    assert "ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY" not in seen
+    assert "GIT_PLUS_WORKSPACE_ALLOW_PUBLISH_APPLY" not in seen
     allowed_keys = {
         "ARGS", "GITHUB_TOKEN", "ODYTOR_HOME", "ODYTOR_ALLOWED_REPOSITORIES", "GIT_PLUS_ALLOWED_REPOSITORIES",
         "ODYTOR_TEST_RUNNER_COMMAND", "ODYTOR_TEST_POLICIES", "ODYTOR_TEST_DATA_DIR",
-        "ODYTOR_WORKSPACE_DIR", "ODYTOR_ARTIFACT_DIR", "ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY",
+        "ODYTOR_WORKSPACE_DIR", "ODYTOR_ARTIFACT_DIR",
     }
     assert not {k for k in seen if k not in allowed_keys}
+
+
+def test_explicit_publish_apply_opt_in_is_preserved(sandbox):
+    seen = started_with(run(sandbox, env={"ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY": "on"}))
+    assert seen["ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY"] == "on"
 
 
 @pytest.mark.parametrize("gh_body,message", [("exit 1", "not authenticated"), ("echo", "returned no token")])

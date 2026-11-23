@@ -8,7 +8,7 @@ OdyTor `0.1.0` (v1 release baseline) is pre-1.0 source-available software. Secur
 
 **Do not open a public GitHub issue for security vulnerabilities.** Public issues expose exploit details before a fix is available.
 
-Use **GitHub Security Advisories / private vulnerability reporting** on the repository (`Security -> Report a vulnerability`). If private reporting is unavailable on the repository at the time of your report, open a minimal public issue requesting a private contact channel without disclosing exploit details or target infrastructure.
+Use **GitHub Security Advisories / private vulnerability reporting** on the repository (`Security -> Report a vulnerability`) if private reporting is enabled. If private reporting is unavailable or not yet enabled on the repository, open a minimal public issue requesting a private contact channel without disclosing exploit details or target infrastructure.
 
 Please include:
 
@@ -34,6 +34,6 @@ OdyTor's architecture relies on explicit isolation and authorization boundaries 
 - **Strict revision pinning and leases**: Mutating GitHub operations pin exact `expected_head` and `expected_base` commits and use `--force-with-lease` on fork pushes.
 - **Allowlists and caller binding**: `ODYTOR_ALLOWED_REPOSITORIES` and `ODYTOR_ALLOWED_GITHUB_USERS` constrain repository and OAuth access; workspaces, artifacts, test runs, and publication plans are strictly bound to the owning caller principal.
 - **Secret isolation**: GitHub tokens and OAuth secrets remain in memory and are stripped from runner environments, tool payloads, and logs.
-- **Guarded publication gates**: `publish_apply` and `pr_body_apply` are disabled by default (`ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY=off`) and require explicit plan confirmation plus `user_authorized=true`.
+- **Guarded publication gates**: `publish_apply` and `pr_body_apply` are disabled by default (`ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY=off`) and require explicit plan confirmation plus `user_authorized=true`. Direct PR mutations (`quick_fix`, `pr_rebase`, `ci_control`) are governed separately by repository allowlists, revision pinning, branch leases, and per-call confirmation guards.
 
 Vulnerabilities that break any of these boundaries, allow path/workspace escape, bypass allowlists or principal isolation, leak tokens or cross-caller artifacts, or bypass container/network isolation on the runner are in scope.

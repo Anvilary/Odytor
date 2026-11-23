@@ -57,7 +57,7 @@ RUN if [ -n "${ODYTOR_BUILD_REVISION:-${GIT_COMMIT:-${SOURCE_SHA}}}" ]; then \
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -fsS -H "Host: git-plus.alexandreteixeira.dev" http://127.0.0.1:8000/.well-known/oauth-authorization-server || exit 1
+    CMD curl -fsS -H "Host: odytor.example.com" http://127.0.0.1:8000/.well-known/oauth-authorization-server || exit 1
 
 ENTRYPOINT ["odytor"]
 CMD ["--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8000"]

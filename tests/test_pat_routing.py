@@ -23,10 +23,10 @@ def settings(**changes):
         github_token=None, github_api_url="https://api.github.com", auth_token=None,
         default_max_diff_lines=500, default_max_diff_bytes=1048576,
         allowed_repositories=(TARGET, "anvilary/git-plus"),
-        allowed_github_users=("alteixeira20",),
+        allowed_github_users=("maintainer",),
         oauth_client_id="oauth-client", oauth_client_secret="oauth-secret",
         public_base_url="https://git-plus.example.com", oauth_signing_key="x" * 32,
-        odysseus_pat=PAT, odysseus_pat_login="alteixeira20",
+        odysseus_pat=PAT, odysseus_pat_login="maintainer",
     )
     defaults.update(changes)
     return Settings(**defaults)
@@ -63,7 +63,7 @@ def test_pat_used_only_for_exact_authenticated_identity_and_target():
     def capture(**kwargs):
         created.append(kwargs)
         return MagicMock()
-    with _with_mocked_oauth_token("alteixeira20", "normal-upstream"), patch(
+    with _with_mocked_oauth_token("maintainer", "normal-upstream"), patch(
         "odytor.auth.GitHubClient", side_effect=capture
     ):
         with github_client(settings(), remote=True, repo=TARGET):
@@ -72,8 +72,8 @@ def test_pat_used_only_for_exact_authenticated_identity_and_target():
             pass
     assert created == [
         {"token": PAT, "base_url": "https://api.github.com", "timeout": 120.0, "restricted_repo": TARGET,
-         "principal": "alteixeira20"},
-        {"token": "normal-upstream", "base_url": "https://api.github.com", "timeout": 120.0, "principal": "alteixeira20"},
+         "principal": "maintainer"},
+        {"token": "normal-upstream", "base_url": "https://api.github.com", "timeout": 120.0, "principal": "maintainer"},
     ]
 
 
@@ -82,17 +82,17 @@ def test_pat_never_used_for_another_allowed_identity():
         "odytor.auth.GitHubClient", return_value=MagicMock()
     ) as factory:
         with pytest.raises(SecurityError):
-            with github_client(settings(allowed_github_users=("alteixeira20",)), remote=True, repo=TARGET):
+            with github_client(settings(allowed_github_users=("maintainer",)), remote=True, repo=TARGET):
                 pass
         factory.assert_not_called()
 
 
 def test_pat_requires_repository_context_and_upstream_oauth():
-    with _with_mocked_oauth_token("alteixeira20", "normal-upstream"):
+    with _with_mocked_oauth_token("maintainer", "normal-upstream"):
         with pytest.raises(SecurityError, match="Repository context"):
             with github_client(settings(), remote=True):
                 pass
-    with _with_mocked_oauth_token("alteixeira20", None):
+    with _with_mocked_oauth_token("maintainer", None):
         with pytest.raises(SecurityError, match="unavailable"):
             with github_client(settings(), remote=True, repo=TARGET):
                 pass
@@ -138,7 +138,7 @@ def test_pat_fetches_fork_anonymously_and_base_with_credentials():
 
 
 def test_pat_fork_write_only_for_quick_fix_and_never_for_rebase():
-    client = GitHubClient(token=PAT, restricted_repo=TARGET, principal="alteixeira20", session=MagicMock())
+    client = GitHubClient(token=PAT, restricted_repo=TARGET, principal="maintainer", session=MagicMock())
     pr = {"state": "open", "merged": False, "maintainer_can_modify": True,
           "head": {"sha": "a" * 40, "ref": "feature", "repo": {"full_name": "contributor/odysseus", "fork": True}},
           "base": {"sha": "b" * 40, "ref": "dev", "repo": {"full_name": TARGET}}}
@@ -191,15 +191,15 @@ def test_non_pat_oauth_identity_can_still_use_its_own_token():
     with _with_mocked_oauth_token("bob", "bob-oauth"), patch(
         "odytor.auth.GitHubClient", return_value=MagicMock()
     ) as factory:
-        with github_client(settings(allowed_github_users=("alteixeira20", "bob")), remote=True, repo=TARGET):
+        with github_client(settings(allowed_github_users=("maintainer", "bob")), remote=True, repo=TARGET):
             pass
         factory.assert_called_once_with(token="bob-oauth", base_url="https://api.github.com", timeout=120.0, principal="bob")
 
 
 def test_odysseus_pat_environment_loading(monkeypatch):
     monkeypatch.setenv("ODYTOR_ODYSSEUS_PAT", PAT)
-    monkeypatch.setenv("ODYTOR_ODYSSEUS_PAT_LOGIN", "alteixeira20")
+    monkeypatch.setenv("ODYTOR_ODYSSEUS_PAT_LOGIN", "maintainer")
     result = Settings.load()
     assert result.odysseus_pat == PAT
-    assert result.odysseus_pat_login == "alteixeira20"
+    assert result.odysseus_pat_login == "maintainer"
     assert PAT not in repr(result)

@@ -4,7 +4,7 @@ All notable changes to OdyTor are recorded in this file.
 
 ## 0.1.0 - 2026-11-23
 
-First release candidate baseline for OdyTor v1 (`Anvilary/Odytor`), prepared from the `feat/remote-engineering-workspace` baseline (`299d7e3`).
+First public source release preparation for OdyTor `0.1.0` (`Anvilary/Odytor`).
 
 ### Core Pull Request Operations
 
@@ -26,11 +26,12 @@ First release candidate baseline for OdyTor v1 (`Anvilary/Odytor`), prepared fro
 
 - `publish_plan` and `publish_apply`: Two-phase additive commit publication from `pr_head` workspaces opened with `publish` scope, bound to workspace tree, patch digest, expected head, validation evidence, and remote reconciliation on uncertain outcomes.
 - `pr_body_plan` and `pr_body_apply`: Two-phase body replacement restricted to open draft pull requests (`draft=true`), with post-write invariant read-back.
-- Write execution via `publish_apply` and `pr_body_apply` is gated behind `ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY=on` (disabled by default).
+- Write execution via `publish_apply` and `pr_body_apply` is gated behind `ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY=on` (disabled by default; `publish_plan` and `pr_body_plan` remain available for read-only planning). Direct PR maintenance mutations (`quick_fix`, `pr_rebase`, `ci_control`) are governed separately by repository allowlists, revision pinning, branch leases, and explicit per-call confirmation flags.
 
-### Intentional v1 Boundaries
+### Intentional 0.1.0 Boundaries
 
 - No pull request merge or branch deletion tools.
-- Thread reading (`thread_read`) and generalized text publishing (`text_plan`, `text_apply`, `text_recover`) are deferred/excluded from v1.
+- Thread reading (`thread_read`) and generalized text publishing (`text_plan`, `text_apply`, `text_recover`) are deferred/excluded from `0.1.0`.
+- Legacy `git-plus` / `git-plus-runner` entry points and `GIT_PLUS_*` configuration aliases remain active in `0.1.0` for backward compatibility (see [docs/migration-from-git-plus.md](docs/migration-from-git-plus.md)).
 - Code execution and browser runs require an external isolated runner host (`ODYTOR_TEST_RUNNER_COMMAND`) and maintainer repository policy (`ODYTOR_TEST_POLICIES`).
-- Distributed under the [PolyForm Noncommercial License 1.0.0](LICENSE) (not OSI-approved open-source software).
+- Distributed under the [PolyForm Noncommercial License 1.0.0](LICENSE) (source-available for noncommercial use; commercial use requires separate written permission; not OSI-approved open-source software).

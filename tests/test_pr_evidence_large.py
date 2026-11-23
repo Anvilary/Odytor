@@ -1,7 +1,7 @@
 """pr_evidence on very large PRs, through GitHubClient over a fake GitHub HTTP session.
 
-GitHub's diff endpoint refuses PRs over 20,000 lines or 300 files with HTTP 406 (observed on real PRs: odysseus
-#7283, #7292, #7311); the files endpoint (100 per page, at most 3,000 files) keeps working.
+GitHub's diff endpoint refuses PRs over 20,000 lines or 300 files with HTTP 406 (observed on large
+multi-hundred-file pull requests); the files endpoint (100 per page, at most 3,000 files) keeps working.
 """
 from __future__ import annotations
 

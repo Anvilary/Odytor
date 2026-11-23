@@ -16,15 +16,15 @@ profiles = [
     "cmake-build", "make-build", "c-test"
 ]
 
-[repos."odysseus-dev/odysseus"]
+[repos."example-org/webapp"]
 profile = "python-pytest"
 test_dirs = ["tests"]
-requirements = "odysseus-dev-odysseus.requirements.txt"
+requirements = "example-webapp.requirements.txt"
 
-[repos."odysseus-dev/odysseus".node-test]
+[repos."example-org/webapp".node-test]
 test_dirs = ["tests"]
 
-[repos."odysseus-dev/odysseus".playwright-spec]
+[repos."example-org/webapp".playwright-spec]
 specs = [
     "tests/e2e/notes-qa/notes-qa-regressions.spec.mjs",
     "tests/e2e/notes-qa/notes-edge-cases.spec.mjs",
@@ -33,46 +33,46 @@ spec_dirs = ["tests/e2e/notes-qa"]
 launcher = "tests/e2e/notes-qa/run_notes_qa.py"
 config = "tests/e2e/notes-qa/playwright.config.js"
 
-[repos."odysseus-dev/odysseus".browser-playwright]
+[repos."example-org/webapp".browser-playwright]
 kind = "static"
 root = "static"
 port = 8765
 ready_path = "/index.html"
 
-[repos."odysseus-dev/odysseus".browser-playwright.profiles.default]
+[repos."example-org/webapp".browser-playwright.profiles.default]
 kind = "static"
 root = "static"
 port = 8765
 ready_path = "/index.html"
 
-[repos."odysseus-dev/odysseus".browser-playwright.profiles.cookbook]
+[repos."example-org/webapp".browser-playwright.profiles.cookbook]
 kind = "static"
 root = "static"
 port = 8765
 ready_path = "/index.html"
 
-[repos."odysseus-dev/odysseus".browser-playwright.profiles.app]
+[repos."example-org/webapp".browser-playwright.profiles.app]
 kind = "command"
 argv = ["python3", "-m", "uvicorn", "app:app", "--host", "127.0.0.1", "--port", "8765"]
 port = 8765
 ready_path = "/index.html"
 ready_timeout = 10
 
-[repos."odysseus-dev/odysseus".publish]
+[repos."example-org/webapp".publish]
 exempt_paths = [
     "frontend/src/features/notes/application/noteSession.js",
     "static/js/features/notes/application/noteSession.js",
 ]
 
-[repos."alteixeira20/odytor-smoke-test"]
+[repos."example-org/polyglot-service"]
 template = "standard-polyglot"
 test_dirs = ["tests"]
 requirements = "smoke-test.requirements.txt"
 
-[repos."alteixeira20/odytor-smoke-test".node-test]
+[repos."example-org/polyglot-service".node-test]
 test_dirs = ["tests"]
 
-[repos."alteixeira20/odytor-smoke-test".browser-playwright]
+[repos."example-org/polyglot-service".browser-playwright]
 kind = "static"
 root = "."
 port = 8765

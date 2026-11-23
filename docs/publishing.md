@@ -23,9 +23,9 @@ scripts, key material, container definitions or sensitive names), and the change
 `quick_fix` limits for files, lines and bytes. Only regular text files can be added, modified or deleted; mode changes,
 symlinks, submodules and binaries are refused. A plan expires after an hour.
 
-## Apply (`publish_apply`) - the only write
+## Apply (`publish_apply`) - the only workspace commit write
 
-Requires the server flag `ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY=on` (disabled by default; `publish_plan` remains usable for review when apply is disabled). It refuses unless **all** of these hold, each re-checked against live state:
+Requires the server flag `ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY=on` (disabled by default; `publish_plan` remains usable for review when apply is disabled). That flag gates `publish_apply` and `pr_body_apply` only; direct PR maintenance tools (`quick_fix`, `pr_rebase`, `ci_control`) have their own allowlist, revision-pinning, and confirmation guards. `publish_apply` refuses unless **all** of these hold, each re-checked against live state:
 
 1. `user_authorized` is exactly `true` and `confirm` equals the plan's text. This is the server's contract: the user's
    approval is the caller's to obtain, and the confirmation ties it to the immutable inputs they approved.
