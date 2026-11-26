@@ -70,8 +70,10 @@ OPEN_WORLD_ALLOWLIST = frozenset({
     "test_result",
     "workspace_create",
     "workspace_run",
+    "test_cancel",
     "browser_run",
     "validation_campaign",
+    "campaign_cancel",
     "publish_plan",
     "publish_apply",
     "pr_body_plan",
@@ -103,7 +105,7 @@ def _snapshot_tree(root: Path) -> dict[str, str]:
     return files
 
 
-def _settings(tmp_path: Path, *, policies_path: Path | None = None) -> Settings:
+def _settings(tmp_path: Path, *, policies_path: Path | None = None, allow_publish_apply: bool = False) -> Settings:
     return Settings(
         github_token="t",
         github_api_url="https://api.github.com",
@@ -111,7 +113,11 @@ def _settings(tmp_path: Path, *, policies_path: Path | None = None) -> Settings:
         default_max_diff_lines=500,
         default_max_diff_bytes=1048576,
         allowed_repositories=("owner/repo",),
-        workspaces=WorkspaceSettings(data_dir=str(tmp_path / "ws"), min_free_bytes=64 * 1024 * 1024),
+        workspaces=WorkspaceSettings(
+            data_dir=str(tmp_path / "ws"),
+            min_free_bytes=64 * 1024 * 1024,
+            allow_publish_apply=allow_publish_apply,
+        ),
         artifacts=ArtifactSettings(data_dir=str(tmp_path / "artifacts")),
         testing=RunSettings(
             runner_command=("true",),
@@ -325,13 +331,12 @@ def test_read_only_tools_succeed_when_github_and_storage_fail_on_writes(tmp_path
 
         now = time.time()
         run_id = "test-" + "a" * 32
+        other_pr_run_id = "test-" + "c" * 32
         server.test_service.start()
-        server.test_service.store.save({
+        base_record = {
             "schema": 1,
-            "run_id": run_id,
             "owner": "local",
             "repo": "owner/repo",
-            "pr": 1,
             "mode": "head",
             "profile": "python-pytest",
             "profile_version": 1,
@@ -345,9 +350,11 @@ def test_read_only_tools_succeed_when_github_and_storage_fail_on_writes(tmp_path
             "timeout_seconds": 300,
             "requirements_sha256": "0" * 64,
             "timestamps": {"created_at": now, "started_at": now, "finished_at": now, "duration_seconds": 0.1},
-            "expires_at": now + 3600,
+            "expires_at": now + 48 * 3600,
             "result": {"status": "passed", "counts": {"collected": 1, "reported": 1, "executed": 1, "passed": 1, "failed": 0, "errors": 0, "skipped": 0, "xfailed": 0, "xpassed": 0, "incomplete": 0, "not_run": 0}, "tests": [], "tests_total": 1, "tests_truncated": False},
-        })
+        }
+        server.test_service.store.save({**base_record, "run_id": run_id, "pr": 1})
+        server.test_service.store.save({**base_record, "run_id": other_pr_run_id, "pr": 99})
 
         ar_meta = server.artifact_store.put(
             owner="local",
@@ -461,6 +468,125 @@ def test_read_only_tools_succeed_when_github_and_storage_fail_on_writes(tmp_path
         assert _snapshot_tree(tmp_path / "ws") == ws_before
         assert _snapshot_tree(tmp_path / "runs") == runs_before
         assert _snapshot_tree(tmp_path / "artifacts") == artifacts_before
+
+        # Closed/merged PR retention housekeeping on test_result: still zero GitHub writes, zero deletes,
+        # zero writes to other stores, and only expires_at is shortened on that PR's run records.
+        original_pr = gh_client.get_pr
+        monkeypatch.setattr(gh_client, "get_pr", lambda repo, number: {**original_pr(repo, number), "state": "closed", "merged": True})
+        saved_runs: list[str] = []
+        import json as _json
+
+        def housekeeping_only_save(store_self, rec):
+            saved_runs.append(rec["run_id"])
+            assert rec["run_id"] == run_id
+            assert rec["expires_at"] < base_record["expires_at"]
+            target = store_self.path(rec["run_id"])
+            target.write_text(_json.dumps(rec, separators=(",", ":")))
+
+        monkeypatch.setattr(RunStore, "save", housekeeping_only_save)
+        monkeypatch.setattr(JobService, "mutate", lambda svc_self, rid, change: (
+            (lambda rec: (change(rec), housekeeping_only_save(svc_self.store, rec)))(svc_self.store.load(rid))
+        ))
+
+        async def call_closed_test_result():
+            async with Client(server) as client:
+                return await client.call_tool("test_result", {"run_id": run_id}, raise_on_error=False)
+
+        closed_res = asyncio.run(call_closed_test_result())
+        assert not closed_res.is_error
+        assert closed_res.structured_content["currency"]["pr_state"] == "merged"
+        assert saved_runs == [run_id]
+        assert server.test_service.store.load(run_id)["expires_at"] < base_record["expires_at"]
+        assert server.test_service.store.load(other_pr_run_id)["expires_at"] == base_record["expires_at"]
+        assert _snapshot_tree(tmp_path / "ws") == ws_before
+        assert _snapshot_tree(tmp_path / "artifacts") == artifacts_before
+    finally:
+        if server.test_service is not None:
+            server.test_service.shutdown()
+
+
+def test_pr_body_apply_is_idempotent_with_single_patch(tmp_path, monkeypatch) -> None:
+    head_sha = "a" * 40
+    base_sha = "b" * 40
+    pr_state = {
+        "number": 5,
+        "state": "open",
+        "merged": False,
+        "draft": True,
+        "title": "Draft PR title",
+        "head": {"sha": head_sha, "ref": "feat", "repo": {"full_name": "owner/repo"}},
+        "base": {"sha": base_sha, "ref": "main", "repo": {"full_name": "owner/repo"}},
+        "body": "Initial draft body",
+    }
+    patch_calls: list[dict] = []
+
+    class DraftPRClient:
+        token = "t"
+        base_url = "https://api.github.com"
+        restricted_repo = None
+        principal = "local"
+
+        def get_pr(self, repo: str, number: int) -> dict:
+            assert repo == "owner/repo" and number == 5
+            return dict(pr_state)
+
+        def request(self, method: str, path: str, **kwargs):
+            if method.upper() == "PATCH" and path == "repos/owner/repo/pulls/5":
+                payload = kwargs.get("json_data") or kwargs.get("json") or {}
+                patch_calls.append({"method": method, "path": path, "payload": payload})
+                pr_state["body"] = payload["body"]
+                return SimpleNamespace(status_code=200, json=lambda: dict(pr_state))
+            raise AssertionError(f"Unexpected GitHub request: {method} {path}")
+
+    @contextlib.contextmanager
+    def fake_github_client(cfg, remote=False, *, repo=None):
+        yield DraftPRClient()
+
+    monkeypatch.setattr("odytor.server.github_client", fake_github_client)
+    monkeypatch.setattr("odytor.server.caller_principal", lambda cfg, remote=False: "local")
+
+    (tmp_path / "req.txt").write_text("pytest==8.3.5\n")
+    (tmp_path / "policies.toml").write_text('[repos."owner/repo"]\nrequirements = "req.txt"\ntest_dirs = ["tests"]\n')
+    server = create_server(_settings(tmp_path, allow_publish_apply=True))
+    try:
+        async def run_flow():
+            async with Client(server) as client:
+                planned = await client.call_tool(
+                    "pr_body_plan",
+                    {"repo": "owner/repo", "number": 5, "expected_head": head_sha, "body": "Replacement draft body"},
+                    raise_on_error=False,
+                )
+                assert not planned.is_error, planned
+                plan_data = planned.structured_content
+                apply_args = {
+                    "plan_id": plan_data["plan_id"],
+                    "confirm": plan_data["confirmation"],
+                    "user_authorized": True,
+                }
+                first = await client.call_tool("pr_body_apply", apply_args, raise_on_error=False)
+                second = await client.call_tool("pr_body_apply", apply_args, raise_on_error=False)
+                return plan_data, first, second
+
+        plan_data, first, second = asyncio.run(run_flow())
+        assert not first.is_error and not second.is_error
+        assert len(patch_calls) == 1
+        assert patch_calls[0]["payload"] == {"body": "Replacement draft body"}
+
+        first_data = first.structured_content
+        assert first_data["plan_id"] == plan_data["plan_id"]
+        assert first_data["status"] == "applied"
+        assert all(first_data["invariants_verified"].values())
+
+        second_data = second.structured_content
+        assert second_data == {
+            "plan_id": plan_data["plan_id"],
+            "kind": "pr_body",
+            "repo": "owner/repo",
+            "number": 5,
+            "status": "applied",
+            "idempotent_replay": True,
+            "note": "This plan was already applied; nothing was written again.",
+        }
     finally:
         if server.test_service is not None:
             server.test_service.shutdown()

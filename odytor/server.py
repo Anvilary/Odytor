@@ -207,7 +207,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         return invoke_runs(repo, list_test_runs, number, expected_head, limit=limit)
 
     @tool(annotations={"title": "Get Test Run Result", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
-          description="Retrieve status, live progress, and evidence for a test_run or workspace_run: verified revisions, tested tree, overlay digest, runner image, dependency cache status, live phase, test counts, structured events, per-test outcomes, and bounded logs. Supports bounded server-side waiting (wait_seconds, capped at 60s) to wait for new progress events or completion without client-side busy-looping. Use after_event_id to paginate the replayable event log.")
+          description="Retrieve status, live progress, and evidence for a test_run or workspace_run: verified revisions, tested tree, overlay digest, runner image, dependency cache status, live phase, test counts, structured events, per-test outcomes, and bounded logs. Supports bounded server-side waiting (wait_seconds, capped at 60s) to wait for new progress events or completion without client-side busy-looping. Use after_event_id to paginate the replayable event log. For direct PR runs, polling a closed or merged PR also performs retention housekeeping by trimming expires_at on that PR's retained run records to the closed-grace window.")
     def test_result(
         run_id: str,
         wait_seconds: Annotated[float, Field(ge=0.0, le=60.0)] = 0.0,
@@ -383,7 +383,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                     "close": lambda owner: workspaces.close(workspace_id, owner)}
         return invoke_ws(workspace_id, handlers[action])
 
-    @tool(annotations={"title": "Cancel Test or Campaign Run", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
+    @tool(annotations={"title": "Cancel Test or Campaign Run", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": True},
           description="Cancel a queued or running test (test_run or workspace_run) or validation campaign you submitted. A queued run is removed; a running run's sandbox is torn down by the runner and the run ends as status 'canceled'. Finished runs are reported as already_finished.")
     def test_cancel(run_id: str) -> dict[str, Any]:
         if run_id.startswith("cmp-"):
@@ -613,7 +613,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 
-    @tool(annotations={"title": "Cancel Validation Campaign", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
+    @tool(annotations={"title": "Cancel Validation Campaign", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": True},
           description="Cancel an active validation campaign you started. Stops its running child run and releases its workspace. The result is 'canceled' once teardown is confirmed, or 'canceling' with cleanup 'pending' until the worker finishes; a canceled campaign never later becomes passed or failed.")
     def campaign_cancel(campaign_id: Annotated[str, Field(pattern=r"^cmp-[0-9a-f]{32}$")]) -> dict[str, Any]:
         if campaigns is None or service is None or workspaces is None:
