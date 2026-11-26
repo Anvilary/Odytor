@@ -79,7 +79,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 
-    @tool(annotations={"readOnlyHint": True, "openWorldHint": True},
+    @tool(annotations={"title": "Inspect PR Evidence", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
               description="Collect bounded PR metadata, diff, files, reviews, checks and repository instructions with exact revision and completeness metadata. Omitted or truncated evidence is explicitly incomplete. Large PRs are read in windows: page the file list with files_page (next page in files_next_page) and the diff with diff_offset (next window starts at diff_offset + diff_returned_lines; diff_has_more says whether more remains). When GitHub refuses the whole diff (over 20,000 lines or 300 files) the diff is rebuilt from the files API and diff_source says so.")
     def pr_evidence(repo: str, number: Number, expected_head: SHA | None = None,
                     include_diff: bool = True,
@@ -98,7 +98,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                       files_page=files_page, files_per_page=files_per_page,
                       diff_offset=diff_offset, include_file_patches=include_file_patches)
 
-    @tool(annotations={"readOnlyHint": True, "openWorldHint": True},
+    @tool(annotations={"title": "Diagnose CI Failures", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
               description="Diagnose failed CI jobs for a PR revision using bounded logs, file/line excerpts, annotations and code scanning. Completeness and unavailable evidence are explicit.")
     def ci_diagnose(repo: str, number: Number, expected_head: SHA | None = None,
                     run_id: Number | None = None, job_id: Number | None = None,
@@ -108,7 +108,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                       job_id=job_id, max_excerpts_per_job=max_excerpts_per_job,
                       include_annotations=include_annotations, include_code_scanning=include_code_scanning)
 
-    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+    @tool(annotations={"title": "Apply Quick Fix Commit", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
               description="Apply an exact bounded unified diff as one additive commit to an open PR, including contributor-fork PRs when GitHub grants the caller maintainer push access. Requires current head SHA. Existing regular files only. Validates patch and file modes; does not run tests. No force push.")
     def quick_fix(repo: str, number: Number, expected_head: SHA, patch: str, commit_message: str) -> dict[str, Any]:
         def apply(client, target):
@@ -117,27 +117,27 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                                    max_bytes=cfg.quick_fix_max_patch_bytes, path_exemptions=publication_exemptions(target))
         return invoke(repo, apply)
 
-    @tool(annotations={"readOnlyHint": True, "openWorldHint": True},
+    @tool(annotations={"title": "Inspect PR Merge Conflicts", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
               description="Inspect an exact head/base merge using isolated Git. Returns conflicting paths, stages and text regions with completeness metadata. Executes no repository code. By default the merge uses the base SHA the PR API reports (merge_scope=captured_pr_base_sha), which can lag the branch; set merge_target=live_tip to merge against the live target-branch tip instead (expected_base, if given, must then equal that tip). The result always states which base was merged (merged_base_sha) and whether it is the current tip.")
     def pr_conflicts(repo: str, number: Number, expected_head: SHA, expected_base: SHA | None = None,
                      max_paths: Annotated[int, Field(ge=1, le=100)] = 100,
                      merge_target: Literal["pr_base_snapshot", "live_tip"] = "pr_base_snapshot") -> dict[str, Any]:
         return invoke(repo, get_pr_conflicts, number, expected_head, expected_base, max_paths, merge_target)
 
-    @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
+    @tool(annotations={"title": "Rebase Pull Request", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
               description="Preview a genuine linear PR rebase onto an exact base. Applying rewrites history and requires apply=true plus allow_history_rewrite=true. Uses an exact branch lease. Merge histories are rejected; repository tests are not run.")
     def pr_rebase(repo: str, number: Number, expected_head: SHA, expected_base: SHA,
                   apply: bool = False, allow_history_rewrite: bool = False) -> dict[str, Any]:
         return invoke(repo, rebase_pr, number, expected_head, expected_base,
                       apply=apply, allow_history_rewrite=allow_history_rewrite)
 
-    @tool(annotations={"readOnlyHint": True, "openWorldHint": True},
+    @tool(annotations={"title": "Preview PR Rebase", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
           description="Preview a genuine linear PR rebase onto an exact base without GitHub write authority. Merge histories are rejected; repository tests are not run. Returns replayed commits, predicted rebased head SHA, whether history rewrite would be required, and whether the PR is already up to date or has conflicts. Completely read-only with zero GitHub mutations.")
     def pr_rebase_preview(repo: str, number: Number, expected_head: SHA, expected_base: SHA) -> dict[str, Any]:
         return invoke(repo, rebase_pr, number, expected_head, expected_base,
                       apply=False, allow_history_rewrite=False)
 
-    @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
+    @tool(annotations={"title": "Control GitHub Actions CI", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
               description="Coordinate revision-checked PR CI reruns, individual failed-job reruns, dispatches and fork approvals. Fork approval requires explicit user authorization. Dispatches run on the head repository ref and are not normal PR required checks; ref races are disclosed.")
     def ci_control(repo: str, number: Number, expected_head: SHA, operation: Operation,
                    run_id: Number | None = None, job_id: Number | None = None,
@@ -189,7 +189,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 
-    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+    @tool(annotations={"title": "Run Isolated PR Tests", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
               description="Queue an isolated pytest run against an exact PR head (mode=head) or a disposable merge with an exact target-branch tip (mode=prospective_merge, requires expected_base). Optional test_overlay is a bounded test-only unified diff applied to a disposable tree; nothing is committed, pushed or posted. Profile and selectors are validated; no arbitrary commands or pytest flags. Poll test_result with the returned run_id. Requires a configured isolated runner; without one it returns instructions for enabling it.")
     def test_run(repo: str, number: Number, expected_head: SHA, profile: str = PROFILE_NAME,
                  selectors: list[str] | None = None, mode: str = "head", expected_base: SHA | None = None,
@@ -200,13 +200,13 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         except ValidationError as err:
             return safe_payload(err.to_dict())
 
-    @tool(annotations={"readOnlyHint": True, "openWorldHint": True},
+    @tool(annotations={"title": "List Submitted Test Runs", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
           description="Recover recent direct test_run IDs you submitted for this exact pull request head, including their mode, base, selectors, overlay digest and status. This lookup submits no work. If a test_run response was lost, use this before deciding whether to retry.")
     def test_run_list(repo: str, number: Number, expected_head: SHA,
                       limit: Annotated[int, Field(ge=1, le=25)] = 10) -> dict[str, Any]:
         return invoke_runs(repo, list_test_runs, number, expected_head, limit=limit)
 
-    @tool(annotations={"readOnlyHint": True, "openWorldHint": True},
+    @tool(annotations={"title": "Get Test Run Result", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
           description="Retrieve status, live progress, and evidence for a test_run or workspace_run: verified revisions, tested tree, overlay digest, runner image, dependency cache status, live phase, test counts, structured events, per-test outcomes, and bounded logs. Supports bounded server-side waiting (wait_seconds, capped at 60s) to wait for new progress events or completion without client-side busy-looping. Use after_event_id to paginate the replayable event log.")
     def test_result(
         run_id: str,
@@ -252,7 +252,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 
-    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+    @tool(annotations={"title": "Create Disposable Workspace", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
           description="Create a disposable engineering workspace at an exact revision: source='pr_head' (number + expected_head), 'prospective_merge' (number + expected_head + expected_base, which must be the live target-branch tip) or 'branch' (branch + expected_sha). Nothing is written to GitHub. The result carries workspace_id, version 0, the exact tree and the source revisions; every later workspace call echoes workspace_id, version and tree. Workspaces expire, are bounded in size and count, and belong to the authenticated caller. Optional operations narrows what this workspace may do (read, search, edit, diff, execute, artifacts, manage, publish). A workspace can never publish to GitHub unless 'publish' is listed here explicitly; it is not part of the default scope.")
     def workspace_create(repo: str, source: Literal["pr_head", "prospective_merge", "branch"] = "pr_head", number: Number | None = None,
                          expected_head: SHA | None = None, expected_base: SHA | None = None, branch: str | None = None,
@@ -270,7 +270,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 
-    @tool(annotations={"readOnlyHint": True, "openWorldHint": False},
+    @tool(annotations={"title": "Read Workspace Files", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
           description="Read a workspace without changing it. mode='tree' lists a directory (path, optional recursive); mode='file' returns numbered lines (start_line/end_line, at most 400 lines or 64 KiB per call; next_start_line says where to continue); mode='symbols' lists definitions in one file (exact for Python, best effort for JS/TS). Symlinks are reported, never followed; binary files are flagged, not returned. Optional paths list reads multiple files in a single turn. Always reports workspace_id, version and tree.")
     def workspace_read(workspace_id: WorkspaceId, mode: Literal["tree", "file", "symbols"] = "tree", path: str = "",
                        start_line: Annotated[int, Field(ge=1)] = 1, end_line: Annotated[int | None, Field(ge=1)] = None,
@@ -287,14 +287,14 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             return workspaces.symbols(workspace_id, owner, path=path)
         return invoke_ws(workspace_id, call, limit=262144)
 
-    @tool(annotations={"readOnlyHint": True, "openWorldHint": False},
+    @tool(annotations={"title": "Search Workspace Text", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
           description="Search workspace text with git grep over the exact tree. fixed=true (default) matches the literal string; fixed=false uses an extended regular expression. path limits the search to a directory or file. Returns at most 100 matches with file, line and a clipped line of text, and says whether the result is complete.")
     def workspace_search(workspace_id: WorkspaceId, pattern: str, path: str = "", fixed: bool = True, ignore_case: bool = False,
                          max_results: Annotated[int, Field(ge=1, le=100)] = 100) -> dict[str, Any]:
         return invoke_ws(workspace_id, lambda owner: workspaces.search(workspace_id, owner, pattern=pattern, path=path, fixed=fixed,
                                                                      ignore_case=ignore_case, max_results=max_results))
 
-    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+    @tool(annotations={"title": "Edit Workspace Files", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
           description="Modify the disposable workspace only; GitHub is never touched. Every call must pass expected_version (from the last workspace result); a stale version changes nothing and returns the current version. operation: write (path, content; creates or replaces a regular UTF-8 text file, keeps its mode), replace (path, old, new, expected_occurrences=1), delete (path, recursive), rename (path, destination, overwrite), patch (a strict unified diff; failures name the stage and line), checkpoint (name), reset (to='source' or a checkpoint name). Regular text files only: no binary content, symlinks, submodules or paths inside .git.")
     def workspace_edit(workspace_id: WorkspaceId, expected_version: Annotated[int, Field(ge=0)], operation: EditOperation,
                        path: str | None = None, content: str | None = None, old: str | None = None, new: str | None = None,
@@ -326,7 +326,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             return workspaces.reset(workspace_id, owner, expected_version=v, to=to)
         return invoke_ws(workspace_id, call)
 
-    @tool(annotations={"readOnlyHint": True, "openWorldHint": False},
+    @tool(annotations={"title": "Diff Workspace Changes", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
           description="Show the workspace's complete effective change against its source revision (against='source') or a checkpoint: per-file status and line counts, the patch in pageable windows (diff_offset via offset, max_lines), and patch_sha256 / patch_bytes covering the whole patch. The result names the base tree and current tree, so the exact change is identified.")
     def workspace_diff(workspace_id: WorkspaceId, against: str = "source", path: str = "",
                        max_lines: Annotated[int, Field(ge=1, le=5000)] = 400, offset: Annotated[int, Field(ge=0)] = 0) -> dict[str, Any]:
@@ -335,7 +335,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         return invoke_ws(workspace_id, lambda owner: workspaces.diff(workspace_id, owner, against=against, path=path, max_lines=max_lines, offset=offset),
                          limit=262144)
 
-    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+    @tool(annotations={"title": "Run Workspace Tests", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
           description="Queue an isolated test run on the exact current tree of a workspace (expected_version must match, so you test what you last saw). profile is python-pytest (default; selectors are pytest paths or node ids), node-test (node --test; selectors are .mjs/.cjs/.js files or directories), or playwright-spec (selectors are spec paths or spec::title, or pass test_title), each only if the maintainer policy enables it. The tree is snapshotted at submission: later edits never change a running test. Same isolation as test_run: no network, no arbitrary commands or flags. Browser scenarios use browser_run. Poll test_result with the returned run_id; the result names the workspace version and tree that was tested. Requires a configured runner and a maintainer test policy for the repository.")
     def workspace_run(workspace_id: WorkspaceId, expected_version: Annotated[int, Field(ge=0)], profile: str = PROFILE_NAME,
                       selectors: list[str] | None = None,
@@ -346,7 +346,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             workspaces.peek(workspace_id, owner)["repo"], workspace_id, expected_version, workspaces=workspaces, service=service,
             policies=current_policies(), owner=owner, cfg=runs, profile=profile, selectors=selectors, test_title=test_title), limit=262144)
 
-    @tool(annotations={"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
+    @tool(annotations={"title": "List Open Workspaces", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
           description="List your open workspaces with their IDs, repositories, PR numbers, versions, trees, and expiration times. Only your own workspaces on permitted repositories are returned. Read-only; requires no write confirmation.")
     def workspace_list() -> dict[str, Any]:
         if workspaces is None:
@@ -357,14 +357,14 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 
-    @tool(annotations={"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
+    @tool(annotations={"title": "Get Workspace Status", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
           description="Retrieve detailed status and metadata for a workspace you own: version, tree, source revision, expiry, checkpoints, and whether uncommitted changes exist. Read-only; requires no write confirmation.")
     def workspace_status(workspace_id: WorkspaceId) -> dict[str, Any]:
         if workspaces is None:
             return safe_payload(ValidationError("Workspaces are disabled on this server (ODYTOR_WORKSPACES=off).").to_dict())
         return invoke_ws(workspace_id, lambda owner: workspaces.summary(workspaces.get(workspace_id, owner, operation="manage")))
 
-    @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
+    @tool(annotations={"title": "Manage Workspace Lifecycle", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
           description="Manage workspaces. action='extend' (hours, capped by the maximum lifetime) or 'close' (deletes the workspace and its unpublished changes). For read-only inspection, prefer workspace_list and workspace_status, which require no write approval. Expired workspaces are removed automatically; nothing here touches GitHub.")
     def workspace_manage(action: Literal["list", "status", "extend", "close"], workspace_id: WorkspaceId | None = None,
                          hours: Annotated[float, Field(gt=0)] = 24.0) -> dict[str, Any]:
@@ -383,7 +383,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                     "close": lambda owner: workspaces.close(workspace_id, owner)}
         return invoke_ws(workspace_id, handlers[action])
 
-    @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
+    @tool(annotations={"title": "Cancel Test or Campaign Run", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
           description="Cancel a queued or running test (test_run or workspace_run) or validation campaign you submitted. A queued run is removed; a running run's sandbox is torn down by the runner and the run ends as status 'canceled'. Finished runs are reported as already_finished.")
     def test_cancel(run_id: str) -> dict[str, Any]:
         if run_id.startswith("cmp-"):
@@ -419,7 +419,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
             content.append(Image(data=data, format=mime.split("/", 1)[1]).to_image_content())
         return ToolResult(content=content, structured_content=payload)
 
-    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+    @tool(annotations={"title": "Run Sandboxed Browser Check", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
           description="Drive Chromium against the application in a workspace, inside the isolated sandbox with no network. The exact current workspace tree is served (expected_version must match); steps are typed and bounded: goto (a path like /index.html), click, fill, type, press, select, check, uncheck, hover, wait_for, wait_ms, screenshot (name), snapshot (accessibility tree and text), assert_visible, assert_hidden, assert_text, assert_count, assert_requests (count requests to an exact path), reset_network_counts. There is no arbitrary JavaScript and no external navigation. mocks fake API responses ({path, json|body, status}). The first call opens a session (session_id in the result); pass session_id to continue: earlier accepted steps are replayed in a fresh sandbox and only steps that succeed join the history. Returns step results, console and page errors, network summary (requests per path), snapshots and screenshots as native image content. Status 'passed' needs every step ok and at least one assertion; 'completed' means exploration without assertions and is not a validation result. Requires a configured runner whose image has Chromium and a maintainer policy enabling browser-playwright for the repository.")
     def browser_run(workspace_id: WorkspaceId, expected_version: Annotated[int, Field(ge=0)], steps: list[dict[str, Any]],
                     session_id: Annotated[str | None, Field(pattern=r"^bs-[0-9a-f]{32}$")] = None,
@@ -494,7 +494,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
                 view["child_run"] = {"run_id": record.current_run_id}
         return view
 
-    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+    @tool(annotations={"title": "Start Validation Campaign", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
           description="Start a bounded disposable validation campaign for a pull request and return its campaign_id immediately (add wait=true to wait up to 45 s for a quick result; the campaign never stops because a wait ends or the client disconnects). Pins the PR head/base, creates an isolated disposable workspace without publication authority, optionally applies overlay_patch, runs the requested profiles (default python-pytest; each selector or one playwright-spec selector per run) and an optional headless browser scenario, collects evidence, and releases the workspace when finished (or keeps it for publication when propose_push=true and everything passed; that only prepares a plan). It executes code on the isolated runner and writes local campaign state, so a host may ask you to approve it once; it makes no GitHub write. A campaign in which nothing ran is reported as 'completed', never 'passed'. Poll campaign_status; it names the running child run, whose live events test_result streams. idempotency_key (scoped to you and the repository) replays the same campaign for an identical request and refuses a changed request.")
     def validation_campaign(
         repo: str,
@@ -596,7 +596,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 
-    @tool(annotations={"readOnlyHint": True, "openWorldHint": False},
+    @tool(annotations={"title": "Get Validation Campaign Status", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
           description="Check a validation campaign: status, steps, results, artifacts, cleanup state, and (while a profile or browser run is active) the child run_id with its live phase and counts. wait_seconds (0-55) waits server-side for the next change instead of polling. Terminal states: passed, failed, setup_error, timeout, canceled, completed (nothing was validated). 'canceling' means teardown is not yet confirmed (cleanup: pending).")
     def campaign_status(campaign_id: Annotated[str, Field(pattern=r"^cmp-[0-9a-f]{32}$")],
                         wait_seconds: Annotated[float, Field(ge=0.0, le=55.0)] = 0.0) -> dict[str, Any]:
@@ -613,7 +613,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 
-    @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
+    @tool(annotations={"title": "Cancel Validation Campaign", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
           description="Cancel an active validation campaign you started. Stops its running child run and releases its workspace. The result is 'canceled' once teardown is confirmed, or 'canceling' with cleanup 'pending' until the worker finishes; a canceled campaign never later becomes passed or failed.")
     def campaign_cancel(campaign_id: Annotated[str, Field(pattern=r"^cmp-[0-9a-f]{32}$")]) -> dict[str, Any]:
         if campaigns is None or service is None or workspaces is None:
@@ -624,7 +624,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 
-    @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
+    @tool(annotations={"title": "Close Browser Session", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
           description="Close a browser session and discard its step history. Browser runs hold no process or container between calls, so closing only releases the session record.")
     def browser_close(session_id: Annotated[str, Field(pattern=r"^bs-[0-9a-f]{32}$")]) -> dict[str, Any]:
         if sessions is None:
@@ -634,7 +634,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 
-    @tool(annotations={"readOnlyHint": True, "openWorldHint": False},
+    @tool(annotations={"title": "Retrieve Evidence Artifact", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
           description="Retrieve an evidence artifact you produced (screenshot, log, trace) by artifact_id. mode='auto' delivers images as native image content and text as a window; 'text' pages text (offset, length, up to 64 KiB); 'base64' pages any artifact in bounded chunks (use this if your client cannot show images, or for traces); 'metadata' returns the record only. Active content such as HTML or SVG is returned only as inert, labelled-untrusted text. Artifacts record the run, workspace version and exact tested tree, carry a SHA-256, and expire.")
     def artifact_get(artifact_id: Annotated[str, Field(pattern=r"^ar-[0-9a-f]{32}$")], mode: Literal["auto", "metadata", "text", "base64"] = "auto",
                      offset: Annotated[int, Field(ge=0)] = 0, length: Annotated[int | None, Field(ge=1)] = None) -> ToolResult:
@@ -647,7 +647,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         image = delivered.pop("image", None)
         return as_result(delivered, [image] if image else None, limit=70000)
 
-    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+    @tool(annotations={"title": "Plan Workspace Publication", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
           description="Prepare, without performing, the publication of a workspace's changes as ONE additive commit on its PR's head branch. Requires a workspace opened with source='pr_head' and the 'publish' operation in its scope. Binds the exact workspace version and tree, the complete patch (patch_sha256, inline when small), the expected remote head, your commit message, the validation runs recorded for that very tree and the known limitations. Changed paths must pass the same write policy as quick_fix (no CI or workflow files, dependency manifests, scripts, key material, sensitive names). Nothing is written to GitHub. Show the plan to the user; apply it only with publish_apply after their explicit approval.")
     def publish_plan(workspace_id: WorkspaceId, expected_version: Annotated[int, Field(ge=0)], commit_message: str) -> dict[str, Any]:
         if workspaces is None or plans is None:
@@ -668,7 +668,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 
-    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+    @tool(annotations={"title": "Apply Workspace Publication", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
           description="The only tool that writes workspace changes to GitHub: appends the planned commit to the PR head branch. Needs user_authorized=true (only after the user explicitly approved this exact plan) and confirm equal to the plan's confirmation text (or cryptographic approval_token). Refuses if the workspace changed since planning, the recomputed patch differs, or the PR head moved. Same-repository branches use GitHub's atomic expected-head check; contributor forks use a leased fast-forward push with the authenticated user's attribution and GitHub-confirmed maintainer access. Never force-pushes, merges, approves or comments. A plan applies at most once: repeats return the earlier result, and after an uncertain outcome calling this again reconciles against the real remote before writing anything.")
     def publish_apply(plan_id: Annotated[str, Field(pattern=r"^pp-[0-9a-f]{32}$")], confirm: str, user_authorized: bool = False,
                       approval_token: str | None = None) -> dict[str, Any]:
@@ -690,7 +690,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 
-    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+    @tool(annotations={"title": "Plan Draft PR Body Update", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
           description="Prepare, without performing, a body-only update plan for an open draft PR. Strictly permitted only on draft PRs to protect public review context. Binds the exact PR, expected head SHA, current body digest, and replacement markdown. Nothing is written to GitHub. Show the plan to the user; apply it only with pr_body_apply after their explicit approval.")
     def pr_body_plan(repo: str, number: Number, expected_head: SHA, body: str) -> dict[str, Any]:
         if plans is None:
@@ -704,7 +704,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 
-    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+    @tool(annotations={"title": "Apply Draft PR Body Update", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": True},
           description="Apply an approved body update plan to a draft PR. Needs user_authorized=true (only after the user explicitly approved this exact plan) and confirm equal to the plan's confirmation text. Re-verifies live PR state before write: head SHA, current body digest, and that the PR is still a draft. Immediately re-reads after write to verify title, base, head, and draft state remained unchanged.")
     def pr_body_apply(plan_id: Annotated[str, Field(pattern=r"^pb-[0-9a-f]{32}$")], confirm: str, user_authorized: bool = False) -> dict[str, Any]:
         if plans is None:
@@ -721,7 +721,7 @@ def create_server(settings: Settings | None = None, *, remote: bool = False) -> 
         except GitPlusError as err:
             return safe_payload(err.to_dict())
 
-    @tool(annotations={"readOnlyHint": True, "openWorldHint": False},
+    @tool(annotations={"title": "Inspect Server Capabilities", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
               description="Report what this Odytor deployment can actually do: version and source revision, runner protocol, execution profiles, resource limits and which operations exist. Each capability separates installed, configured, operational (observed) and authorized-for-you; nothing is claimed that was not observed. Pass repo to see whether that repository is permitted and has a test policy. probe_runner=true contacts the runner (executes no repository code) to observe it live; without it operational is null, never assumed.")
     def odytor_capabilities(repo: str | None = None, probe_runner: bool = False) -> dict[str, Any]:
         try:

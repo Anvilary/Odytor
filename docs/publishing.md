@@ -3,7 +3,7 @@
 Publication turns a validated workspace change into **one additive commit on the PR's head branch**, and only after
 explicit authorization. It is deliberately two separate acts.
 
-## Plan (`publish_plan`) - read-only
+## Plan (`publish_plan`) - local plan only (no GitHub writes)
 
 Requires a workspace opened with `source="pr_head"` **and** with `publish` in its scope (the default scope does not
 include it). It writes nothing to GitHub. The plan binds:
@@ -59,7 +59,7 @@ A definitive rejection from GitHub leaves the plan pending.
 
 OdyTor also provides a two-phase flow for updating the description of an **open draft pull request** (`draft=true`):
 
-* `pr_body_plan(repo, number, expected_head, body)` (read-only): verifies that the PR is open and still a draft at `expected_head`, records `current_body_digest` and `replacement_body_digest`, and returns a `pb-*` plan and confirmation phrase.
+* `pr_body_plan(repo, number, expected_head, body)` (local plan only, no GitHub writes): verifies that the PR is open and still a draft at `expected_head`, records `current_body_digest` and `replacement_body_digest`, and returns a `pb-*` plan and confirmation phrase.
 * `pr_body_apply(plan_id, confirm, user_authorized=false)` (mutating): requires `ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY=on`, `user_authorized=true`, and the exact confirmation text. Before writing, it re-verifies that the PR is open, still a draft, at `expected_head`, and unchanged from `current_body_digest`. Immediately after the `PATCH`, it re-reads the PR to confirm that title, base ref, base SHA, head SHA, draft status, and body all match invariants.
 
 ## Not covered

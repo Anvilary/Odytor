@@ -142,9 +142,9 @@ OdyTor registers 31 MCP tools consistently across all deployment modes so client
 
 | Tool | Mode | Description |
 | --- | --- | --- |
-| [`publish_plan`](docs/publishing.md) | Read-only | Prepare an immutable publication plan binding workspace tree, patch digest, expected head, validation evidence, and confirmation phrase. |
+| [`publish_plan`](docs/publishing.md) | Local state | Prepare an immutable publication plan binding workspace tree, patch digest, expected head, validation evidence, and confirmation phrase. |
 | [`publish_apply`](docs/publishing.md) | Mutating | Apply an approved `publish_plan` as one additive commit on the PR head (disabled unless `ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY=on`). |
-| [`pr_body_plan`](docs/publishing.md#draft-pr-body-updates-pr_body_plan--pr_body_apply) | Read-only | Prepare a body replacement plan for an open draft pull request, binding `expected_head` and body digests. |
+| [`pr_body_plan`](docs/publishing.md#draft-pr-body-updates-pr_body_plan--pr_body_apply) | Local state | Prepare a body replacement plan for an open draft pull request, binding `expected_head` and body digests. |
 | [`pr_body_apply`](docs/publishing.md#draft-pr-body-updates-pr_body_plan--pr_body_apply) | Mutating | Apply an approved `pr_body_plan` to a draft PR and verify invariants via read-back (disabled unless `ODYTOR_WORKSPACE_ALLOW_PUBLISH_APPLY=on`). |
 | `odytor_capabilities` | Read-only | Report version, build revision, limits, execution profiles, and per-capability `installed` / `configured` / `operational` / `authorized` state. |
 
