@@ -228,10 +228,9 @@ timeout + 60 s.
 
 ## Rollback
 
-* Test feature only: unset `ODYTOR_TEST_RUNNER_COMMAND` and restart. Both tools then answer that test
-  execution is not configured; nothing else changes (OAuth storage, the classic PAT and the other six tools are
-  untouched). The new tools are registered unconditionally and become inert, so no separate un-registration is
-  needed.
+* Test feature only: unset `ODYTOR_TEST_RUNNER_COMMAND` and restart. Execution-backed tools then answer that test
+  execution is not configured; nothing else changes (OAuth storage, the classic PAT, and the non-runner tools are
+  untouched). All 31 tools remain registered unconditionally, so no separate un-registration is needed.
 * Application image: redeploy a previous release image. Persistent OAuth
   storage is a separate volume; never run `docker compose down -v`.
 * Runner configuration: restore the previous `/etc/git-plus-runner/runner.env` and re-run `provision.sh` with the
