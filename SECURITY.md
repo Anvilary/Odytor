@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-OdyTor `0.1.0` (v1 release baseline) is pre-1.0 source-available software. Security fixes are applied to the current release line on `main`. There are no LTS releases, legacy patch branches, or backport commitments.
+OdyTor `0.1.0` (v1 release baseline) is pre-1.0 open-source software. Security fixes are applied to the current release line on `main`. There are no LTS releases, legacy patch branches, or backport commitments.
 
 ## Reporting a vulnerability
 

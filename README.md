@@ -4,12 +4,12 @@
 
 **GitHub pull request operations, isolated validation, and guarded maintenance for AI agents.** Inspect large pull requests within bounded context windows, diagnose CI failures, explore and test changes in disposable Git-object workspaces, run headless browser checks in network-isolated containers, and prepare revision-pinned fixes with explicit human authorization gates.
 
-A source-available project from [Anvilary Tools](https://anvilary.tools).
+An open-source project from [Anvilary Tools](https://anvilary.tools).
 
 <p>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-3776AB.svg?style=flat&logo=python&logoColor=white" alt="Python 3.11+" /></a>
   <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-compatible-4B5563.svg?style=flat" alt="MCP Compatible" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-PolyForm_Noncommercial_1.0.0-blue.svg?style=flat" alt="License: PolyForm Noncommercial 1.0.0" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg?style=flat" alt="License: AGPL-3.0-or-later" /></a>
   <a href="https://anvilary.tools"><img src="https://img.shields.io/badge/Anvilary-Tools-000000.svg?style=flat" alt="Anvilary Tools" /></a>
 </p>
 
@@ -297,10 +297,9 @@ Guidelines:
 
 ## License
 
-OdyTor is distributed under the **[PolyForm Noncommercial License 1.0.0](LICENSE)**.
+OdyTor is distributed under the **[GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later)](LICENSE)**.
 
-- **Noncommercial use permitted**: Free for research, personal study, hobby projects, amateur pursuits, education, and noncommercial organizations.
-- **Commercial use restricted**: Commercial use or commercial deployment requires separate written permission from the rights holder. OdyTor is not OSI-approved open-source software.
+Commercial and noncommercial use are permitted under the license terms. Distribution and remote network interaction with modified versions are subject to the applicable AGPL source-code obligations. Previously published revisions retain the licenses under which they were received.
 
 Copyright (c) 2026 Alexandre Teixeira and Anvilary Tools contributors.
 
